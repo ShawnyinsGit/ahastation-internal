@@ -4,7 +4,7 @@
 // `cwd` (any renderer could read any file ≤512KB on disk, and its isPathSafe
 // check did no realpath resolution, so symlinks escaped the root anyway).
 //
-// Security model here:
+// Security model here (registered via the validators.ts handleSecure gate):
 //  - The renderer NEVER supplies a cwd. The workspace root is resolved from
 //    the window registry: the IPC sender must be a registered editor window,
 //    and the { hostId, cwd } stored at window creation time is used.
@@ -14,11 +14,11 @@
 //    traversal, absolute paths, and symlink escapes.
 //  - Files larger than 512KB are refused.
 
-import { ipcMain } from 'electron';
 import { readdir, readFile, realpath, stat } from 'node:fs/promises';
 import { join, relative, resolve, sep } from 'node:path';
 import { z } from 'zod';
 import { getEditorEntryByWebContentsId } from '../opencode-window-manager.js';
+import { editorWindowSenderPolicy, handleSecure } from './validators.js';
 
 export interface FileEntry {
   name: string;
@@ -100,26 +100,27 @@ export async function resolveConfinedPath(
   return { ok: true, root, target };
 }
 
-function payloadError(err: z.ZodError): string {
-  return err.issues[0]?.message ?? 'Invalid payload';
+function getEditorCwd(senderId: number): string | null {
+  return getEditorEntryByWebContentsId(senderId)?.options.cwd ?? null;
 }
 
 export function registerIdeFilesIpc(): void {
-  ipcMain.handle('ide-files:list', async (event, payload: unknown) => {
-    const entry = getEditorEntryByWebContentsId(event.sender.id);
-    if (!entry) {
-      return { ok: false, error: 'Sender is not a registered editor window' };
-    }
-    const parsed = ideFilesListPayloadSchema.safeParse(payload ?? {});
-    if (!parsed.success) {
-      return { ok: false, error: payloadError(parsed.error) };
-    }
-    const confined = await resolveConfinedPath(entry.options.cwd, parsed.data.path);
-    if (!confined.ok) {
-      return { ok: false, error: confined.error };
-    }
+  handleSecure('ide-files:list', {
+    schema: ideFilesListPayloadSchema,
+    authorize: editorWindowSenderPolicy(),
+    authorizeError: 'Sender is not a registered editor window',
+    handler: async (payload, senderId) => {
+      // authorize already proved registration; re-fetch (with a null-check)
+      // because the window could theoretically close between the two reads.
+      const cwd = getEditorCwd(senderId);
+      if (!cwd) {
+        return { ok: false, error: 'Sender is not a registered editor window' };
+      }
+      const confined = await resolveConfinedPath(cwd, payload.path);
+      if (!confined.ok) {
+        return { ok: false, error: confined.error };
+      }
 
-    try {
       const entries = await readdir(confined.target, { withFileTypes: true });
       const result: FileEntry[] = await Promise.all(
         entries
@@ -144,26 +145,23 @@ export function registerIdeFilesIpc(): void {
       });
 
       return { ok: true, entries: result };
-    } catch (err) {
-      return { ok: false, error: String(err) };
-    }
+    },
   });
 
-  ipcMain.handle('ide-files:read', async (event, payload: unknown) => {
-    const entry = getEditorEntryByWebContentsId(event.sender.id);
-    if (!entry) {
-      return { ok: false, error: 'Sender is not a registered editor window' };
-    }
-    const parsed = ideFilesReadPayloadSchema.safeParse(payload);
-    if (!parsed.success) {
-      return { ok: false, error: payloadError(parsed.error) };
-    }
-    const confined = await resolveConfinedPath(entry.options.cwd, parsed.data.path);
-    if (!confined.ok) {
-      return { ok: false, error: confined.error };
-    }
+  handleSecure('ide-files:read', {
+    schema: ideFilesReadPayloadSchema,
+    authorize: editorWindowSenderPolicy(),
+    authorizeError: 'Sender is not a registered editor window',
+    handler: async (payload, senderId) => {
+      const cwd = getEditorCwd(senderId);
+      if (!cwd) {
+        return { ok: false, error: 'Sender is not a registered editor window' };
+      }
+      const confined = await resolveConfinedPath(cwd, payload.path);
+      if (!confined.ok) {
+        return { ok: false, error: confined.error };
+      }
 
-    try {
       const stats = await stat(confined.target);
       if (!stats.isFile()) {
         return { ok: false, error: 'Not a file' };
@@ -181,8 +179,6 @@ export function registerIdeFilesIpc(): void {
           truncated: false,
         } as FileContent,
       };
-    } catch (err) {
-      return { ok: false, error: String(err) };
-    }
+    },
   });
 }

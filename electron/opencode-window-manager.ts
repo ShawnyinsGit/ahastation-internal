@@ -72,7 +72,10 @@ export function createOpenCodeEditorWindow(options: OpenCodeEditorWindowOptions)
     maximizable: true,
     fullscreenable: true,
     webPreferences: {
-      preload: join(__dirname, 'preload.cjs'),
+      // Narrow preload (editor view only needs ideFiles.list/read) — the
+      // full meeting control surface in preload.cjs stays exclusive to the
+      // main / settings / popout windows.
+      preload: join(__dirname, 'preload-editor.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
