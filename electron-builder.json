@@ -18,6 +18,7 @@
     "**/node_modules/@openai/codex-win32-*/**/*",
     "**/node_modules/@qoder-ai/qodercli/**/*",
     "**/node_modules/@lydell/node-pty-*/**/*",
+    "**/node_modules/opencode-*/bin/**",
     "dist/vad/**/*",
     "dist/voice-id/**/*"
   ],
