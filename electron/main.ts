@@ -334,7 +334,7 @@ async function registerAllIpc(ctx: IpcContext): Promise<void> {
     { registerBackendAuthIpc },
     { registerPopoutWindowIpc },
     { registerOpenCodeEditorIpc },
-    { registerOpenCodeFilesIpc },
+    { registerIdeFilesIpc },
   ] = await Promise.all([
     import('./ipc/session.js'),
     import('./ipc/sessions.js'),
@@ -355,7 +355,7 @@ async function registerAllIpc(ctx: IpcContext): Promise<void> {
     import('./ipc/backend-auth.js'),
     import('./ipc/popout-window.js'),
     import('./ipc/opencode-editor.js'),
-    import('./ipc/opencode-files.js'),
+    import('./ipc/ide-files.js'),
   ]);
   _flushOpenTabsNow = flushOpenTabsNow;
   registerSessionIpc(ctx);
@@ -376,8 +376,8 @@ async function registerAllIpc(ctx: IpcContext): Promise<void> {
   registerBrowserIpc(browserTabManager);
   registerBackendAuthIpc();
   registerPopoutWindowIpc();
-  registerOpenCodeEditorIpc();
-  registerOpenCodeFilesIpc();
+  registerOpenCodeEditorIpc(ctx);
+  registerIdeFilesIpc();
   // Register custom backends from settings so they appear in the backend list
   registerCustomBackends();
 }

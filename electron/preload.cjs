@@ -132,12 +132,14 @@ const api = {
   },
   openCodeEditor: {
     open: (payload) => ipcRenderer.invoke('opencode-editor:open', payload),
-    close: (backendId, sessionId) => ipcRenderer.invoke('opencode-editor:close', { backendId, sessionId }),
+    close: (hostId) => ipcRenderer.invoke('opencode-editor:close', { hostId }),
     list: () => ipcRenderer.invoke('opencode-editor:list'),
   },
-  openCodeFiles: {
-    list: (cwd, path) => ipcRenderer.invoke('opencode-files:list', { cwd, path }),
-    read: (cwd, path) => ipcRenderer.invoke('opencode-files:read', { cwd, path }),
+  // Secure editor file browsing. No cwd is ever sent — the main process
+  // resolves the workspace from the sender's editor-window registration.
+  ideFiles: {
+    list: (path) => ipcRenderer.invoke('ide-files:list', { path }),
+    read: (path) => ipcRenderer.invoke('ide-files:read', { path }),
   },
   popoutSession: (tabId) => ipcRenderer.invoke('popout:open-session', { tabId }),
   popoutStage: (windowId, type) => ipcRenderer.invoke('popout:open-stage', { windowId, type }),

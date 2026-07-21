@@ -1,8 +1,10 @@
 // opencode-window-manager.ts — manages independent OpenCode editor windows.
 //
-// Each digital employee (CLI backend) can have its own editor window. Windows
-// are keyed by backendId + sessionId so multiple employees can have editors
-// open simultaneously.
+// Each digital employee (CLI backend participant) can have its own editor
+// window. Windows are keyed by hostId — NOT backendId:sessionId. The old
+// composite key collided whenever two participants in the same meeting ran
+// the same backend (e.g. two OpenCode workers share backendId + meeting tab
+// sessionId), which made the second editor window impossible to open.
 
 import { BrowserWindow, app, nativeTheme } from 'electron';
 import { join, dirname } from 'node:path';
@@ -12,13 +14,14 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 export interface OpenCodeEditorWindowOptions {
+  hostId: string;
   backendId: string;
   sessionId: string;
   cwd: string;
   title?: string;
 }
 
-interface EditorWindowEntry {
+export interface EditorWindowEntry {
   win: BrowserWindow;
   options: OpenCodeEditorWindowOptions;
 }
@@ -29,12 +32,26 @@ function getThemeBackgroundColor(): string {
   return nativeTheme.shouldUseDarkColors ? '#1c1c1e' : '#f2f2f7';
 }
 
-function windowKey(backendId: string, sessionId: string): string {
-  return `${backendId}:${sessionId}`;
+/** Primary key for editor windows. Exported as a pure function so tests can
+ *  pin the uniqueness contract without instantiating BrowserWindow. */
+export function editorWindowKey(hostId: string): string {
+  return hostId;
+}
+
+/** Reverse lookup used by the ide-files IPC: given the webContents id of an
+ *  IPC sender, return the editor window entry it belongs to (or null when the
+ *  sender is not a registered editor window). */
+export function getEditorEntryByWebContentsId(id: number): EditorWindowEntry | null {
+  for (const entry of editorWindows.values()) {
+    if (!entry.win.isDestroyed() && entry.win.webContents.id === id) {
+      return entry;
+    }
+  }
+  return null;
 }
 
 export function createOpenCodeEditorWindow(options: OpenCodeEditorWindowOptions): BrowserWindow {
-  const key = windowKey(options.backendId, options.sessionId);
+  const key = editorWindowKey(options.hostId);
   const existing = editorWindows.get(key);
   if (existing && !existing.win.isDestroyed()) {
     existing.win.focus();
@@ -46,7 +63,7 @@ export function createOpenCodeEditorWindow(options: OpenCodeEditorWindowOptions)
   const win = new BrowserWindow({
     width: 1200,
     height: 800,
-    title: options.title ?? `OpenCode - ${options.backendId}`,
+    title: options.title ?? `OpenCode - ${options.hostId}`,
     backgroundColor: getThemeBackgroundColor(),
     transparent: false,
     titleBarStyle: 'default',
@@ -59,6 +76,11 @@ export function createOpenCodeEditorWindow(options: OpenCodeEditorWindowOptions)
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      // Dedicated in-memory session so this window's CSP handler does NOT
+      // overwrite the default-session handler shared by the main / popout /
+      // settings windows (their conflicting handlers are a separate known
+      // issue, intentionally untouched here).
+      partition: 'opencode-editor',
     },
   });
 
@@ -69,7 +91,11 @@ export function createOpenCodeEditorWindow(options: OpenCodeEditorWindowOptions)
     editorWindows.delete(key);
   });
 
-  // CSP injection
+  // CSP injection. Dev keeps the vite origin + HMR websocket; prod is fully
+  // self-contained. No `http://localhost:*` connect-src wildcard in either
+  // mode, and no eval tokens in prod — the editor view runs neither the
+  // ONNX/VAD stack nor any eval-based tooling, so the eval surface is free
+  // to give up.
   const devOrigin = dev ? new URL(process.env.VITE_DEV_SERVER_URL!).origin : '';
   const devWsOrigin = dev ? devOrigin.replace(/^http/, 'ws') : '';
   const csp = dev
@@ -80,7 +106,7 @@ export function createOpenCodeEditorWindow(options: OpenCodeEditorWindowOptions)
         `img-src 'self' data: blob: ${devOrigin}`,
         `media-src 'self' blob: data: ${devOrigin}`,
         `font-src 'self' data: ${devOrigin}`,
-        `connect-src 'self' ${devOrigin} ${devWsOrigin} http://localhost:*`,
+        `connect-src 'self' ${devOrigin} ${devWsOrigin}`,
         `worker-src 'self' blob:`,
         `frame-src blob:`,
         `object-src 'none'`,
@@ -88,12 +114,12 @@ export function createOpenCodeEditorWindow(options: OpenCodeEditorWindowOptions)
       ].join('; ')
     : [
         `default-src 'self'`,
-        `script-src 'self' 'wasm-unsafe-eval' 'unsafe-eval'`,
+        `script-src 'self'`,
         `style-src 'self' 'unsafe-inline'`,
         `img-src 'self' data: blob:`,
         `media-src 'self' blob: data:`,
         `font-src 'self' data:`,
-        `connect-src 'self' http://localhost:*`,
+        `connect-src 'self'`,
         `worker-src 'self' blob:`,
         `frame-src blob:`,
         `object-src 'none'`,
@@ -113,9 +139,10 @@ export function createOpenCodeEditorWindow(options: OpenCodeEditorWindowOptions)
   });
 
   // Load the editor UI with query params so the renderer knows which
-  // backend/session to display.
+  // host/backend/session to display.
   const query = new URLSearchParams({
     view: 'opencode-editor',
+    hostId: options.hostId,
     backendId: options.backendId,
     sessionId: options.sessionId,
     cwd: options.cwd,
@@ -131,19 +158,25 @@ export function createOpenCodeEditorWindow(options: OpenCodeEditorWindowOptions)
   return win;
 }
 
-export function closeOpenCodeEditorWindow(backendId: string, sessionId: string): void {
-  const key = windowKey(backendId, sessionId);
+export function closeOpenCodeEditorWindow(hostId: string): void {
+  const key = editorWindowKey(hostId);
   const entry = editorWindows.get(key);
   if (entry && !entry.win.isDestroyed()) {
     entry.win.close();
   }
 }
 
-export function listOpenCodeEditorWindows(): Array<{ backendId: string; sessionId: string; focused: boolean }> {
-  const result: Array<{ backendId: string; sessionId: string; focused: boolean }> = [];
+export function listOpenCodeEditorWindows(): Array<{
+  hostId: string;
+  backendId: string;
+  sessionId: string;
+  focused: boolean;
+}> {
+  const result: Array<{ hostId: string; backendId: string; sessionId: string; focused: boolean }> = [];
   for (const entry of editorWindows.values()) {
     if (!entry.win.isDestroyed()) {
       result.push({
+        hostId: entry.options.hostId,
         backendId: entry.options.backendId,
         sessionId: entry.options.sessionId,
         focused: entry.win.isFocused(),

@@ -6,6 +6,7 @@ import { ChevronRight, ChevronDown, File, Folder, RefreshCw } from 'lucide-react
 import type { FileEntry } from '../types';
 
 interface OpenCodeEditorProps {
+  hostId: string;
   backendId: string;
   sessionId: string;
   cwd: string;
@@ -16,7 +17,7 @@ interface FileNode extends FileEntry {
   expanded?: boolean;
 }
 
-export function OpenCodeEditor({ backendId, sessionId, cwd }: OpenCodeEditorProps) {
+export function OpenCodeEditor({ hostId, backendId, sessionId, cwd }: OpenCodeEditorProps) {
   const [files, setFiles] = useState<FileNode[]>([]);
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [fileContent, setFileContent] = useState<string>('');
@@ -25,7 +26,9 @@ export function OpenCodeEditor({ backendId, sessionId, cwd }: OpenCodeEditorProp
 
   const loadFiles = useCallback(async (path?: string) => {
     try {
-      const result = await window.vibeMeet.openCodeFiles.list(cwd, path);
+      // No cwd is sent — the main process resolves the workspace from this
+      // window's registration (keyed by hostId at window creation).
+      const result = await window.vibeMeet.ideFiles.list(path);
       if (result.ok) {
         return result.entries.map((e) => ({ ...e, expanded: false }));
       }
@@ -34,7 +37,7 @@ export function OpenCodeEditor({ backendId, sessionId, cwd }: OpenCodeEditorProp
       console.error('[OpenCodeEditor] loadFiles failed:', err);
       return [];
     }
-  }, [cwd]);
+  }, []);
 
   useEffect(() => {
     loadFiles().then(setFiles);
@@ -71,7 +74,7 @@ export function OpenCodeEditor({ backendId, sessionId, cwd }: OpenCodeEditorProp
     setLoading(true);
     setError(null);
     try {
-      const result = await window.vibeMeet.openCodeFiles.read(cwd, node.path);
+      const result = await window.vibeMeet.ideFiles.read(node.path);
       if (result.ok) {
         setFileContent(result.file.content);
       } else {
@@ -134,7 +137,7 @@ export function OpenCodeEditor({ backendId, sessionId, cwd }: OpenCodeEditorProp
         </button>
         <div className="opencode-editor-title">
           <span className="opencode-editor-backend">{backendId}</span>
-          <span className="opencode-editor-session">{sessionId}</span>
+          <span className="opencode-editor-session">{hostId}</span>
         </div>
         <button
           type="button"
@@ -184,6 +187,7 @@ export function OpenCodeEditor({ backendId, sessionId, cwd }: OpenCodeEditorProp
             <div className="opencode-editor-placeholder">
               <h2>OpenCode 编辑器</h2>
               <p>后端: {backendId}</p>
+              <p>参会者: {hostId}</p>
               <p>会话: {sessionId}</p>
               <p>目录: {cwd}</p>
               <p>从左侧文件树选择一个文件开始查看。</p>

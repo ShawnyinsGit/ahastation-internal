@@ -19,5 +19,6 @@ export const BrowserWindow = class {
 };
 export const safeStorage = { encryptString: () => Buffer.alloc(0), decryptString: () => '' };
 export const screen = { getPrimaryDisplay: () => ({ workAreaSize: { width: 1920, height: 1080 } }) };
+export const nativeTheme = { shouldUseDarkColors: false, on: () => {} };
 
-export default { app, ipcMain, dialog, desktopCapturer, systemPreferences, shell, BrowserWindow, safeStorage, screen };
+export default { app, ipcMain, dialog, desktopCapturer, systemPreferences, shell, BrowserWindow, safeStorage, screen, nativeTheme };

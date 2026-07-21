@@ -1,4 +1,4 @@
-# vibe-meet — Codex working notes
+# AhaStation (AhaMeet client) — Codex working notes
 
 ## Environment paths
 
@@ -44,5 +44,20 @@ break without the other noticing.
 - `npm run build` — vite + tsc, no installer.
 - `npm run dist:dmg` — full release flow: downloads whisper, bundles Codex
   defaults, builds, then runs `electron-builder --mac --arm64 --publish never`.
-  Output lands in `release/` as `Vibe Meet-<version>-arm64.dmg` (unsigned;
-  `identity` is explicitly null in `electron-builder.json`).
+  Output lands in `release/` as `AhaMeet-<version>-arm64.dmg`.
+
+### macOS signing
+
+`electron-builder.json` sets no `identity`, so electron-builder signs with
+whatever identity the environment provides (`CSC_NAME` / keychain). Two
+safeguards wrap the build:
+
+- `scripts/sign-helpers.mjs` (electron-builder `afterPack` hook) re-signs the
+  bundled whisper.cpp helpers with a Developer ID certificate so notarization
+  doesn't reject ad-hoc executables. Identity comes from
+  `$APPLE_HELPER_IDENTITY`, then `$CSC_NAME`, then `mac.identity`; when none
+  is set it logs a warning and skips (local dev builds).
+- `node scripts/verify-macos-signing.mjs` runs at the end of both `dist` and
+  `dist:dmg` and hard-fails the release unless `release/mac-arm64/AhaMeet.app`
+  carries a Developer ID Application signature, a TeamIdentifier, and the
+  audio-input entitlement.

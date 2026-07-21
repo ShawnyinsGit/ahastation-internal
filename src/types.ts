@@ -421,13 +421,13 @@ export interface VibeMeetApi {
     close: () => Promise<{ ok: boolean }>;
   };
   openCodeEditor: {
-    open: (payload: { backendId: string; sessionId: string; cwd: string; title?: string }) => Promise<{ ok: boolean; error?: string }>;
-    close: (backendId: string, sessionId: string) => Promise<{ ok: boolean; error?: string }>;
-    list: () => Promise<{ ok: true; windows: Array<{ backendId: string; sessionId: string; focused: boolean }> } | { ok: false; error: string }>;
+    open: (payload: { backendId: string; hostId: string; sessionId: string; cwd: string; title?: string }) => Promise<{ ok: boolean; error?: string }>;
+    close: (hostId: string) => Promise<{ ok: boolean; error?: string }>;
+    list: () => Promise<{ ok: true; windows: Array<{ hostId: string; backendId: string; sessionId: string; focused: boolean }> } | { ok: false; error: string }>;
   };
-  openCodeFiles: {
-    list: (cwd: string, path?: string) => Promise<{ ok: true; entries: FileEntry[] } | { ok: false; error: string }>;
-    read: (cwd: string, path: string) => Promise<{ ok: true; file: FileContent } | { ok: false; error: string }>;
+  ideFiles: {
+    list: (path?: string) => Promise<{ ok: true; entries: FileEntry[] } | { ok: false; error: string }>;
+    read: (path: string) => Promise<{ ok: true; file: FileContent } | { ok: false; error: string }>;
   };
   popoutSession: (tabId: string) => Promise<{ ok: boolean }>;
   popoutStage: (windowId: string, type: string) => Promise<{ ok: boolean }>;
