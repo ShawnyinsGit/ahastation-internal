@@ -1,0 +1,188 @@
+// ide-files.ts — secure file-browsing IPC for OpenCode editor windows.
+//
+// Replaces the removed opencode-files IPC, which trusted a renderer-supplied
+// `cwd` (any renderer could read any file ≤512KB on disk, and its isPathSafe
+// check did no realpath resolution, so symlinks escaped the root anyway).
+//
+// Security model here:
+//  - The renderer NEVER supplies a cwd. The workspace root is resolved from
+//    the window registry: the IPC sender must be a registered editor window,
+//    and the { hostId, cwd } stored at window creation time is used.
+//  - Payloads are validated with zod (strict — unknown keys rejected).
+//  - Both the root and the target go through realpath; the resolved target
+//    must equal the resolved root or live underneath it. This closes `..`
+//    traversal, absolute paths, and symlink escapes.
+//  - Files larger than 512KB are refused.
+
+import { ipcMain } from 'electron';
+import { readdir, readFile, realpath, stat } from 'node:fs/promises';
+import { join, relative, resolve, sep } from 'node:path';
+import { z } from 'zod';
+import { getEditorEntryByWebContentsId } from '../opencode-window-manager.js';
+
+export interface FileEntry {
+  name: string;
+  path: string;
+  isDir: boolean;
+  size: number;
+  modifiedAt: number;
+}
+
+export interface FileContent {
+  path: string;
+  content: string;
+  truncated: boolean;
+}
+
+const MAX_FILE_SIZE = 512 * 1024; // 512KB
+const MAX_PATH_LENGTH = 4096;
+
+// Heavy or noise directories hidden from the editor file tree.
+const SKIP_DIRS = new Set([
+  'node_modules',
+  '.git',
+  'dist',
+  'dist-electron',
+  'release',
+  '.next',
+  'coverage',
+]);
+
+export const ideFilesListPayloadSchema = z
+  .object({ path: z.string().max(MAX_PATH_LENGTH).optional() })
+  .strict();
+
+export const ideFilesReadPayloadSchema = z
+  .object({ path: z.string().min(1).max(MAX_PATH_LENGTH) })
+  .strict();
+
+/** Pure confinement check on already-resolved paths: target must be the root
+ *  itself or a descendant. The trailing-separator comparison is what rejects
+ *  sibling-prefix traps like root=/a/b vs target=/a/bc. Exported for tests. */
+export function isPathConfined(root: string, target: string): boolean {
+  return target === root || target.startsWith(root + sep);
+}
+
+export type ConfinedPathResult =
+  | { ok: true; root: string; target: string }
+  | { ok: false; error: string };
+
+/** Resolve relPath against root and confine the result to root, with symlink
+ *  resolution on BOTH ends. Missing targets are reported as not-found (the
+ *  ENOENT case) instead of leaking errno details. Exported for tests. */
+export async function resolveConfinedPath(
+  workspaceRoot: string,
+  relPath?: string,
+): Promise<ConfinedPathResult> {
+  let root: string;
+  try {
+    root = await realpath(resolve(workspaceRoot));
+  } catch {
+    return { ok: false, error: 'Workspace root not found' };
+  }
+
+  // resolve() also neutralizes absolute relPath tricks: an absolute second
+  // argument discards root entirely, and the confinement check below then
+  // rejects it (unless it happens to land back inside root).
+  const candidate = resolve(root, relPath ?? '.');
+  let target: string;
+  try {
+    target = await realpath(candidate);
+  } catch {
+    // ENOENT (missing file), ELOOP (symlink loop), ENOTDIR, EACCES — all
+    // collapse to a single not-found answer.
+    return { ok: false, error: 'Path not found' };
+  }
+
+  if (!isPathConfined(root, target)) {
+    return { ok: false, error: 'Path outside workspace' };
+  }
+  return { ok: true, root, target };
+}
+
+function payloadError(err: z.ZodError): string {
+  return err.issues[0]?.message ?? 'Invalid payload';
+}
+
+export function registerIdeFilesIpc(): void {
+  ipcMain.handle('ide-files:list', async (event, payload: unknown) => {
+    const entry = getEditorEntryByWebContentsId(event.sender.id);
+    if (!entry) {
+      return { ok: false, error: 'Sender is not a registered editor window' };
+    }
+    const parsed = ideFilesListPayloadSchema.safeParse(payload ?? {});
+    if (!parsed.success) {
+      return { ok: false, error: payloadError(parsed.error) };
+    }
+    const confined = await resolveConfinedPath(entry.options.cwd, parsed.data.path);
+    if (!confined.ok) {
+      return { ok: false, error: confined.error };
+    }
+
+    try {
+      const entries = await readdir(confined.target, { withFileTypes: true });
+      const result: FileEntry[] = await Promise.all(
+        entries
+          .filter((e) => !(e.isDirectory() && SKIP_DIRS.has(e.name)))
+          .map(async (e) => {
+            const fullPath = join(confined.target, e.name);
+            const stats = await stat(fullPath).catch(() => null);
+            return {
+              name: e.name,
+              path: relative(confined.root, fullPath),
+              isDir: e.isDirectory(),
+              size: stats?.size ?? 0,
+              modifiedAt: stats?.mtimeMs ?? 0,
+            };
+          }),
+      );
+
+      // Sort: dirs first, then files, alphabetically
+      result.sort((a, b) => {
+        if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
+        return a.name.localeCompare(b.name);
+      });
+
+      return { ok: true, entries: result };
+    } catch (err) {
+      return { ok: false, error: String(err) };
+    }
+  });
+
+  ipcMain.handle('ide-files:read', async (event, payload: unknown) => {
+    const entry = getEditorEntryByWebContentsId(event.sender.id);
+    if (!entry) {
+      return { ok: false, error: 'Sender is not a registered editor window' };
+    }
+    const parsed = ideFilesReadPayloadSchema.safeParse(payload);
+    if (!parsed.success) {
+      return { ok: false, error: payloadError(parsed.error) };
+    }
+    const confined = await resolveConfinedPath(entry.options.cwd, parsed.data.path);
+    if (!confined.ok) {
+      return { ok: false, error: confined.error };
+    }
+
+    try {
+      const stats = await stat(confined.target);
+      if (!stats.isFile()) {
+        return { ok: false, error: 'Not a file' };
+      }
+      if (stats.size > MAX_FILE_SIZE) {
+        return { ok: false, error: 'File too large' };
+      }
+
+      const content = await readFile(confined.target, 'utf-8');
+      return {
+        ok: true,
+        file: {
+          path: relative(confined.root, confined.target),
+          content,
+          truncated: false,
+        } as FileContent,
+      };
+    } catch (err) {
+      return { ok: false, error: String(err) };
+    }
+  });
+}

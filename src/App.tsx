@@ -383,6 +383,7 @@ export function App() {
     const title = `${backendId} - ${hostId}`;
     void window.vibeMeet.openCodeEditor.open({
       backendId,
+      hostId,
       sessionId,
       cwd,
       title,

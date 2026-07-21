@@ -25,8 +25,8 @@ if (isPopoutView) {
 }
 
 if (isOpenCodeEditorView) {
-  const backendId = params.get('backendId') ?? 'unknown';
-  document.title = `OpenCode — ${backendId}`;
+  const hostId = params.get('hostId') ?? 'unknown';
+  document.title = `OpenCode — ${hostId}`;
 }
 
 const root = createRoot(document.getElementById('root')!);
@@ -38,6 +38,7 @@ root.render(
         ? <PopoutPlaceholder />
         : isOpenCodeEditorView
           ? <OpenCodeEditor
+              hostId={params.get('hostId') ?? ''}
               backendId={params.get('backendId') ?? ''}
               sessionId={params.get('sessionId') ?? ''}
               cwd={params.get('cwd') ?? ''}
