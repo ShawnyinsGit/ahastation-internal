@@ -41,7 +41,7 @@ const provider = (process.env.AHAMEET_E2E_PROVIDER?.trim() || 'anthropic').toLow
 const PROVIDER_PRESETS = {
   anthropic: { model: 'anthropic/claude-sonnet-4-5', baseUrl: undefined, keyVar: 'ANTHROPIC_API_KEY' },
   openai: { model: 'openai/gpt-5.4', baseUrl: undefined, keyVar: 'OPENAI_API_KEY' },
-  kimi: { model: 'openai/kimi-k2-0905-preview', baseUrl: 'https://api.moonshot.cn/v1', keyVar: 'OPENAI_API_KEY' },
+  kimi: { model: 'openai/kimi-k3', baseUrl: 'https://api.moonshot.cn/v1', keyVar: 'OPENAI_API_KEY' },
 };
 const preset = PROVIDER_PRESETS[provider];
 
