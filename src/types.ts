@@ -60,6 +60,55 @@ export type EditorPanelEvent =
 
 export const EDITOR_ACTIVITY_CAP = 200;
 
+// ── IDE registry (Phase 3) ─────────────────────────────────────────────────
+
+export interface EditorCapabilities {
+  events: boolean;
+  pty: boolean;
+  fileWrite: false;
+  diff: boolean;
+  todo: boolean;
+  permissions: boolean;
+}
+
+export const NO_EDITOR_CAPABILITIES: EditorCapabilities = {
+  events: false,
+  pty: false,
+  fileWrite: false,
+  diff: false,
+  todo: false,
+  permissions: false,
+};
+
+/** Parse the `caps` editor-window query param (mirror of the electron-side
+ *  parseEditorCapabilities in ide-adapter.ts). */
+export function parseEditorCapabilities(raw: string | null): EditorCapabilities {
+  const set = new Set((raw ?? '').split(',').filter(Boolean));
+  return {
+    events: set.has('events'),
+    pty: set.has('pty'),
+    fileWrite: false,
+    diff: set.has('diff'),
+    todo: set.has('todo'),
+    permissions: set.has('permissions'),
+  };
+}
+
+export interface IdeInfo {
+  id: string;
+  displayName: string;
+  description: string;
+  installed: boolean;
+  version: string | null;
+  comingSoon: boolean;
+}
+
+export interface IdeRegistryState {
+  ides: IdeInfo[];
+  defaultIdeId: string;
+  perHostOverride: Record<string, string>;
+}
+
 export type AgentSource = 'talker' | string;
 
 export type WorkerStatus = 'pending' | 'running' | 'interrupted' | 'done' | 'failed';
@@ -471,6 +520,11 @@ export interface VibeMeetApi {
     open: (payload: { backendId: string; hostId: string; sessionId: string; cwd: string; title?: string }) => Promise<{ ok: boolean; error?: string }>;
     close: (hostId: string) => Promise<{ ok: boolean; error?: string }>;
     list: () => Promise<{ ok: true; windows: Array<{ hostId: string; backendId: string; sessionId: string; focused: boolean }> } | { ok: false; error: string }>;
+  };
+  ideRegistry: {
+    list: () => Promise<{ ok: true; state: IdeRegistryState } | { ok: false; error: string }>;
+    setDefault: (id: string) => Promise<{ ok: boolean; error?: string }>;
+    setOverride: (hostId: string, ideId: string | null) => Promise<{ ok: boolean; error?: string }>;
   };
   ideFiles: {
     list: (path?: string) => Promise<{ ok: true; entries: FileEntry[] } | { ok: false; error: string }>;

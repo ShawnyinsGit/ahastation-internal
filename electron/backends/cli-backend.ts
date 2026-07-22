@@ -137,6 +137,8 @@ export interface BackendSessionConfig {
   /** Meeting host this session belongs to (set by the orchestrator backend
    *  bridge). Adapters use it for hostId-keyed fan-out (editor windows). */
   hostId?: string;
+  /** Meeting tab id (server-registry key component). */
+  meetingId?: string;
 }
 
 export interface BackendSessionSnapshot {

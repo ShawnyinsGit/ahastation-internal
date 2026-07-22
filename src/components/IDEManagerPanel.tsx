@@ -1,81 +1,49 @@
 // IDEManagerPanel — settings panel for managing AI IDE backends.
-// Shows installed IDEs, available IDEs, and lets the user switch the default
-// IDE used for independent editor windows.
+// Real data from the main-process IdeRegistry (detection + persisted
+// default); Hermes/Pi are catalog stubs shown as 即将支持.
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Check, Download, Settings, Star } from 'lucide-react';
-
-interface IDEInfo {
-  id: string;
-  name: string;
-  description: string;
-  installed: boolean;
-  version?: string;
-  isDefault: boolean;
-  iconId: string;
-}
-
-const AVAILABLE_IDES: IDEInfo[] = [
-  {
-    id: 'opencode',
-    name: 'OpenCode',
-    description: '开源 AI coding agent，terminal + desktop + IDE',
-    installed: true,
-    isDefault: true,
-    iconId: 'opencode',
-  },
-  {
-    id: 'hermes',
-    name: 'Hermes Agent',
-    description: 'Nous Research 开源 CLI agent，自我改进技能',
-    installed: false,
-    isDefault: false,
-    iconId: 'hermes',
-  },
-  {
-    id: 'pi',
-    name: 'Pi Agent',
-    description: '极简 agent harness，轻量可扩展',
-    installed: false,
-    isDefault: false,
-    iconId: 'pi',
-  },
-];
+import type { IdeRegistryState } from '../types';
 
 export function IDEManagerPanel() {
-  const [ides, setIdes] = useState<IDEInfo[]>(AVAILABLE_IDES);
-  const [installing, setInstalling] = useState<string | null>(null);
+  const [state, setState] = useState<IdeRegistryState | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
 
-  useEffect(() => {
-    // TODO: load actual installed state from backend registry
-    // For now, use static data
+  const refresh = useCallback(async () => {
+    try {
+      const res = await window.vibeMeet.ideRegistry.list();
+      if (res.ok) {
+        setState(res.state);
+        setError(null);
+      } else {
+        setError(res.error);
+      }
+    } catch (err) {
+      setError(String(err));
+    }
   }, []);
 
-  const handleSetDefault = (id: string) => {
-    setIdes((prev) =>
-      prev.map((ide) => ({
-        ...ide,
-        isDefault: ide.id === id,
-      })),
-    );
-    // TODO: persist to settings
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const handleSetDefault = async (id: string) => {
+    setBusy(id);
+    try {
+      const res = await window.vibeMeet.ideRegistry.setDefault(id);
+      if (!res.ok) setError(res.error ?? '设为默认失败');
+      await refresh();
+    } finally {
+      setBusy(null);
+    }
   };
 
-  const handleInstall = async (id: string) => {
-    setInstalling(id);
-    // TODO: trigger actual installation
-    await new Promise((resolve) => setTimeout(resolve, 1500));
-    setIdes((prev) =>
-      prev.map((ide) =>
-        ide.id === id ? { ...ide, installed: true } : ide,
-      ),
-    );
-    setInstalling(null);
-  };
-
+  const ides = state?.ides ?? [];
   const installedIdes = ides.filter((ide) => ide.installed);
-  const availableIdes = ides.filter((ide) => !ide.installed);
-  const defaultIde = ides.find((ide) => ide.isDefault);
+  const upcomingIdes = ides.filter((ide) => !ide.installed);
+  const defaultIde = ides.find((ide) => ide.id === state?.defaultIdeId && ide.installed);
 
   return (
     <section className="ide-manager-panel">
@@ -86,6 +54,8 @@ export function IDEManagerPanel() {
         </p>
       </div>
 
+      {error && <div className="ide-manager-empty">加载失败：{error}</div>}
+
       {/* Current default */}
       {defaultIde && (
         <div className="ide-manager-current">
@@ -95,7 +65,7 @@ export function IDEManagerPanel() {
               <Star size={20} />
             </div>
             <div className="ide-manager-ide-info">
-              <div className="ide-manager-ide-name">{defaultIde.name}</div>
+              <div className="ide-manager-ide-name">{defaultIde.displayName}</div>
               <div className="ide-manager-ide-desc">{defaultIde.description}</div>
             </div>
             <div className="ide-manager-ide-badge ui-badge ui-badge-accent">默认</div>
@@ -116,16 +86,22 @@ export function IDEManagerPanel() {
                   <Settings size={20} />
                 </div>
                 <div className="ide-manager-ide-info">
-                  <div className="ide-manager-ide-name">{ide.name}</div>
+                  <div className="ide-manager-ide-name">
+                    {ide.displayName}
+                    {ide.version && (
+                      <span className="ide-manager-ide-version"> v{ide.version}</span>
+                    )}
+                  </div>
                   <div className="ide-manager-ide-desc">{ide.description}</div>
                 </div>
-                {ide.isDefault ? (
+                {ide.id === state?.defaultIdeId ? (
                   <div className="ide-manager-ide-badge ui-badge ui-badge-accent">默认</div>
                 ) : (
                   <button
                     type="button"
                     className="ui-btn ui-btn-sm"
-                    onClick={() => handleSetDefault(ide.id)}
+                    onClick={() => void handleSetDefault(ide.id)}
+                    disabled={busy === ide.id}
                   >
                     设为默认
                   </button>
@@ -136,29 +112,24 @@ export function IDEManagerPanel() {
         )}
       </div>
 
-      {/* Available IDEs */}
+      {/* Upcoming IDEs */}
       <div className="ide-manager-section">
-        <div className="ide-manager-section-title">可安装 IDE</div>
-        {availableIdes.length === 0 ? (
-          <div className="ide-manager-empty">暂无可安装 IDE</div>
+        <div className="ide-manager-section-title">即将支持</div>
+        {upcomingIdes.length === 0 ? (
+          <div className="ide-manager-empty">暂无</div>
         ) : (
           <div className="ide-manager-list">
-            {availableIdes.map((ide) => (
+            {upcomingIdes.map((ide) => (
               <div key={ide.id} className="ide-manager-ide-card">
                 <div className="ide-manager-ide-icon">
                   <Download size={20} />
                 </div>
                 <div className="ide-manager-ide-info">
-                  <div className="ide-manager-ide-name">{ide.name}</div>
+                  <div className="ide-manager-ide-name">{ide.displayName}</div>
                   <div className="ide-manager-ide-desc">{ide.description}</div>
                 </div>
-                <button
-                  type="button"
-                  className="ui-btn ui-btn-sm ui-btn-primary"
-                  onClick={() => handleInstall(ide.id)}
-                  disabled={installing === ide.id}
-                >
-                  {installing === ide.id ? '安装中...' : '安装'}
+                <button type="button" className="ui-btn ui-btn-sm" disabled>
+                  即将支持
                 </button>
               </div>
             ))}
