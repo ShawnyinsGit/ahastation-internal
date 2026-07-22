@@ -9,6 +9,7 @@ import type { IpcContext, IpcEmittedEvent } from './ipc/context.js';
 import { BrowserTabManager } from './browser-tab-manager.js';
 import { requestMicrophoneAccess } from './microphone-access.js';
 import { checkForUpdateCached } from './update-check.js';
+import { getCompanionFeed } from './companion/companion-feed.js';
 import {
   buildRendererSecurityHeaders,
   resolveAppAssetPath,
@@ -214,6 +215,9 @@ function emitToRenderer(e: IpcEmittedEvent) {
   // renderer can route the event to the right MeetingState slot. hostId is
   // added by the orchestrator's safeEmit wrapper (defaults to 'default').
   win.webContents.send('session:event', { ...e.event, source: e.source, sessionId: e.sessionId, hostId: e.hostId });
+  // Companion screen tap (Phase 8): the same orchestrator stream feeds the
+  // pixel-office model — point-to-point to the companion window inside.
+  getCompanionFeed()?.onOrchestratorEvent(e);
 }
 
 // S3: under auto-approve, render a short preview of the tool call for the
@@ -338,6 +342,7 @@ async function registerAllIpc(ctx: IpcContext): Promise<void> {
     { registerIdeFilesIpc },
     { registerIdeRegistryIpc },
     { registerIdePtyIpc },
+    { registerCompanionIpc },
   ] = await Promise.all([
     import('./ipc/session.js'),
     import('./ipc/sessions.js'),
@@ -361,6 +366,7 @@ async function registerAllIpc(ctx: IpcContext): Promise<void> {
     import('./ipc/ide-files.js'),
     import('./ipc/ide-registry.js'),
     import('./ipc/ide-pty.js'),
+    import('./companion/companion-feed.js'),
   ]);
   _flushOpenTabsNow = flushOpenTabsNow;
   registerSessionIpc(ctx);
@@ -385,6 +391,7 @@ async function registerAllIpc(ctx: IpcContext): Promise<void> {
   registerIdeFilesIpc();
   registerIdeRegistryIpc(ctx);
   registerIdePtyIpc(ctx);
+  registerCompanionIpc(ctx);
   // Register custom backends from settings so they appear in the backend list
   registerCustomBackends();
 }

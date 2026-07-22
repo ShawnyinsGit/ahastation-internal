@@ -640,6 +640,7 @@ ${trimmed}`
         chatOpen={drawerOpen}
         onToggleChat={() => setDrawerOpen((v) => !v)}
         onLeave={leave}
+        onToggleCompanion={() => { void window.vibeMeet.companion?.toggle(); }}
         handheld={handheld}
         permissionCount={permissionCount}
         onOpenPermission={() => setPermModalOpen(true)}

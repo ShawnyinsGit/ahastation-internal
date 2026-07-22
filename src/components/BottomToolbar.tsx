@@ -14,6 +14,7 @@ import {
   MessageSquare,
   MoreHorizontal,
   ShieldAlert,
+  Gamepad2,
   X,
 } from 'lucide-react';
 import type { MicrophoneCaptureStatus } from '../lib/microphone-ui-state';
@@ -38,6 +39,8 @@ interface BottomToolbarProps {
   chatOpen: boolean;
   onToggleChat: () => void;
   onLeave: () => void;
+  /** Toggle the floating companion window (Phase 8). */
+  onToggleCompanion: () => void;
   /** Handheld mode (§3.3): fixed 5 keys + 更多 menu + permission badge. */
   handheld?: boolean;
   /** Pending permission requests — badge count in handheld mode. */
@@ -95,6 +98,7 @@ export function BottomToolbar({
   chatOpen,
   onToggleChat,
   onLeave,
+  onToggleCompanion,
   handheld = false,
   permissionCount = 0,
   onOpenPermission,
@@ -204,6 +208,13 @@ export function BottomToolbar({
                 >
                   <MessageSquare size={16} /> 聊天
                 </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => { setMoreOpen(false); onToggleCompanion(); }}
+                >
+                  <Gamepad2 size={16} /> 陪伴屏
+                </button>
               </div>
             )}
           </div>
@@ -272,6 +283,12 @@ export function BottomToolbar({
           label="Chat"
           onClick={onToggleChat}
           active={chatOpen}
+        />
+        <ToolbarButton
+          icon={<Gamepad2 size={ICON_SIZE} />}
+          label="陪伴屏"
+          onClick={onToggleCompanion}
+          title="像素虚拟会议室（陪伴屏）"
         />
         <button className="tb-leave" onClick={onLeave}>
           <span className="tb-btn-icon" aria-hidden="true"><X size={ICON_SIZE} /></span>
