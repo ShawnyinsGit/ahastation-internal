@@ -63,7 +63,7 @@ import {
   bindEditorSession,
   forwardToEditorWindow,
   unbindEditorSession,
-} from '../opencode-window-manager.js';
+} from '../ide/ide-window-manager.js';
 
 // ── SDK client (dynamic import so app startup isn't blocked) ────────────────
 

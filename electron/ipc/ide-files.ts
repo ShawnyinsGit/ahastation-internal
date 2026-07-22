@@ -17,7 +17,7 @@
 import { readdir, readFile, realpath, stat } from 'node:fs/promises';
 import { join, relative, resolve, sep } from 'node:path';
 import { z } from 'zod';
-import { getEditorEntryByWebContentsId } from '../opencode-window-manager.js';
+import { getEditorEntryByWebContentsId } from '../ide/ide-window-manager.js';
 import { editorWindowSenderPolicy, handleSecure } from './validators.js';
 
 export interface FileEntry {

@@ -1,4 +1,4 @@
-// opencode-window-manager.ts — manages independent OpenCode editor windows.
+// ide-window-manager.ts — manages independent editor windows (IDE-agnostic).
 //
 // Each digital employee (CLI backend participant) can have its own editor
 // window. Windows are keyed by hostId — NOT backendId:sessionId. The old

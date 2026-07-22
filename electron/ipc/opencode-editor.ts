@@ -15,7 +15,7 @@ import {
   closeOpenCodeEditorWindow,
   listOpenCodeEditorWindows,
   getEditorEntryByWebContentsId,
-} from '../opencode-window-manager.js';
+} from '../ide/ide-window-manager.js';
 import type { IpcContext } from './context.js';
 import {
   editorWindowSenderPolicy,

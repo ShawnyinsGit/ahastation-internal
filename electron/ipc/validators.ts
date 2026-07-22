@@ -15,7 +15,7 @@
 
 import { ipcMain } from 'electron';
 import { z } from 'zod';
-import { getEditorEntryByWebContentsId } from '../opencode-window-manager.js';
+import { getEditorEntryByWebContentsId } from '../ide/ide-window-manager.js';
 
 export type SenderPolicy = (senderId: number) => boolean;
 
@@ -53,7 +53,7 @@ export function mainWindowSenderPolicy(
 
 /** Policy: only a registered OpenCode editor window may invoke. The registry
  *  lookup is injectable for tests; by default it hits the live
- *  opencode-window-manager registry. */
+ *  ide-window-manager registry. */
 export function editorWindowSenderPolicy(
   isRegisteredEditor: (senderId: number) => boolean = (id) =>
     getEditorEntryByWebContentsId(id) !== null,

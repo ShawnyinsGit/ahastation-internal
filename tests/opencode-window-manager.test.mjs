@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { editorWindowKey } from '../dist-electron/opencode-window-manager.js';
+import { editorWindowKey } from '../dist-electron/ide/ide-window-manager.js';
 
 // Regression pin for the old backendId:sessionId composite key: two OpenCode
 // participants in the same meeting share backendId AND the meeting-tab
