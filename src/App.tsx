@@ -388,6 +388,10 @@ export function App() {
   const handheld = uiMode === 'handheld';
   const [permModalOpen, setPermModalOpen] = useState(false);
   const permissionCount = workers.workerList.filter((w) => w.pendingPermission).length;
+  // Pragmatic update notice (Phase 6b): shown only when the probe actually
+  // found a newer release tag (no-op while the repo is private).
+  const [updateInfo, setUpdateInfo] = useState<{ latest: string; url: string } | null>(null);
+  useEffect(() => window.vibeMeet.onUpdateAvailable((info) => setUpdateInfo(info)), []);
   // Handheld editor overlay (Phase 6a): the hostId currently shown in the
   // App-internal overlay, or null. Overlay ≠ route — App stays mounted.
   const [overlayHostId, setOverlayHostId] = useState<string | null>(null);
@@ -703,6 +707,15 @@ ${trimmed}`
               Retry microphone
             </button>
           )}
+        </div>
+      )}
+
+      {updateInfo && (
+        <div className="error-banner">
+          <span className="error-banner__text">新版本 {updateInfo.latest} 可用</span>
+          <a className="error-banner__reconnect" href={updateInfo.url} target="_blank" rel="noreferrer">
+            前往下载
+          </a>
         </div>
       )}
     </div>

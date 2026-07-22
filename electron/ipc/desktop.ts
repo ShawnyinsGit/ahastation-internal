@@ -28,6 +28,9 @@ export function registerDesktopIpc(): void {
 
   ipcMain.handle('desktop:use-system-picker', () => isMacOS14Plus());
 
+  // Current app version for the settings page + update banner.
+  ipcMain.handle('app:version', () => app.getVersion());
+
   ipcMain.handle('desktop:get-sources', async () => {
     try {
       const status = process.platform === 'darwin'

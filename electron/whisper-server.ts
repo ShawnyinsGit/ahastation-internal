@@ -18,10 +18,11 @@
 // whisper-cli — no renderer changes required.
 
 import { spawn, type ChildProcess } from 'node:child_process';
-import { existsSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, statSync } from 'node:fs';
 import * as net from 'node:net';
 import { join } from 'node:path';
 import { encodeWavPcm16, resolveWhisperPaths } from './whisper.js';
+import { chooseGgmlBackend } from './whisper-ggml.js';
 
 const DEFAULT_PORT = 8723;
 const MAX_PORT_TRIES = 5;
@@ -278,7 +279,14 @@ function spawnOnce(
 }
 
 export function whisperServerEnv(cwd: string): NodeJS.ProcessEnv {
-  return { ...process.env, GGML_BACKEND_PATH: join(cwd, 'libggml-cpu-apple_m1.so') };
+  // GGML_BACKEND_PATH takes ONE plugin file. macOS brew ships
+  // libggml-cpu-apple_m1.so; official linux/win archives ship generic
+  // libggml-cpu.so / ggml-cpu.dll. Pick whatever actually exists; when no
+  // plugin is found, leave the var unset so ggml's default search applies
+  // instead of pointing at a file that isn't there.
+  const backend = chooseGgmlBackend(readdirSync(cwd), process.platform);
+  if (!backend) return { ...process.env };
+  return { ...process.env, GGML_BACKEND_PATH: join(cwd, backend) };
 }
 
 function attachExitHandler(child: ChildProcess, serverBin: string, modelPath: string, cwd: string): void {

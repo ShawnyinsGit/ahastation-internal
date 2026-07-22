@@ -97,6 +97,9 @@ export interface Settings {
   // screen.width ≤ 1300 decides), 'handheld' or 'desktop' to force. Layout
   // is driven by a root class from the resolved mode, not width breakpoints.
   handheldMode?: 'auto' | 'handheld' | 'desktop';
+  // 24h cache for the pragmatic update probe (electron/update-check.ts).
+  // latest=null records "checked, nothing found" so we don't re-probe.
+  updateCheckCache?: { checkedAt: number; latest: string | null };
   // Voice polish: when true, raw ASR output is run through the configured LLM
   // to convert colloquial spoken language into clean written form before
   // sending to the Talker. Uses the same API credentials as the rest of the

@@ -8,6 +8,7 @@ import { registerCustomBackends } from './backends/registry.js';
 import type { IpcContext, IpcEmittedEvent } from './ipc/context.js';
 import { BrowserTabManager } from './browser-tab-manager.js';
 import { requestMicrophoneAccess } from './microphone-access.js';
+import { checkForUpdateCached } from './update-check.js';
 import {
   buildRendererSecurityHeaders,
   resolveAppAssetPath,
@@ -448,6 +449,15 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
   });
 
   createWindow();
+
+  // Pragmatic update probe (Phase 6b §3.5-5): anonymous redirect parse of
+  // releases/latest, 24h-cached. Silently no-ops while the repo is private
+  // (anonymous 404) — starts working the day it goes public.
+  void checkForUpdateCached(app.getVersion()).then((r) => {
+    if (!r.available) return;
+    const win = liveWindow();
+    win?.webContents.send('update-available', { latest: r.latest, url: r.url });
+  });
 
   // Dual-display migration (Phase 6a §3.2): moving windows only adjusts
   // BrowserWindow bounds — webContents is NEVER rebuilt, so the voice link

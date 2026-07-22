@@ -8996,3 +8996,12 @@ html.handheld { --density-scale: 1.2; }
   border-top: 1px solid var(--border-soft);
   background: var(--bg-glass);
 }
+
+/* Phase 6b: settings version footer */
+.settings-window-version {
+  padding: 8px 20px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border-soft);
+}
+.settings-window-version a { color: var(--accent); }

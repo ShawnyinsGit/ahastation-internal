@@ -552,6 +552,8 @@ export interface VibeMeetApi {
     getScene: (hostId: string) => Promise<{ ok: true; scene: EditorSceneState } | { ok: false; error: string }>;
   };
   onDisplayChanged: (cb: (info: { displayCount: number; added: boolean }) => void) => () => void;
+  appVersion: () => Promise<string>;
+  onUpdateAvailable: (cb: (info: { latest: string; url: string }) => void) => () => void;
   ideFiles: {
     list: (path?: string) => Promise<{ ok: true; entries: FileEntry[] } | { ok: false; error: string }>;
     read: (path: string) => Promise<{ ok: true; file: FileContent } | { ok: false; error: string }>;
