@@ -112,6 +112,8 @@ function SettingsWindowInner() {
           onChangeVoicePolish={voicePrefs.handleVoicePolishChange}
           reportModeEnabled={voicePrefs.reportModeEnabled}
           onChangeReportMode={voicePrefs.handleReportModeChange}
+          handheldMode={voicePrefs.handheldMode}
+          onChangeHandheldMode={voicePrefs.handleHandheldModeChange}
         />
         <VoiceLockPanel
           enabled={voiceLock.voiceLockEnabled}

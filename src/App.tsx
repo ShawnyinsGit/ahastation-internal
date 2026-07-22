@@ -13,6 +13,7 @@ import { useVoicePreferences } from './hooks/useVoicePreferences';
 import { useSpacebarMute } from './hooks/useSpacebarMute';
 import { useTtsWiring } from './hooks/useTtsWiring';
 import { useDragAndDrop } from './hooks/useDragAndDrop';
+import { useHandheldMode } from './lib/handheld-mode';
 import { meetingStore } from './lib/meeting-store';
 import { Lobby } from './components/Lobby';
 import { TabStrip } from './components/TabStrip';
@@ -25,6 +26,7 @@ import { SideDrawer } from './components/SideDrawer';
 import { SettingsMenu } from './components/SettingsMenu';
 import { VoiceGuideModal } from './components/VoiceGuideModal';
 import { ParticipantPanel } from './components/ParticipantPanel';
+import { PermissionCard } from './components/PermissionCard';
 import type { AutoApproveScope, BackendInfo, DesktopSource, SkillInfo } from './types';
 
 export function App() {
@@ -390,6 +392,13 @@ export function App() {
     });
   }, [activeTab?.id, state.cwd]);
 
+  // Handheld UI mode (§3.3): resolved mode drives the root <html> class via
+  // the hook; this flag switches the toolbar variant + approval modal.
+  const { mode: uiMode } = useHandheldMode();
+  const handheld = uiMode === 'handheld';
+  const [permModalOpen, setPermModalOpen] = useState(false);
+  const permissionCount = workers.workerList.filter((w) => w.pendingPermission).length;
+
   const sendWithMode = useCallback(async (raw: string) => {
     const trimmed = raw.trim();
     if (!trimmed) return;
@@ -576,7 +585,24 @@ ${trimmed}`
         chatOpen={drawerOpen}
         onToggleChat={() => setDrawerOpen((v) => !v)}
         onLeave={leave}
+        handheld={handheld}
+        permissionCount={permissionCount}
+        onOpenPermission={() => setPermModalOpen(true)}
       />
+
+      {handheld && permModalOpen && state.pendingPermission && (
+        <div className="perm-modal-backdrop" onClick={() => setPermModalOpen(false)}>
+          <div className="perm-modal" onClick={(e) => e.stopPropagation()}>
+            <PermissionCard
+              pending={state.pendingPermission}
+              onDecide={(id, decision) => {
+                resolvePermission(id, decision);
+                setPermModalOpen(false);
+              }}
+            />
+          </div>
+        </div>
+      )}
 
       <SourcePicker
         open={pickerOpen}

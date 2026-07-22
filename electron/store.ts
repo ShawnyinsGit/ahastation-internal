@@ -93,6 +93,10 @@ export interface Settings {
   // as documents and only speak a 2-3 sentence conversational summary. The
   // full document is displayed in the UI for review. Default off.
   reportModeEnabled?: boolean;
+  // Handheld UI mode (§3.3): 'auto' (default — (pointer:coarse) &&
+  // screen.width ≤ 1300 decides), 'handheld' or 'desktop' to force. Layout
+  // is driven by a root class from the resolved mode, not width breakpoints.
+  handheldMode?: 'auto' | 'handheld' | 'desktop';
   // Voice polish: when true, raw ASR output is run through the configured LLM
   // to convert colloquial spoken language into clean written form before
   // sending to the Talker. Uses the same API credentials as the rest of the

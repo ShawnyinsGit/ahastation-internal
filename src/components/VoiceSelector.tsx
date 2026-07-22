@@ -6,6 +6,7 @@
 
 import { listChineseVoices, tierLabel, type ListedVoice } from '../lib/voice-quality';
 import type { SpeechFilterMode } from '../lib/speech-format';
+import type { HandheldOverride } from '../lib/handheld-mode';
 
 interface VoiceSelectorProps {
   voices: SpeechSynthesisVoice[];
@@ -18,6 +19,8 @@ interface VoiceSelectorProps {
   onChangeVoicePolish: (enabled: boolean) => void;
   reportModeEnabled: boolean;
   onChangeReportMode: (enabled: boolean) => void;
+  handheldMode: HandheldOverride;
+  onChangeHandheldMode: (mode: HandheldOverride) => void;
 }
 
 function describeVoice(v: ListedVoice): string {
@@ -36,6 +39,8 @@ export function VoiceSelector({
   onChangeVoicePolish,
   reportModeEnabled,
   onChangeReportMode,
+  handheldMode,
+  onChangeHandheldMode,
 }: VoiceSelectorProps) {
   const chineseVoices = listChineseVoices(voices);
   const hasPremium = chineseVoices.some((v) => v.tier !== 'default');
@@ -134,6 +139,32 @@ export function VoiceSelector({
         >
           <span className="drawer-toggle-knob" />
         </button>
+      </div>
+
+      <div className="drawer-settings-row" style={{ marginTop: 12 }}>
+        <div className="drawer-settings-label">
+          <div className="drawer-settings-title">掌机模式</div>
+          <div className="drawer-settings-hint">
+            {handheldMode === 'handheld'
+              ? '强制掌机布局（大触控目标、chip 条、模态审批）'
+              : handheldMode === 'desktop'
+                ? '强制桌面布局'
+                : '自动：触屏 + 屏幕 ≤1300px 时用掌机布局'}
+          </div>
+        </div>
+        <div className="handheld-mode-switch" role="group" aria-label="掌机模式">
+          {(['auto', 'handheld', 'desktop'] as const).map((m) => (
+            <button
+              key={m}
+              type="button"
+              className={`handheld-mode-option ${handheldMode === m ? 'handheld-mode-option-active' : ''}`}
+              aria-pressed={handheldMode === m}
+              onClick={() => onChangeHandheldMode(m)}
+            >
+              {m === 'auto' ? '自动' : m === 'handheld' ? '掌机' : '桌面'}
+            </button>
+          ))}
+        </div>
       </div>
     </div>
   );
