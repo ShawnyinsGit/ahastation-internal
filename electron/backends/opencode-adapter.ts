@@ -37,6 +37,7 @@ import type {
 } from './cli-backend.js';
 import {
   basicAuthHeader,
+  deriveCustomProviderConfig,
   resolveOpencodeBinary,
   type OpencodeServerHandle,
 } from './opencode-server-process.js';
@@ -325,7 +326,12 @@ class OpenCodeSession implements BackendSession {
       cwd: this.config.cwd,
       spawn: () => defaultServerSpawn({
         cwd: this.config.cwd,
-        config: OPENCODE_SERVER_CONFIG,
+        config: {
+          ...OPENCODE_SERVER_CONFIG,
+          // Non-built-in providers (kimi/k3 etc.) need a declared provider
+          // section or opencode stalls the turn on ProviderModelNotFoundError.
+          ...deriveCustomProviderConfig(this.config.env),
+        },
         providerEnv: this.config.env,
       }),
     });
@@ -807,6 +813,10 @@ export class OpenCodeBackend implements CliBackend {
       const { keyVar, baseUrlVar } = providerEnvVars(auth.model ?? this.capabilities.defaultModel);
       env[keyVar] = auth.apiKey;
       if (auth.baseUrl) env[baseUrlVar] = auth.baseUrl;
+      // Non-sensitive model hint for deriveCustomProviderConfig: non-built-in
+      // providers (e.g. kimi/k3) need a provider declaration in
+      // OPENCODE_CONFIG_CONTENT or opencode rejects the model outright.
+      if (auth.model) env.AHAMEET_OPENCODE_MODEL = auth.model;
     }
     return env;
   }

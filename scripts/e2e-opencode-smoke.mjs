@@ -37,12 +37,14 @@ function record(name, ok, detail = '') {
 
 const apiKey = process.env.AHAMEET_E2E_API_KEY?.trim();
 const provider = (process.env.AHAMEET_E2E_PROVIDER?.trim() || 'anthropic').toLowerCase();
-// kimi = Kimi Code 的 OpenAI 兼容端点（opencode 的 openai provider + OPENAI_BASE_URL）。
-// 端点与模型名按官方文档：https://www.kimi.com/code/docs/en/（api.kimi.com/coding/v1，模型 ID = k3）。
+// kimi = Kimi Code 的 OpenAI 兼容端点。注意模型必须以自定义 provider 形式
+// 声明（adapter 的 deriveCustomProviderConfig 经 AHAMEET_OPENCODE_MODEL +
+// KIMI_API_KEY/KIMI_BASE_URL 自动生成），否则 opencode 报 ProviderModelNotFoundError。
+// 端点与模型名按官方文档：https://www.kimi.com/code/docs/en/
 const PROVIDER_PRESETS = {
-  anthropic: { model: 'anthropic/claude-sonnet-4-5', baseUrl: undefined, keyVar: 'ANTHROPIC_API_KEY' },
-  openai: { model: 'openai/gpt-5.4', baseUrl: undefined, keyVar: 'OPENAI_API_KEY' },
-  kimi: { model: 'openai/k3', baseUrl: 'https://api.kimi.com/coding/v1', keyVar: 'OPENAI_API_KEY' },
+  anthropic: { model: 'anthropic/claude-sonnet-4-5', baseUrl: undefined, keyVar: 'ANTHROPIC_API_KEY', baseUrlVar: 'ANTHROPIC_BASE_URL' },
+  openai: { model: 'openai/gpt-5.4', baseUrl: undefined, keyVar: 'OPENAI_API_KEY', baseUrlVar: 'OPENAI_BASE_URL' },
+  kimi: { model: 'kimi/k3', baseUrl: 'https://api.kimi.com/coding/v1', keyVar: 'KIMI_API_KEY', baseUrlVar: 'KIMI_BASE_URL' },
 };
 const preset = PROVIDER_PRESETS[provider];
 
@@ -142,11 +144,13 @@ async function main() {
   // Step 2: buildEnv maps the settings-style key onto the provider env var.
   const env = backend.buildEnv({ authMode: 'apikey', apiKey, model, baseUrl: preset?.baseUrl });
   const expectedKeyVar = preset?.keyVar ?? 'ANTHROPIC_API_KEY';
+  const expectedBaseUrlVar = preset?.baseUrlVar ?? 'ANTHROPIC_BASE_URL';
   const keyWired = env[expectedKeyVar] === apiKey;
-  const baseUrlWired = !preset?.baseUrl || env.OPENAI_BASE_URL === preset.baseUrl;
-  record('buildEnv 把 key 接到 provider env', keyWired && baseUrlWired,
-    `${expectedKeyVar}${preset?.baseUrl ? ` + baseUrl=${preset.baseUrl}` : ''}`);
-  if (!keyWired || !baseUrlWired) return;
+  const baseUrlWired = !preset?.baseUrl || env[expectedBaseUrlVar] === preset.baseUrl;
+  const modelHintWired = env.AHAMEET_OPENCODE_MODEL === model;
+  record('buildEnv 把 key 接到 provider env', keyWired && baseUrlWired && modelHintWired,
+    `${expectedKeyVar}${preset?.baseUrl ? ` + baseUrl=${preset.baseUrl}` : ''} + model=${model}`);
+  if (!keyWired || !baseUrlWired || !modelHintWired) return;
 
   // Step 3: session start (spawn server, SSE subscribe-before-create).
   workdir = await mkdtemp(join(tmpdir(), 'ahameet-e2e-'));

@@ -67,6 +67,59 @@ export function buildServerEnv(opts: ServerEnvOptions): NodeJS.ProcessEnv {
   return env;
 }
 
+// ── Custom provider config (OPENCODE_CONFIG_CONTENT provider section) ───────
+//
+// opencode validates model IDs against its built-in registry (models.dev), so
+// a model like `kimi/k3` dies with ProviderModelNotFoundError before any API
+// call (spike 2026-07-22, observed in the server log as a silent turn stall).
+// Non-built-in providers must be declared in the config's `provider` section.
+// We derive that declaration entirely from the providerEnv convention the
+// adapter's buildEnv already produces:
+//   <X>_API_KEY + <X>_BASE_URL        → provider id x (lowercased)
+//   AHAMEET_OPENCODE_MODEL = "x/model" → the model ID to register
+// Built-in providers (OPENAI/ANTHROPIC) never need this and are skipped.
+
+const BUILTIN_PROVIDER_KEYS = new Set(['OPENAI', 'ANTHROPIC']);
+
+export interface CustomProviderConfig {
+  provider: Record<string, {
+    npm: string;
+    name: string;
+    options: { baseURL: string; apiKey: string };
+    models: Record<string, { name: string }>;
+  }>;
+}
+
+export function deriveCustomProviderConfig(
+  providerEnv: NodeJS.ProcessEnv | undefined,
+): Record<string, never> | CustomProviderConfig {
+  if (!providerEnv) return {};
+  const model = providerEnv.AHAMEET_OPENCODE_MODEL ?? '';
+  const modelProvider = model.split('/')[0]?.toLowerCase() ?? '';
+  const modelId = model.includes('/') ? model.split('/').slice(1).join('/') : '';
+
+  const out: CustomProviderConfig['provider'] = {};
+  for (const key of Object.keys(providerEnv)) {
+    const m = /^([A-Z0-9_]+)_API_KEY$/.exec(key);
+    if (!m) continue;
+    const prefix = m[1];
+    if (BUILTIN_PROVIDER_KEYS.has(prefix)) continue;
+    const baseUrl = providerEnv[`${prefix}_BASE_URL`];
+    const providerId = prefix.toLowerCase();
+    // Only register the provider the selected model actually belongs to —
+    // a key without a matching model would produce a config that validates
+    // but still cannot serve the prompt.
+    if (!baseUrl || providerId !== modelProvider || !modelId) continue;
+    out[providerId] = {
+      npm: '@ai-sdk/openai-compatible',
+      name: providerId,
+      options: { baseURL: baseUrl, apiKey: `{env:${prefix}_API_KEY}` },
+      models: { [modelId]: { name: modelId } },
+    };
+  }
+  return Object.keys(out).length > 0 ? { provider: out } : {};
+}
+
 // ── Binary resolution ───────────────────────────────────────────────────────
 
 function unpackify(p: string): string {
