@@ -14,9 +14,15 @@ import {
   createOpenCodeEditorWindow,
   closeOpenCodeEditorWindow,
   listOpenCodeEditorWindows,
+  getEditorEntryByWebContentsId,
 } from '../opencode-window-manager.js';
 import type { IpcContext } from './context.js';
-import { emptyPayloadSchema, handleSecure, mainWindowSenderPolicy } from './validators.js';
+import {
+  editorWindowSenderPolicy,
+  emptyPayloadSchema,
+  handleSecure,
+  mainWindowSenderPolicy,
+} from './validators.js';
 
 const idString = z.string().min(1).max(128);
 
@@ -59,5 +65,30 @@ export function registerOpenCodeEditorIpc(ctx: IpcContext): void {
   handleSecure('opencode-editor:list', {
     schema: emptyPayloadSchema,
     handler: () => ({ ok: true, windows: listOpenCodeEditorWindows() }),
+  });
+
+  // Editor panel initial state (Phase 2 PR③): the calling editor window gets
+  // the snapshot (status / todos / diff / activity) of the OpenCode session
+  // bound to ITS hostId. Sender must be a registered editor window — the
+  // hostId and meeting slot come from the window registration, never from
+  // the payload.
+  handleSecure('ide-editor:get-state', {
+    schema: emptyPayloadSchema,
+    authorize: editorWindowSenderPolicy(),
+    authorizeError: 'Sender is not a registered editor window',
+    handler: (_payload, senderId) => {
+      const entry = getEditorEntryByWebContentsId(senderId);
+      if (!entry) {
+        return { ok: false, error: 'Sender is not a registered editor window' };
+      }
+      const slot = ctx.registry.get(entry.options.sessionId);
+      const session = slot?.orchestrator.getHostSession(entry.options.hostId);
+      const getSnapshot = (session as { getEditorSnapshot?: () => unknown } | null)
+        ?.getEditorSnapshot;
+      if (!getSnapshot) {
+        return { ok: false, error: 'No live OpenCode session for this window' };
+      }
+      return { ok: true, state: getSnapshot.call(session) };
+    },
   });
 }

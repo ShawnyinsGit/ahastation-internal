@@ -50,6 +50,38 @@ export function getEditorEntryByWebContentsId(id: number): EditorWindowEntry | n
   return null;
 }
 
+// ── hostId ↔ opencode session binding + event fan-out (§2.2 rule 7) ────────
+// One binding table, co-located with the window registry (no third table):
+// the adapter binds (hostId → opencode sessionID) once its session exists —
+// possibly before any editor window is open — and unbinds on end(). Window
+// close only drops the window entry; the binding survives for re-attach.
+
+const sessionBindings = new Map<string, string>();
+
+export function bindEditorSession(hostId: string, opencodeSessionId: string): void {
+  sessionBindings.set(hostId, opencodeSessionId);
+}
+
+export function unbindEditorSession(hostId: string): void {
+  sessionBindings.delete(hostId);
+}
+
+export function getBoundOpenCodeSessionId(hostId: string): string | null {
+  return sessionBindings.get(hostId) ?? null;
+}
+
+/** Point-to-point fan-out: send the payload ONLY to the editor window
+ *  registered for this hostId (never a getAllWindows() broadcast). When no
+ *  live window exists the event stays in main (the adapter keeps the
+ *  snapshot; a re-attached window pulls it via ide-editor:get-state).
+ *  Returns whether a live window received the event. */
+export function forwardToEditorWindow(hostId: string, payload: unknown): boolean {
+  const entry = editorWindows.get(editorWindowKey(hostId));
+  if (!entry || entry.win.isDestroyed()) return false;
+  entry.win.webContents.send('ide-editor:event', { hostId, payload });
+  return true;
+}
+
 export function createOpenCodeEditorWindow(options: OpenCodeEditorWindowOptions): BrowserWindow {
   const key = editorWindowKey(options.hostId);
   const existing = editorWindows.get(key);

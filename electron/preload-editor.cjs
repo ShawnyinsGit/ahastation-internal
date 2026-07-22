@@ -15,6 +15,17 @@ const api = {
     list: (path) => ipcRenderer.invoke('ide-files:list', { path }),
     read: (path) => ipcRenderer.invoke('ide-files:read', { path }),
   },
+  // Live panel state (Phase 2 PR③): initial snapshot pull + point-to-point
+  // incremental events for THIS window's hostId (status / todo / diff /
+  // activity). Main never broadcasts; each window only receives its own.
+  ideSession: {
+    getState: () => ipcRenderer.invoke('ide-editor:get-state'),
+    onEvent: (cb) => {
+      const listener = (_, msg) => cb(msg);
+      ipcRenderer.on('ide-editor:event', listener);
+      return () => ipcRenderer.removeListener('ide-editor:event', listener);
+    },
+  },
 };
 
 contextBridge.exposeInMainWorld('vibeMeet', api);

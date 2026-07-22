@@ -282,6 +282,7 @@ export class Orchestrator implements OrchestratorBridge {
           skills: Array.isArray(so.skills) ? so.skills : undefined,
           autoApproveScope: opts.autoApproveScope,
           confirmDestructive: opts.confirmDestructive,
+          hostId: actorHostId,
           resumeSessionId: purpose === 'host'
             ? this.resumeBackendSessions[actorHostId]?.sessionId
             : undefined,
@@ -730,6 +731,12 @@ export class Orchestrator implements OrchestratorBridge {
     for (const hg of this.hostGroups.values()) {
       hg.resolvePermission(id, decision, message);
     }
+  }
+
+  /** Live backend session of a meeting host (for IPC accessors that need
+   *  adapter-specific optional methods, e.g. the editor snapshot getter). */
+  getHostSession(hostId: string): BackendSession | null {
+    return this.hostGroups.get(hostId)?.getHost() ?? null;
   }
 
   async interrupt() {

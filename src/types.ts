@@ -14,6 +14,52 @@ export interface FileContent {
   truncated: boolean;
 }
 
+// ── OpenCode editor live panels (Phase 2 PR③) ──────────────────────────────
+// Mirror of electron/backends/opencode-editor-panel.ts shapes (kept in sync
+// by hand; the two tsconfigs don't share sources).
+
+export type EditorStatus = 'idle' | 'busy' | 'retry' | 'error';
+
+export interface EditorTodoItem {
+  id: string;
+  content: string;
+  status: string;
+  priority: string;
+}
+
+export interface EditorDiffEntry {
+  file: string;
+  additions: number;
+  deletions: number;
+}
+
+export interface EditorActivityItem {
+  ts: number;
+  kind: 'text' | 'tool' | 'status' | 'file' | 'info';
+  label: string;
+  detail?: string;
+}
+
+export interface EditorKeyedActivity {
+  key: string;
+  item: EditorActivityItem;
+}
+
+export interface EditorSnapshot {
+  status: EditorStatus;
+  todos: EditorTodoItem[];
+  diff: EditorDiffEntry[];
+  activity: EditorKeyedActivity[];
+}
+
+export type EditorPanelEvent =
+  | { kind: 'activity-upsert'; key: string; item: EditorActivityItem }
+  | { kind: 'status'; status: EditorStatus }
+  | { kind: 'todo'; todos: EditorTodoItem[] }
+  | { kind: 'diff'; diff: EditorDiffEntry[] };
+
+export const EDITOR_ACTIVITY_CAP = 200;
+
 export type AgentSource = 'talker' | string;
 
 export type WorkerStatus = 'pending' | 'running' | 'interrupted' | 'done' | 'failed';
@@ -429,6 +475,12 @@ export interface VibeMeetApi {
   ideFiles: {
     list: (path?: string) => Promise<{ ok: true; entries: FileEntry[] } | { ok: false; error: string }>;
     read: (path: string) => Promise<{ ok: true; file: FileContent } | { ok: false; error: string }>;
+  };
+  /** Editor-window live panel state. Only exposed by the narrow editor
+   *  preload (preload-editor.cjs) — absent from the main window's bridge. */
+  ideSession: {
+    getState: () => Promise<{ ok: true; state: EditorSnapshot } | { ok: false; error: string }>;
+    onEvent: (cb: (msg: { hostId: string; payload: EditorPanelEvent }) => void) => () => void;
   };
   popoutSession: (tabId: string) => Promise<{ ok: boolean }>;
   popoutStage: (windowId: string, type: string) => Promise<{ ok: boolean }>;
