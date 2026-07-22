@@ -54,6 +54,16 @@ import {
   type BrokerPermissionRequest,
   type OpencodePermissionResponse,
 } from '../permission-broker.js';
+import {
+  EditorPanelStore,
+  type EditorPanelEvent,
+  type EditorSnapshot,
+} from './opencode-editor-panel.js';
+import {
+  bindEditorSession,
+  forwardToEditorWindow,
+  unbindEditorSession,
+} from '../opencode-window-manager.js';
 
 // ── SDK client (dynamic import so app startup isn't blocked) ────────────────
 
@@ -117,6 +127,24 @@ function safeJson(value: unknown): string {
   }
 }
 
+/** Human-readable one-liner for an instance-level event (activity feed). */
+function describeInstanceEvent(type: string, properties: unknown): string {
+  const p = (properties ?? {}) as Record<string, unknown>;
+  const file = typeof p.file === 'string' ? p.file : null;
+  switch (type) {
+    case 'file.edited':
+      return `编辑文件 ${file ?? ''}`.trim();
+    case 'file.watcher.updated':
+      return `文件${p.event === 'add' ? '新增' : p.event === 'unlink' ? '删除' : '变更'} ${file ?? ''}`.trim();
+    case 'vcs.branch.updated':
+      return `分支切换到 ${typeof p.branch === 'string' ? p.branch : '(unknown)'}`;
+    case 'server.connected':
+      return 'server 事件流已连接';
+    default:
+      return file ? `${type} ${file}` : type;
+  }
+}
+
 // ── Session implementation ──────────────────────────────────────────────────
 
 type ServerEvent = { type: string; properties: unknown };
@@ -142,12 +170,11 @@ class OpenCodeSession implements BackendSession {
   // / native confirm / meeting-UI card / fail-closed timeout), which answers
   // the server via replyPermission below.
   private broker: PermissionBroker | null = null;
-  // Phase 2 PR③ seam: latest todo/diff snapshots for the editor panel.
-  private latestTodos: unknown[] = [];
-  private latestDiff: unknown[] = [];
-  // Instance-level events have no sessionID; with one server per
-  // participant they count as THIS participant's activity.
-  private lastInstanceActivityAt = 0;
+  // Phase 2 PR③: editor panel store — status light, todo/diff snapshots and
+  // the capped activity timeline. Digested events feed it; the incremental
+  // results fan out point-to-point to this hostId's editor window, and a
+  // freshly opened/re-attached window pulls the full snapshot.
+  private readonly panel = new EditorPanelStore();
 
   constructor(
     private readonly config: BackendSessionConfig,
@@ -205,6 +232,11 @@ class OpenCodeSession implements BackendSession {
       }
       this.sessionId = created.data.id;
       this.ready = true;
+      // Bind hostId ↔ opencode sessionID so panel events can fan out
+      // point-to-point to this host's editor window (§2.2 rule 7).
+      if (this.config.hostId) {
+        bindEditorSession(this.config.hostId, this.sessionId);
+      }
 
       this.emit({
         kind: 'message',
@@ -342,8 +374,8 @@ class OpenCodeSession implements BackendSession {
     ]);
 
     const snapshotParts = (messages.data ?? []).flatMap((m) => m.parts ?? []);
-    if (todo?.data) this.latestTodos = todo.data;
-    if (diff?.data) this.latestDiff = diff.data;
+    if (todo?.data) this.feedPanel(this.panel.setTodos(todo.data));
+    if (diff?.data) this.feedPanel(this.panel.setDiff(diff.data));
 
     const bufferedParts = this.eventBuffer
       .filter((e) => e.type === 'message.part.updated')
@@ -375,6 +407,43 @@ class OpenCodeSession implements BackendSession {
     if (msg) {
       this.emit({ kind: 'message', message: msg });
     }
+    this.feedPanelForPart(part);
+  }
+
+  // ── Editor panel feed (Phase 2 PR③) ───────────────────────────────────────
+
+  /** Forward incremental panel events point-to-point to this hostId's editor
+   *  window. No window → the store still holds the latest state in main; a
+   *  re-attached window pulls it via ide-editor:get-state. Never broadcast. */
+  private feedPanel(events: EditorPanelEvent | EditorPanelEvent[] | null): void {
+    if (!events || !this.config.hostId) return;
+    for (const ev of Array.isArray(events) ? events : [events]) {
+      forwardToEditorWindow(this.config.hostId, ev);
+    }
+  }
+
+  private feedPanelForPart(part: unknown): void {
+    const p = part as Record<string, unknown>;
+    if (p.type === 'text' && typeof p.text === 'string' && p.text.length > 0) {
+      this.feedPanel(this.panel.noteText(String(p.messageID ?? ''), p.text));
+      return;
+    }
+    if (p.type === 'tool') {
+      const state = (p.state ?? {}) as Record<string, unknown>;
+      this.feedPanel(this.panel.noteToolCall(
+        String(p.callID ?? p.id ?? ''),
+        typeof p.tool === 'string' ? p.tool : 'unknown',
+        typeof state.status === 'string' ? state.status : 'pending',
+        (state.input ?? undefined) as Record<string, unknown> | undefined,
+      ));
+    }
+  }
+
+  /** Snapshot consumed by the ide-editor:get-state IPC (editor window init
+   *  and re-attach). Optional adapter-specific method — NOT part of the
+   *  BackendSession contract. */
+  getEditorSnapshot(): EditorSnapshot {
+    return this.panel.snapshot();
   }
 
   // ── Event routing / attribution ─────────────────────────────────────────
@@ -384,9 +453,8 @@ class OpenCodeSession implements BackendSession {
     if (sid === null) {
       // Instance-level event (file.edited / watcher / vcs / lsp / pty /
       // server.connected ...). One server per participant today, so it is
-      // THIS participant's activity. Recorded, not chatted — PR③ surfaces
-      // it in the editor activity feed.
-      this.lastInstanceActivityAt = Date.now();
+      // THIS participant's activity — surfaced in the editor activity feed.
+      this.feedPanel(this.panel.noteInstanceActivity(describeInstanceEvent(type, properties)));
       return;
     }
     if (!this.sessionId || sid !== this.sessionId) return; // not our session
@@ -403,6 +471,7 @@ class OpenCodeSession implements BackendSession {
         }).info;
         if (info?.role === 'assistant' && info.error) {
           const detail = info.error.data?.message ?? info.error.name ?? 'unknown';
+          this.feedPanel(this.panel.setError(detail));
           if (info.error.name === 'ProviderAuthError') {
             this.emit({ kind: 'auth-required', error: `OpenCode provider auth failed: ${detail}` });
           } else {
@@ -414,11 +483,17 @@ class OpenCodeSession implements BackendSession {
       case 'session.idle':
         // Turn finished — maps to the same 'result' semantic the worker
         // scheduler uses to clear busy state.
+        this.feedPanel(this.panel.setStatus('idle'));
         this.emit({ kind: 'message', message: { type: 'result', raw: properties } });
         return;
       case 'session.status': {
         const status = (properties as { status?: { type?: string; message?: string } }).status;
-        if (status?.type === 'retry') {
+        if (status?.type === 'busy') {
+          this.feedPanel(this.panel.setStatus('busy'));
+        } else if (status?.type === 'idle') {
+          this.feedPanel(this.panel.setStatus('idle'));
+        } else if (status?.type === 'retry') {
+          this.feedPanel(this.panel.setStatus('retry'));
           this.emit({
             kind: 'message',
             message: {
@@ -435,6 +510,7 @@ class OpenCodeSession implements BackendSession {
       case 'session.error': {
         const err = (properties as { error?: { name?: string; data?: { message?: string } } }).error;
         const detail = err?.data?.message ?? err?.name ?? 'unknown session error';
+        this.feedPanel(this.panel.setError(detail));
         if (err?.name === 'ProviderAuthError') {
           this.emit({ kind: 'auth-required', error: detail });
         } else {
@@ -476,11 +552,10 @@ class OpenCodeSession implements BackendSession {
         return;
       }
       case 'todo.updated':
-        // Phase 2 PR③ seam: stashed for the editor panel.
-        this.latestTodos = (properties as { todos?: unknown[] }).todos ?? [];
+        this.feedPanel(this.panel.setTodos((properties as { todos?: unknown[] }).todos));
         return;
       case 'session.diff':
-        this.latestDiff = (properties as { diff?: unknown[] }).diff ?? [];
+        this.feedPanel(this.panel.setDiff((properties as { diff?: unknown[] }).diff));
         return;
       default:
         // session.created/updated/deleted, message.removed, etc. — nothing
@@ -568,6 +643,9 @@ class OpenCodeSession implements BackendSession {
     // session is ending).
     this.broker?.rejectAll('shutdown');
     this.broker = null;
+    if (this.config.hostId) {
+      unbindEditorSession(this.config.hostId);
+    }
     // Deliberately NO session.delete — the native session stays inspectable
     // for as long as the server lives; the whole server goes away anyway.
     this.server?.kill();

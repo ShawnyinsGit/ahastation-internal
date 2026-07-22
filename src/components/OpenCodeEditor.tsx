@@ -1,9 +1,19 @@
 // OpenCodeEditor — independent editor window for a digital employee.
-// Provides file tree browsing, code viewing, activity log, and terminal placeholder.
+// File tree browsing, code viewing, and the LIVE panel (status light, todo
+// list, session diff, activity timeline) fed point-to-point from main via
+// ideSession.getState() + ideSession.onEvent() (Phase 2 PR③).
 
 import { useCallback, useEffect, useState } from 'react';
 import { ChevronRight, ChevronDown, File, Folder, RefreshCw } from 'lucide-react';
-import type { FileEntry } from '../types';
+import type {
+  EditorActivityItem,
+  EditorKeyedActivity,
+  EditorPanelEvent,
+  EditorSnapshot,
+  EditorStatus,
+  FileEntry,
+} from '../types';
+import { EDITOR_ACTIVITY_CAP } from '../types';
 
 interface OpenCodeEditorProps {
   hostId: string;
@@ -17,12 +27,49 @@ interface FileNode extends FileEntry {
   expanded?: boolean;
 }
 
+const STATUS_LABEL: Record<EditorStatus, string> = {
+  idle: '空闲',
+  busy: '工作中',
+  retry: '重试中',
+  error: '错误',
+};
+
+const STATUS_COLOR: Record<EditorStatus, string> = {
+  idle: '#34c759',
+  busy: '#ffcc00',
+  retry: '#ff9500',
+  error: '#ff3b30',
+};
+
+function applyPanelEvent(prev: EditorSnapshot, ev: EditorPanelEvent): EditorSnapshot {
+  switch (ev.kind) {
+    case 'status':
+      return { ...prev, status: ev.status };
+    case 'todo':
+      return { ...prev, todos: ev.todos };
+    case 'diff':
+      return { ...prev, diff: ev.diff };
+    case 'activity-upsert': {
+      const idx = prev.activity.findIndex((a) => a.key === ev.key);
+      const next = idx >= 0
+        ? prev.activity.map((a, i) => (i === idx ? { key: ev.key, item: ev.item } : a))
+        : [...prev.activity, { key: ev.key, item: ev.item }];
+      return { ...prev, activity: next.slice(-EDITOR_ACTIVITY_CAP) };
+    }
+    default:
+      return prev;
+  }
+}
+
+const EMPTY_PANEL: EditorSnapshot = { status: 'idle', todos: [], diff: [], activity: [] };
+
 export function OpenCodeEditor({ hostId, backendId, sessionId, cwd }: OpenCodeEditorProps) {
   const [files, setFiles] = useState<FileNode[]>([]);
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [fileContent, setFileContent] = useState<string>('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [panel, setPanel] = useState<EditorSnapshot>(EMPTY_PANEL);
 
   const loadFiles = useCallback(async (path?: string) => {
     try {
@@ -42,6 +89,22 @@ export function OpenCodeEditor({ hostId, backendId, sessionId, cwd }: OpenCodeEd
   useEffect(() => {
     loadFiles().then(setFiles);
   }, [loadFiles]);
+
+  // Live panel: initial snapshot, then point-to-point incremental events.
+  useEffect(() => {
+    let cancelled = false;
+    void window.vibeMeet.ideSession.getState().then((res) => {
+      if (!cancelled && res.ok) setPanel(res.state);
+    }).catch(() => { /* no live session yet — panels stay empty */ });
+    const dispose = window.vibeMeet.ideSession.onEvent((msg) => {
+      if (msg.hostId !== hostId) return; // defensive; main routes point-to-point
+      setPanel((prev) => applyPanelEvent(prev, msg.payload));
+    });
+    return () => {
+      cancelled = true;
+      dispose();
+    };
+  }, [hostId]);
 
   const toggleDir = async (node: FileNode) => {
     if (!node.isDir) return;
@@ -64,17 +127,12 @@ export function OpenCodeEditor({ hostId, backendId, sessionId, cwd }: OpenCodeEd
     }
   };
 
-  const handleSelectFile = async (node: FileNode) => {
-    if (node.isDir) {
-      await toggleDir(node);
-      return;
-    }
-
-    setSelectedFile(node.path);
+  const openFile = useCallback(async (path: string) => {
+    setSelectedFile(path);
     setLoading(true);
     setError(null);
     try {
-      const result = await window.vibeMeet.ideFiles.read(node.path);
+      const result = await window.vibeMeet.ideFiles.read(path);
       if (result.ok) {
         setFileContent(result.file.content);
       } else {
@@ -87,6 +145,14 @@ export function OpenCodeEditor({ hostId, backendId, sessionId, cwd }: OpenCodeEd
     } finally {
       setLoading(false);
     }
+  }, []);
+
+  const handleSelectFile = async (node: FileNode) => {
+    if (node.isDir) {
+      await toggleDir(node);
+      return;
+    }
+    await openFile(node.path);
   };
 
   const renderFileNode = (node: FileNode, depth = 0): React.ReactNode => {
@@ -125,6 +191,17 @@ export function OpenCodeEditor({ hostId, backendId, sessionId, cwd }: OpenCodeEd
     );
   };
 
+  const renderActivityItem = ({ key, item }: EditorKeyedActivity) => (
+    <div key={key} className="opencode-editor-activity-item">
+      <div className="opencode-editor-activity-time">
+        {new Date(item.ts).toLocaleTimeString()}
+      </div>
+      <div className="opencode-editor-activity-text" title={item.detail}>
+        {activityPrefix(item)}{item.label}
+      </div>
+    </div>
+  );
+
   return (
     <div className="opencode-editor">
       <header className="opencode-editor-header">
@@ -136,8 +213,21 @@ export function OpenCodeEditor({ hostId, backendId, sessionId, cwd }: OpenCodeEd
           ← 返回会议
         </button>
         <div className="opencode-editor-title">
+          <span
+            className="opencode-editor-status-dot"
+            style={{
+              display: 'inline-block',
+              width: 8,
+              height: 8,
+              borderRadius: '50%',
+              backgroundColor: STATUS_COLOR[panel.status],
+              marginRight: 6,
+            }}
+            title={STATUS_LABEL[panel.status]}
+          />
           <span className="opencode-editor-backend">{backendId}</span>
           <span className="opencode-editor-session">{hostId}</span>
+          <span className="opencode-editor-session">{STATUS_LABEL[panel.status]}</span>
         </div>
         <button
           type="button"
@@ -196,19 +286,60 @@ export function OpenCodeEditor({ hostId, backendId, sessionId, cwd }: OpenCodeEd
         </main>
 
         <aside className="opencode-editor-activity">
+          <div className="opencode-editor-activity-title">待办</div>
+          <div className="opencode-editor-activity-list">
+            {panel.todos.length === 0 && (
+              <div className="opencode-editor-activity-item">
+                <div className="opencode-editor-activity-text">暂无待办</div>
+              </div>
+            )}
+            {panel.todos.map((t) => (
+              <div key={t.id} className="opencode-editor-activity-item">
+                <div className="opencode-editor-activity-text">
+                  {t.status === 'completed' ? '✅' : t.status === 'in_progress' ? '🔨' : '⬜'} {t.content}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div className="opencode-editor-activity-title">改动</div>
+          <div className="opencode-editor-activity-list">
+            {panel.diff.length === 0 && (
+              <div className="opencode-editor-activity-item">
+                <div className="opencode-editor-activity-text">暂无改动</div>
+              </div>
+            )}
+            {panel.diff.map((d) => (
+              <div
+                key={d.file}
+                className="opencode-editor-activity-item"
+                role="button"
+                tabIndex={0}
+                title={`打开 ${d.file}`}
+                onClick={() => void openFile(d.file)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    void openFile(d.file);
+                  }
+                }}
+              >
+                <div className="opencode-editor-activity-text">
+                  {d.file} <span style={{ color: '#34c759' }}>+{d.additions}</span>{' '}
+                  <span style={{ color: '#ff3b30' }}>−{d.deletions}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+
           <div className="opencode-editor-activity-title">活动日志</div>
           <div className="opencode-editor-activity-list">
-            <div className="opencode-editor-activity-item">
-              <div className="opencode-editor-activity-time">刚刚</div>
-              <div className="opencode-editor-activity-text">编辑器窗口已打开</div>
-            </div>
-            <div className="opencode-editor-activity-item">
-              <div className="opencode-editor-activity-time">会话</div>
-              <div className="opencode-editor-activity-text">{sessionId}</div>
-            </div>
-            <div className="opencode-editor-activity-item">
-              <div className="opencode-editor-activity-text">活动日志功能将在后续版本完善</div>
-            </div>
+            {panel.activity.length === 0 && (
+              <div className="opencode-editor-activity-item">
+                <div className="opencode-editor-activity-text">暂无活动</div>
+              </div>
+            )}
+            {[...panel.activity].reverse().map(renderActivityItem)}
           </div>
         </aside>
       </div>
@@ -216,9 +347,19 @@ export function OpenCodeEditor({ hostId, backendId, sessionId, cwd }: OpenCodeEd
       <footer className="opencode-editor-terminal">
         <div className="opencode-editor-terminal-title">终端</div>
         <div className="opencode-editor-terminal-content">
-          <div className="opencode-editor-terminal-line">$ 终端功能将在后续版本完善</div>
+          <div className="opencode-editor-terminal-line">$ 终端：Phase 4 交付 PtyPanel</div>
         </div>
       </footer>
     </div>
   );
+}
+
+function activityPrefix(item: EditorActivityItem): string {
+  switch (item.kind) {
+    case 'tool': return '🔧 ';
+    case 'text': return '💬 ';
+    case 'file': return '📄 ';
+    case 'status': return '⚠️ ';
+    default: return '';
+  }
 }

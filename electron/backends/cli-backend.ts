@@ -134,6 +134,9 @@ export interface BackendSessionConfig {
   /** Native OS confirmer for destructive tool calls (PermissionBroker). When
    *  absent, destructive requests degrade to the meeting-UI approval card. */
   confirmDestructive?: (toolName: string, input: Record<string, unknown>) => Promise<boolean>;
+  /** Meeting host this session belongs to (set by the orchestrator backend
+   *  bridge). Adapters use it for hostId-keyed fan-out (editor windows). */
+  hostId?: string;
 }
 
 export interface BackendSessionSnapshot {
