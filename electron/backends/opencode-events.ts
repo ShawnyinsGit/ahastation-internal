@@ -133,6 +133,28 @@ export function partKeyOf(part: { messageID?: unknown; id?: unknown }): string |
   return `${part.messageID}:${part.id}`;
 }
 
+// ── Session resume decision (Phase 7) ───────────────────────────────────────
+
+export type SessionResumePlan =
+  | { kind: 'resume'; sessionId: string }
+  | { kind: 'expired' }
+  | { kind: 'fresh' };
+
+/** Pure resume decision: the journal snapshot carries the old opencode
+ *  sessionId; the server (adopted or freshly spawned, same cwd) lists the
+ *  sessions it persisted for its directory. Old session still there →
+ *  resume; gone → expired (caller degrades to a fresh session WITH a visible
+ *  notice, never silently); no snapshot → fresh. */
+export function planSessionResume(
+  snapshotSessionId: string | null | undefined,
+  serverSessionIds: readonly string[],
+): SessionResumePlan {
+  if (!snapshotSessionId) return { kind: 'fresh' };
+  return serverSessionIds.includes(snapshotSessionId)
+    ? { kind: 'resume', sessionId: snapshotSessionId }
+    : { kind: 'expired' };
+}
+
 /** Merge a full snapshot with events buffered during the resync window.
  *  Last-write-wins per (messageID, partID) — buffered events are newer than
  *  the snapshot and overwrite it. Ordering: snapshot order, buffered-only
