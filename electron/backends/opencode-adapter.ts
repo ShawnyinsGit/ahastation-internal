@@ -658,6 +658,24 @@ class OpenCodeSession implements BackendSession {
 
 // ── Backend factory ─────────────────────────────────────────────────────────
 
+/** Env var pair for the provider an opencode model id belongs to
+ *  ('anthropic/claude-…' → ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL). The two
+ *  providers we ship models for are explicit; any other provider prefix
+ *  falls back to the <PROVIDER>_API_KEY / <PROVIDER>_BASE_URL convention. */
+function providerEnvVars(model?: string): { keyVar: string; baseUrlVar: string } {
+  const provider = (model ?? '').split('/')[0]?.toLowerCase() || 'anthropic';
+  switch (provider) {
+    case 'openai':
+      return { keyVar: 'OPENAI_API_KEY', baseUrlVar: 'OPENAI_BASE_URL' };
+    case 'anthropic':
+      return { keyVar: 'ANTHROPIC_API_KEY', baseUrlVar: 'ANTHROPIC_BASE_URL' };
+    default: {
+      const p = provider.toUpperCase().replace(/[^A-Z0-9]/g, '_');
+      return { keyVar: `${p}_API_KEY`, baseUrlVar: `${p}_BASE_URL` };
+    }
+  }
+}
+
 export class OpenCodeBackend implements CliBackend {
   readonly id = 'opencode';
   readonly capabilities = OPENCODE_CAPABILITIES;
@@ -676,14 +694,22 @@ export class OpenCodeBackend implements CliBackend {
     return resolveOpencodeBinary();
   }
 
-  buildEnv(_auth: BackendAuthConfig, extra?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  buildEnv(auth: BackendAuthConfig, extra?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
     // The server env is whitelist-built inside opencode-server-process.ts;
     // whatever this returns is handed to it as providerEnv (explicit
     // credentials only). Ambient process.env is intentionally NOT spread —
     // that was the leak pattern this module exists to kill.
-    // TODO(phase2-auth): map settings-configured provider keys (per chosen
-    // model/provider) into this env once the opencode auth flow lands.
-    return { ...extra };
+    const env = { ...extra };
+    // Hand the settings-configured provider key to the env var of the
+    // provider the chosen model belongs to ('anthropic/claude-…' →
+    // ANTHROPIC_API_KEY). The spawned server never sees our ambient env,
+    // so this explicit pass-through is the ONLY way a key reaches it.
+    if (auth.authMode === 'apikey' && auth.apiKey) {
+      const { keyVar, baseUrlVar } = providerEnvVars(auth.model ?? this.capabilities.defaultModel);
+      env[keyVar] = auth.apiKey;
+      if (auth.baseUrl) env[baseUrlVar] = auth.baseUrl;
+    }
+    return env;
   }
 
   async validateAuth(config: BackendAuthConfig): Promise<{ ok: boolean; error?: string }> {
