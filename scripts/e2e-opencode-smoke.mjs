@@ -8,9 +8,10 @@
 // / safeStorage:
 //
 //   export AHAMEET_E2E_API_KEY=sk-ant-...      # provider key (required)
-//   export AHAMEET_E2E_PROVIDER=anthropic      # anthropic (default) | openai
+//   export AHAMEET_E2E_PROVIDER=anthropic      # anthropic (default) | openai | kimi
 //   export AHAMEET_E2E_MODEL=anthropic/claude-sonnet-4-5   # optional override
 //   npm run build:electron && node scripts/e2e-opencode-smoke.mjs
+//   # kimi = Moonshot OpenAI 兼容端点（api.moonshot.cn），key 形如 sk-kimi-...
 //
 // Without AHAMEET_E2E_API_KEY the script prints SKIP guidance and exits 0.
 // Every step prints a PASS/FAIL line; the exit code is 0 only when all pass.
@@ -36,22 +37,25 @@ function record(name, ok, detail = '') {
 
 const apiKey = process.env.AHAMEET_E2E_API_KEY?.trim();
 const provider = (process.env.AHAMEET_E2E_PROVIDER?.trim() || 'anthropic').toLowerCase();
-const DEFAULT_MODELS = {
-  anthropic: 'anthropic/claude-sonnet-4-5',
-  openai: 'openai/gpt-5.4',
+// kimi = Moonshot 的 OpenAI 兼容端点（opencode 的 openai provider + OPENAI_BASE_URL）。
+const PROVIDER_PRESETS = {
+  anthropic: { model: 'anthropic/claude-sonnet-4-5', baseUrl: undefined, keyVar: 'ANTHROPIC_API_KEY' },
+  openai: { model: 'openai/gpt-5.4', baseUrl: undefined, keyVar: 'OPENAI_API_KEY' },
+  kimi: { model: 'openai/kimi-k2-0905-preview', baseUrl: 'https://api.moonshot.cn/v1', keyVar: 'OPENAI_API_KEY' },
 };
+const preset = PROVIDER_PRESETS[provider];
 
 if (!apiKey) {
   console.log('SKIP  AHAMEET_E2E_API_KEY 未设置 — 跳过 E2E smoke（不影响构建/单测）。');
   console.log('');
   console.log('用法（macOS 实测）:');
-  console.log('  export AHAMEET_E2E_API_KEY=sk-ant-...     # 或 OpenAI key');
-  console.log('  export AHAMEET_E2E_PROVIDER=anthropic      # anthropic(默认) | openai');
+  console.log('  export AHAMEET_E2E_API_KEY=sk-ant-...     # 或 OpenAI/Kimi key');
+  console.log('  export AHAMEET_E2E_PROVIDER=anthropic      # anthropic(默认) | openai | kimi');
   console.log('  npm run build:electron && node scripts/e2e-opencode-smoke.mjs');
   process.exit(0);
 }
 
-const model = process.env.AHAMEET_E2E_MODEL?.trim() || DEFAULT_MODELS[provider];
+const model = process.env.AHAMEET_E2E_MODEL?.trim() || preset?.model;
 if (!model) {
   record('provider 识别', false, `未知 AHAMEET_E2E_PROVIDER='${provider}'，且未给 AHAMEET_E2E_MODEL`);
   process.exit(1);
@@ -135,11 +139,13 @@ async function main() {
   if (!binary) return;
 
   // Step 2: buildEnv maps the settings-style key onto the provider env var.
-  const env = backend.buildEnv({ authMode: 'apikey', apiKey, model });
-  const expectedKeyVar = provider === 'openai' ? 'OPENAI_API_KEY' : 'ANTHROPIC_API_KEY';
+  const env = backend.buildEnv({ authMode: 'apikey', apiKey, model, baseUrl: preset?.baseUrl });
+  const expectedKeyVar = preset?.keyVar ?? 'ANTHROPIC_API_KEY';
   const keyWired = env[expectedKeyVar] === apiKey;
-  record('buildEnv 把 key 接到 provider env', keyWired, expectedKeyVar);
-  if (!keyWired) return;
+  const baseUrlWired = !preset?.baseUrl || env.OPENAI_BASE_URL === preset.baseUrl;
+  record('buildEnv 把 key 接到 provider env', keyWired && baseUrlWired,
+    `${expectedKeyVar}${preset?.baseUrl ? ` + baseUrl=${preset.baseUrl}` : ''}`);
+  if (!keyWired || !baseUrlWired) return;
 
   // Step 3: session start (spawn server, SSE subscribe-before-create).
   workdir = await mkdtemp(join(tmpdir(), 'ahameet-e2e-'));
