@@ -158,6 +158,12 @@ electron/
 5. **包格式与更新（v1.2 用户裁决 + 修正）**：AhaStation 自身打进系统镜像（deb/rootfs 内置）；对外掌机 Linux **AppImage 为主**（注明 FUSE2 依赖），**Flatpak 后续评估**——其沙箱内看不到宿主 node/git/opencode，`flatpak-spawn --host` 需高危权限且 Flathub 审查严，与产品核心功能冲突，若未来上架只能发功能受限版。更新：**发布自动化流水线是 electron-updater 的前置**（CI 构建 → 上传 GitHub Releases → latest.yml，当前 `--publish never` + `writeUpdateInfo: false` 连物料都不产出）；win/linux 未签名 + electron-updater；**mac 未签名 Squirrel.Mac 拒装**——短期版本检查 + 手动下载提示，签名公证（Phase 7 H 项）后开 mac updater（补 zip target + latest-mac.json）；系统 OTA 与 electron-updater 的版本仲裁见 §0。
 6. **Agent CLI 集成矩阵**（整机 §4.2，已核实）：OpenCode/Claude Code/Codex/Grok Build 均有官方 aarch64；Hermes（纯 Python）/Pi（纯 Node）/OpenClaw（仅 CLI）跨平台可跑——ARM64 无平台障碍。
 
+**Phase 6b 落地纪要（2026-07-21）**：
+- CI：`build-matrix.yml` 取代 `build.yml`（已删除）——x64 三 runner push/PR 触发，每 job 跑双 typecheck + 全量测试 + whisper 资产断言（`scripts/assert-whisper-assets.mjs`，二进制+模型缺失即 fail）；tag push 经 `softprops/action-gh-release` + `GITHUB_TOKEN` 上传产物与 `latest*.yml`。linux-arm64 job 用 `ubuntu-24.04-arm` 但**仅 workflow_dispatch 手动触发**——本仓 private，arm runner 吃付费分钟。
+- whisper：x64 用 whisper.cpp **v1.9.1 官方预编译**（`whisper-bin-ubuntu-x64.tar.gz` / `whisper-bin-x64.zip`，已实测 200；旧 v1.7.4 分二进制 URL 全部 404 已废弃）；**linux-arm64 在 CI 里 cmake 自编译**（官方无 arm 预编译）；fetch 脚本下载/模型失败改 exit 1；`GGML_BACKEND_PATH` 按平台选实际存在的 backend 文件（`electron/whisper-ggml.ts`），mac 行为不变。
+- 模型：**190MB 维持包内置**（extraResources）——「首启按需下载 + hash 校验」记为后续项。
+- 更新：**私有仓降级两条**（实测 2026-07-21：匿名访问仓主页 404、API 需 token）：① 应用内更新不做 electron-updater feed（客户端拿不到私有 release，依赖不装），改为「redirect 解析 `releases/latest` tag + 24h 缓存」的轻量版本检查——私有期间静默 no-op，仓库公开后零改动自愈；设置页显示当前版本 + 新版手动下载链接。② `latest*.yml` 仍随 release 上传，作为公开化后启用 updater 的物料。签名公证（Phase 7 H 项）与 mac updater（zip target + latest-mac.json）维持原计划不变。
+
 ---
 
 ## 4. 分期路线（v1.2：Phase 6 拆分，软件 Phase 与硬件阶段对齐）

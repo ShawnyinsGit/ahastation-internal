@@ -24,6 +24,8 @@ A real-time meeting-style collaboration app that pairs you with Claude Code over
 2. Open the DMG and drag AhaMeet to Applications
 3. Right-click → Open (first launch only, app is unsigned)
 
+**Linux (AppImage)**: AppImage requires **FUSE2** (`sudo apt install libfuse2` on Ubuntu/Debian; Fedora 默认自带）。然后 `chmod +x AhaMeet-*.AppImage && ./AhaMeet-*.AppImage`。AppImage 与 deb 均有 x64 与 arm64 构建（arm64 目前标注未验证，验证走 CI 的 linux-arm64 手动 job）。
+
 ## Authentication
 
 On the login screen, expand **Claude authentication** and choose one of:

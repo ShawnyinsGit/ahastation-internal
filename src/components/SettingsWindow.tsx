@@ -2,7 +2,7 @@
 // via ?view=settings. Opaque solid background, no glass/transparency.
 // Hosts all settings panels: Memory, Voice, VoiceLock, Skills.
 
-import { Component, useCallback, type ErrorInfo, type ReactNode } from 'react';
+import { Component, useCallback, useEffect, useState, type ErrorInfo, type ReactNode } from 'react';
 import { useVoicePreferences } from '../hooks/useVoicePreferences';
 import { useVoiceLock } from '../hooks/useVoiceLock';
 import { MemoryPanel } from './MemoryPanel';
@@ -73,12 +73,19 @@ const dummySpeakingRef = { current: false };
 
 function SettingsWindowInner() {
   const voicePrefs = useVoicePreferences();
+  const [appVersion, setAppVersion] = useState<string>('');
+  const [updateInfo, setUpdateInfo] = useState<{ latest: string; url: string } | null>(null);
   const voiceLock = useVoiceLock({
     muted: false,
     setMuted: noopSetState,
     setAiSpeaking: noopSetState,
     speakingRef: dummySpeakingRef,
   });
+
+  useEffect(() => {
+    void window.vibeMeet.appVersion().then(setAppVersion).catch(() => {});
+    return window.vibeMeet.onUpdateAvailable((info) => setUpdateInfo(info));
+  }, []);
 
   const handleClose = useCallback(() => {
     void window.vibeMeet.settingsWindow.close();
@@ -97,6 +104,17 @@ function SettingsWindowInner() {
           ✕
         </button>
       </header>
+      <div className="settings-window-version">
+        当前版本 v{appVersion || '…'}
+        {updateInfo && (
+          <>
+            {' · '}
+            <a href={updateInfo.url} target="_blank" rel="noreferrer">
+              新版本 {updateInfo.latest} 可用，前往下载
+            </a>
+          </>
+        )}
+      </div>
       <div className="settings-window-body">
         <BackendSettings />
         <IDEManagerPanel />

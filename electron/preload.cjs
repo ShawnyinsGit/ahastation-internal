@@ -175,6 +175,12 @@ const api = {
     ipcRenderer.on('display-changed', listener);
     return () => ipcRenderer.removeListener('display-changed', listener);
   },
+  appVersion: () => ipcRenderer.invoke('app:version'),
+  onUpdateAvailable: (cb) => {
+    const listener = (_, info) => cb(info);
+    ipcRenderer.on('update-available', listener);
+    return () => ipcRenderer.removeListener('update-available', listener);
+  },
   // Secure editor file browsing. No cwd is ever sent — the main process
   // resolves the workspace from the sender's editor-window registration.
   ideFiles: {

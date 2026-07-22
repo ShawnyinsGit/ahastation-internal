@@ -42,8 +42,7 @@
   },
   "dmg": {
     "icon": null,
-    "title": "AhaMeet ${version}",
-    "writeUpdateInfo": false
+    "title": "AhaMeet ${version}"
   },
   "win": {
     "target": [
