@@ -93,4 +93,4 @@ npm run build:electron && node scripts/e2e-opencode-smoke.mjs   # 无 UI 是无�
 npm run dev   # 要看界面走这个
 ```
 
-smoke 脚本支持 kimi provider（Moonshot OpenAI 兼容端点 `https://api.moonshot.cn/v1`，模型 `kimi-k2-0905-preview`，可用 `AHAMEET_E2E_MODEL` 覆盖）。注意：**smoke 是无头脚本，不弹任何窗口**，UI 验证用 `npm run dev`。
+smoke 脚本支持 kimi provider（**Kimi Code** OpenAI 兼容端点 `https://api.kimi.com/coding/v1`，模型 `k3`，可用 `AHAMEET_E2E_MODEL` 覆盖）。注意：**smoke 是无头脚本，不弹任何窗口**，UI 验证用 `npm run dev`。

@@ -11,7 +11,7 @@
 //   export AHAMEET_E2E_PROVIDER=anthropic      # anthropic (default) | openai | kimi
 //   export AHAMEET_E2E_MODEL=anthropic/claude-sonnet-4-5   # optional override
 //   npm run build:electron && node scripts/e2e-opencode-smoke.mjs
-//   # kimi = Moonshot OpenAI 兼容端点（api.moonshot.cn），key 形如 sk-kimi-...
+//   # kimi = Kimi Code OpenAI 兼容端点（api.kimi.com/coding/v1），key 形如 sk-kimi-...
 //
 // Without AHAMEET_E2E_API_KEY the script prints SKIP guidance and exits 0.
 // Every step prints a PASS/FAIL line; the exit code is 0 only when all pass.
@@ -37,11 +37,12 @@ function record(name, ok, detail = '') {
 
 const apiKey = process.env.AHAMEET_E2E_API_KEY?.trim();
 const provider = (process.env.AHAMEET_E2E_PROVIDER?.trim() || 'anthropic').toLowerCase();
-// kimi = Moonshot 的 OpenAI 兼容端点（opencode 的 openai provider + OPENAI_BASE_URL）。
+// kimi = Kimi Code 的 OpenAI 兼容端点（opencode 的 openai provider + OPENAI_BASE_URL）。
+// 端点与模型名按官方文档：https://www.kimi.com/code/docs/en/（api.kimi.com/coding/v1，模型 ID = k3）。
 const PROVIDER_PRESETS = {
   anthropic: { model: 'anthropic/claude-sonnet-4-5', baseUrl: undefined, keyVar: 'ANTHROPIC_API_KEY' },
   openai: { model: 'openai/gpt-5.4', baseUrl: undefined, keyVar: 'OPENAI_API_KEY' },
-  kimi: { model: 'openai/kimi-k3', baseUrl: 'https://api.moonshot.cn/v1', keyVar: 'OPENAI_API_KEY' },
+  kimi: { model: 'openai/k3', baseUrl: 'https://api.kimi.com/coding/v1', keyVar: 'OPENAI_API_KEY' },
 };
 const preset = PROVIDER_PRESETS[provider];
 
