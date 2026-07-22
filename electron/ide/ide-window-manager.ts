@@ -90,6 +90,17 @@ export function forwardToEditorWindow(hostId: string, payload: unknown): boolean
   return true;
 }
 
+// ── Window-closed listeners (PTY cleanup etc.) ─────────────────────────────
+
+export type EditorWindowClosedListener = (hostId: string, webContentsId: number) => void;
+
+const closedListeners = new Set<EditorWindowClosedListener>();
+
+export function onEditorWindowClosed(cb: EditorWindowClosedListener): () => void {
+  closedListeners.add(cb);
+  return () => { closedListeners.delete(cb); };
+}
+
 export function createEditorWindow(options: EditorWindowOptions): BrowserWindow {
   const key = editorWindowKey(options.hostId);
   const existing = editorWindows.get(key);
@@ -133,6 +144,13 @@ export function createEditorWindow(options: EditorWindowOptions): BrowserWindow 
 
   win.on('closed', () => {
     editorWindows.delete(key);
+    for (const cb of closedListeners) {
+      try {
+        cb(key, win.webContents.id);
+      } catch (err) {
+        console.warn('[ide-window-manager] closed listener failed:', err);
+      }
+    }
   });
 
   // CSP injection. Dev keeps the vite origin + HMR websocket; prod is fully
@@ -158,7 +176,10 @@ export function createEditorWindow(options: EditorWindowOptions): BrowserWindow 
       ].join('; ')
     : [
         `default-src 'self'`,
-        `script-src 'self'`,
+        // 'wasm-unsafe-eval' is for shiki's oniguruma WASM engine (Phase 4
+        // syntax highlighting). Deliberately narrower than the old
+        // 'unsafe-eval': it permits WASM compilation only, not JS eval.
+        `script-src 'self' 'wasm-unsafe-eval'`,
         `style-src 'self' 'unsafe-inline'`,
         `img-src 'self' data: blob:`,
         `media-src 'self' blob: data:`,

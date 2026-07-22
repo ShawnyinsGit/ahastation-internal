@@ -113,8 +113,9 @@ const OPENCODE_CAPABILITIES: BackendCapabilities = {
  *  tool call asks for permission. Requests buffer in pendingPermissions
  *  until the Phase 2 PR② PermissionBroker answers them — server-side the
  *  tool call blocks, nothing is auto-allowed. Exact permission-key coverage
- *  gets validated with a live provider key (spike §7 follow-up). */
-const OPENCODE_SERVER_CONFIG: Record<string, unknown> = {
+ *  gets validated with a live provider key (spike §7 follow-up). Exported
+ *  for the PTY manager, which spawns servers on the same pinned config. */
+export const OPENCODE_SERVER_CONFIG: Record<string, unknown> = {
   permission: { '*': 'ask' },
 };
 

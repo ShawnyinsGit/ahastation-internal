@@ -37,6 +37,10 @@
     "@qoder-ai/qoder-agent-sdk": "1.0.14",
     "@qoder-ai/qodercli": "1.0.47",
     "@ricky0123/vad-web": "^0.0.30",
+    "@shikijs/langs": "^4.3.1",
+    "@shikijs/themes": "^4.3.1",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
     "docx-preview": "^0.3.3",
     "fft.js": "^4.0.4",
     "lucide-react": "^1.16.0",
@@ -44,6 +48,7 @@
     "pdfjs-dist": "^5.7.284",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
+    "shiki": "^4.3.1",
     "zod": "^4.4.3"
   },
   "optionalDependencies": {

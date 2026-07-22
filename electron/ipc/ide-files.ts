@@ -14,8 +14,8 @@
 //    traversal, absolute paths, and symlink escapes.
 //  - Files larger than 512KB are refused.
 
-import { readdir, readFile, realpath, stat } from 'node:fs/promises';
-import { join, relative, resolve, sep } from 'node:path';
+import { readdir, readFile, realpath, stat, writeFile } from 'node:fs/promises';
+import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { z } from 'zod';
 import { getEditorEntryByWebContentsId } from '../ide/ide-window-manager.js';
 import { editorWindowSenderPolicy, handleSecure } from './validators.js';
@@ -32,6 +32,9 @@ export interface FileContent {
   path: string;
   content: string;
   truncated: boolean;
+  /** File mtime at read time — the editor sends it back as expectedMtime
+   *  for optimistic-concurrency writes. */
+  mtimeMs: number;
 }
 
 const MAX_FILE_SIZE = 512 * 1024; // 512KB
@@ -55,6 +58,22 @@ export const ideFilesListPayloadSchema = z
 export const ideFilesReadPayloadSchema = z
   .object({ path: z.string().min(1).max(MAX_PATH_LENGTH) })
   .strict();
+
+export const ideFilesWritePayloadSchema = z
+  .object({
+    path: z.string().min(1).max(MAX_PATH_LENGTH),
+    content: z.string().max(MAX_FILE_SIZE),
+    /** Optimistic concurrency: the mtime the editor read. Mismatch → the
+     *  write is refused as a conflict instead of clobbering newer edits. */
+    expectedMtime: z.number().nonnegative().optional(),
+  })
+  .strict();
+
+/** mtime conflict check with a small epsilon for filesystems whose mtime
+ *  granularity is coarser than milliseconds. */
+export function isMtimeConflict(expectedMtime: number, actualMtime: number): boolean {
+  return Math.abs(expectedMtime - actualMtime) > 1;
+}
 
 /** Pure confinement check on already-resolved paths: target must be the root
  *  itself or a descendant. The trailing-separator comparison is what rejects
@@ -98,6 +117,37 @@ export async function resolveConfinedPath(
     return { ok: false, error: 'Path outside workspace' };
   }
   return { ok: true, root, target };
+}
+
+/** Write variant of resolveConfinedPath: existing targets go through the
+ *  same realpath confinement; NEW files are confined via their parent
+ *  directory's realpath (realpath on the target itself would ENOENT). */
+export async function resolveConfinedWriteTarget(
+  workspaceRoot: string,
+  relPath: string,
+): Promise<ConfinedPathResult> {
+  const existing = await resolveConfinedPath(workspaceRoot, relPath);
+  if (existing.ok) return existing;
+
+  let root: string;
+  try {
+    root = await realpath(resolve(workspaceRoot));
+  } catch {
+    return { ok: false, error: 'Workspace root not found' };
+  }
+  const candidate = resolve(root, relPath);
+  let parentReal: string;
+  try {
+    parentReal = await realpath(dirname(candidate));
+  } catch {
+    return { ok: false, error: 'Parent directory not found' };
+  }
+  if (!isPathConfined(root, parentReal)) {
+    return { ok: false, error: 'Path outside workspace' };
+  }
+  // Re-anchor the filename on the REAL parent path so a symlinked parent
+  // can't smuggle the write elsewhere.
+  return { ok: true, root, target: join(parentReal, basename(candidate)) };
 }
 
 function getEditorCwd(senderId: number): string | null {
@@ -177,6 +227,55 @@ export function registerIdeFilesIpc(): void {
           path: relative(confined.root, confined.target),
           content,
           truncated: false,
+          mtimeMs: stats.mtimeMs,
+        } as FileContent,
+      };
+    },
+  });
+
+  // File write (Phase 4): same confinement + 512KB cap as read, plus
+  // optimistic concurrency via expectedMtime. Manual save is an explicit
+  // user action through the validated IPC path — no native dialog (v1.2 §5).
+  // After the write, the server's file watcher (EventFileWatcherUpdated)
+  // is what lets the agent notice the change; the UI also refreshes.
+  handleSecure('ide-files:write', {
+    schema: ideFilesWritePayloadSchema,
+    authorize: editorWindowSenderPolicy(),
+    authorizeError: 'Sender is not a registered editor window',
+    handler: async (payload, senderId) => {
+      const entry = getEditorEntryByWebContentsId(senderId);
+      if (!entry) {
+        return { ok: false, error: 'Sender is not a registered editor window' };
+      }
+      const confined = await resolveConfinedWriteTarget(entry.options.cwd, payload.path);
+      if (!confined.ok) {
+        return { ok: false, error: confined.error };
+      }
+
+      const before = await stat(confined.target).catch(() => null);
+      if (payload.expectedMtime !== undefined) {
+        if (!before) {
+          return { ok: false, error: 'File no longer exists', conflict: true };
+        }
+        if (isMtimeConflict(payload.expectedMtime, before.mtimeMs)) {
+          return {
+            ok: false,
+            error: 'File changed on disk since you opened it',
+            conflict: true,
+            currentMtime: before.mtimeMs,
+          };
+        }
+      }
+
+      await writeFile(confined.target, payload.content, 'utf8');
+      const after = await stat(confined.target);
+      return {
+        ok: true,
+        file: {
+          path: relative(confined.root, confined.target),
+          content: payload.content,
+          truncated: false,
+          mtimeMs: after.mtimeMs,
         } as FileContent,
       };
     },

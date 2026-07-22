@@ -740,6 +740,12 @@ export class Orchestrator implements OrchestratorBridge {
     return this.hostGroups.get(hostId)?.getHost() ?? null;
   }
 
+  /** Journal meeting id — server-registry key component (PTY creation needs
+   *  it to acquire the shared server for a meeting tab). */
+  getMeetingId(): string {
+    return this.meetingId;
+  }
+
   async interrupt() {
     const tasks: Promise<void>[] = [];
     for (const hg of this.hostGroups.values()) {
