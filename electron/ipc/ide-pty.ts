@@ -16,7 +16,7 @@
 
 import { z } from 'zod';
 import {
-  getEditorEntryByWebContentsId,
+  resolveEditorContextByWebContentsId,
   forwardToEditorWindow,
   onEditorWindowClosed,
 } from '../ide/ide-window-manager.js';
@@ -103,7 +103,10 @@ export class PtySessionBook {
   }
 }
 
-// ── Live session state (main-side, keyed by webContents id) ────────────────
+// ── Live session state (main-side, keyed by hostId) ───────────────────────
+// One PTY per host — equivalent to one-per-window for independent windows
+// (hostId-keyed) and correct for the overlay, where every host shares the
+// main window's webContents (Phase 6a).
 
 interface LivePty {
   ptyId: string;
@@ -116,7 +119,7 @@ interface LivePty {
   closed: boolean;
 }
 
-const livePtys = new Map<number, LivePty>();
+const livePtys = new Map<string, LivePty>();
 
 async function restJson(
   method: string,
@@ -136,11 +139,11 @@ async function restJson(
   return { ok: res.ok, status: res.status, data };
 }
 
-function teardownPty(webContentsId: number, notify: boolean): void {
-  const live = livePtys.get(webContentsId);
+function teardownPty(hostId: string, notify: boolean): void {
+  const live = livePtys.get(hostId);
   if (!live || live.closed) return;
   live.closed = true;
-  livePtys.delete(webContentsId);
+  livePtys.delete(hostId);
   try {
     live.ws.close();
   } catch { /* already closed */ }
@@ -171,8 +174,8 @@ export function registerIdePtyIpc(ctx: IpcContext): void {
   const editorOnlyError = 'Sender is not a registered editor window';
 
   // Window closed → tear down its PTY (renderer is gone; main owns cleanup).
-  onEditorWindowClosed((_hostId, webContentsId) => {
-    teardownPty(webContentsId, false);
+  onEditorWindowClosed((hostId) => {
+    teardownPty(hostId, false);
   });
 
   handleSecure('ide-pty:create', {
@@ -180,15 +183,16 @@ export function registerIdePtyIpc(ctx: IpcContext): void {
     authorize: editorOnly,
     authorizeError: editorOnlyError,
     handler: async (_payload, senderId) => {
-      const entry = getEditorEntryByWebContentsId(senderId);
-      if (!entry) return { ok: false, error: editorOnlyError };
+      const editorContext = resolveEditorContextByWebContentsId(senderId);
+      if (!editorContext) return { ok: false, error: editorOnlyError };
+      const hostId = editorContext.hostId;
 
-      const existing = livePtys.get(senderId);
+      const existing = livePtys.get(hostId);
       if (existing && !existing.closed) {
         return { ok: true, ptyId: existing.ptyId, existing: true };
       }
 
-      const slot = ctx.registry.get(entry.options.sessionId);
+      const slot = ctx.registry.get(editorContext.sessionId);
       const meetingId = slot?.orchestrator.getMeetingId();
       if (!meetingId) {
         return { ok: false, error: 'Meeting slot for this window is gone' };
@@ -197,18 +201,18 @@ export function registerIdePtyIpc(ctx: IpcContext): void {
       // Shared server for this meeting+cwd; the PTY holds one refcount.
       const acquired = await getOpencodeServerRegistry().acquire({
         meetingId,
-        cwd: entry.options.cwd,
-        spawn: () => defaultServerSpawn({ cwd: entry.options.cwd, config: OPENCODE_SERVER_CONFIG }),
+        cwd: editorContext.cwd,
+        spawn: () => defaultServerSpawn({ cwd: editorContext.cwd, config: OPENCODE_SERVER_CONFIG }),
       });
 
       // §2.2 rule 8: create = explicit user action (audit-logged, no native
       // dialog). The shell command runs server-side in the pinned cwd.
       const shell = process.env.SHELL || '/bin/bash';
-      console.log(`[ide-pty] AUDIT create: host=${entry.options.hostId} cwd=${entry.options.cwd} shell=${shell}`);
+      console.log(`[ide-pty] AUDIT create: host=${hostId} cwd=${editorContext.cwd} shell=${shell}`);
       const created = await restJson('POST', `${acquired.handle.url}/pty`, acquired.handle.password, {
         command: shell,
         args: [],
-        title: `AhaMeet ${entry.options.hostId}`,
+        title: `AhaMeet ${hostId}`,
       });
       if (!created.ok || !created.data || typeof (created.data as { id?: unknown }).id !== 'string') {
         await getOpencodeServerRegistry().release(acquired.key);
@@ -226,7 +230,7 @@ export function registerIdePtyIpc(ctx: IpcContext): void {
 
       const live: LivePty = {
         ptyId,
-        hostId: entry.options.hostId,
+        hostId,
         serverKey: acquired.key,
         url: acquired.handle.url,
         password: acquired.handle.password,
@@ -234,7 +238,7 @@ export function registerIdePtyIpc(ctx: IpcContext): void {
         limiter: new PtyInputLimiter(),
         closed: false,
       };
-      livePtys.set(senderId, live);
+      livePtys.set(hostId, live);
 
       ws.onmessage = (ev) => {
         const data = typeof ev.data === 'string'
@@ -244,7 +248,7 @@ export function registerIdePtyIpc(ctx: IpcContext): void {
       };
       ws.onclose = () => {
         // Server shutdown / pty exit / network drop — main cleans up.
-        teardownPty(senderId, true);
+        teardownPty(hostId, true);
       };
       ws.onerror = () => {
         forwardToEditorWindow(live.hostId, { kind: 'pty-error', error: 'PTY WebSocket error' } satisfies PtyDownlink);
@@ -259,7 +263,9 @@ export function registerIdePtyIpc(ctx: IpcContext): void {
     authorize: editorOnly,
     authorizeError: editorOnlyError,
     handler: (payload, senderId) => {
-      const live = livePtys.get(senderId);
+      const editorContext = resolveEditorContextByWebContentsId(senderId);
+      if (!editorContext) return { ok: false, error: editorOnlyError };
+      const live = livePtys.get(editorContext.hostId);
       if (!live || live.closed) return { ok: false, error: 'No live PTY for this window' };
       if (!live.limiter.allow(Buffer.byteLength(payload.data, 'utf8'))) {
         return { ok: false, error: 'PTY input rate/size limit exceeded', dropped: true };
@@ -274,7 +280,9 @@ export function registerIdePtyIpc(ctx: IpcContext): void {
     authorize: editorOnly,
     authorizeError: editorOnlyError,
     handler: async (payload, senderId) => {
-      const live = livePtys.get(senderId);
+      const editorContext = resolveEditorContextByWebContentsId(senderId);
+      if (!editorContext) return { ok: false, error: editorOnlyError };
+      const live = livePtys.get(editorContext.hostId);
       if (!live || live.closed) return { ok: false, error: 'No live PTY for this window' };
       // REST PUT — never a WS control frame (spike §6: those become input).
       const res = await restJson(
@@ -292,7 +300,9 @@ export function registerIdePtyIpc(ctx: IpcContext): void {
     authorize: editorOnly,
     authorizeError: editorOnlyError,
     handler: (_payload, senderId) => {
-      teardownPty(senderId, false);
+      const editorContext = resolveEditorContextByWebContentsId(senderId);
+      if (!editorContext) return { ok: false, error: editorOnlyError };
+      teardownPty(editorContext.hostId, false);
       return { ok: true };
     },
   });

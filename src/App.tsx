@@ -14,6 +14,7 @@ import { useSpacebarMute } from './hooks/useSpacebarMute';
 import { useTtsWiring } from './hooks/useTtsWiring';
 import { useDragAndDrop } from './hooks/useDragAndDrop';
 import { useHandheldMode } from './lib/handheld-mode';
+import { planDisplayMigration } from './lib/display-migration';
 import { meetingStore } from './lib/meeting-store';
 import { Lobby } from './components/Lobby';
 import { TabStrip } from './components/TabStrip';
@@ -27,6 +28,7 @@ import { SettingsMenu } from './components/SettingsMenu';
 import { VoiceGuideModal } from './components/VoiceGuideModal';
 import { ParticipantPanel } from './components/ParticipantPanel';
 import { PermissionCard } from './components/PermissionCard';
+import { EditorOverlay } from './components/EditorOverlay';
 import type { AutoApproveScope, BackendInfo, DesktopSource, SkillInfo } from './types';
 
 export function App() {
@@ -379,7 +381,23 @@ export function App() {
     if (!result.ok) console.warn('[host] reconnect failed:', result.error);
   }, [workers]);
 
+  // Handheld UI mode (§3.3): resolved mode drives the root <html> class via
+  // the hook; this flag switches the toolbar variant + approval modal AND
+  // the editor form factor (overlay in handheld, independent window else).
+  const { mode: uiMode, override: uiModeOverride } = useHandheldMode();
+  const handheld = uiMode === 'handheld';
+  const [permModalOpen, setPermModalOpen] = useState(false);
+  const permissionCount = workers.workerList.filter((w) => w.pendingPermission).length;
+  // Handheld editor overlay (Phase 6a): the hostId currently shown in the
+  // App-internal overlay, or null. Overlay ≠ route — App stays mounted.
+  const [overlayHostId, setOverlayHostId] = useState<string | null>(null);
+
   const handleOpenEditor = useCallback((backendId: string, hostId: string) => {
+    if (handheld) {
+      // Handheld form factor: App-internal overlay, no separate window.
+      setOverlayHostId(hostId);
+      return;
+    }
     const sessionId = activeTab?.id ?? 'default';
     const cwd = state.cwd || '.';
     const title = `${backendId} - ${hostId}`;
@@ -390,14 +408,47 @@ export function App() {
       cwd,
       title,
     });
-  }, [activeTab?.id, state.cwd]);
+  }, [handheld, activeTab?.id, state.cwd]);
 
-  // Handheld UI mode (§3.3): resolved mode drives the root <html> class via
-  // the hook; this flag switches the toolbar variant + approval modal.
-  const { mode: uiMode } = useHandheldMode();
-  const handheld = uiMode === 'handheld';
-  const [permModalOpen, setPermModalOpen] = useState(false);
-  const permissionCount = workers.workerList.filter((w) => w.pendingPermission).length;
+  // Dual-display migration (Phase 6a §3.2, AUTO mode only): when the
+  // resolved mode flips after a display add/remove, convert the editor form
+  // factor — overlay → independent window on desktop, window → overlay on
+  // handheld. Scene (file/scroll) round-trips via the scene store.
+  const prevUiModeRef = useRef(uiMode);
+  useEffect(() => {
+    const prev = prevUiModeRef.current;
+    prevUiModeRef.current = uiMode;
+    if (prev === uiMode) return;
+    void (async () => {
+      const wins = await window.vibeMeet.openCodeEditor.list().catch(() => null);
+      const editorWindows = wins && wins.ok ? wins.windows.map((w) => w.hostId) : [];
+      const actions = planDisplayMigration({
+        override: uiModeOverride,
+        modeBefore: prev,
+        modeAfter: uiMode,
+        overlay: { open: overlayHostId !== null, hostId: overlayHostId },
+        editorWindows,
+      });
+      for (const action of actions) {
+        if (action.kind === 'overlay-to-window') {
+          const hostId = action.hostId;
+          setOverlayHostId(null);
+          const backendId = workers.hostGroups.get(hostId)?.backendId ?? 'opencode';
+          void window.vibeMeet.openCodeEditor.open({
+            backendId,
+            hostId,
+            sessionId: activeTab?.id ?? 'default',
+            cwd: state.cwd || '.',
+            title: `${backendId} - ${hostId}`,
+          });
+        } else {
+          void window.vibeMeet.openCodeEditor.close(action.hostId);
+          setOverlayHostId(action.hostId);
+        }
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [uiMode]);
 
   const sendWithMode = useCallback(async (raw: string) => {
     const trimmed = raw.trim();
@@ -602,6 +653,21 @@ ${trimmed}`
             />
           </div>
         </div>
+      )}
+
+      {overlayHostId && (
+        <EditorOverlay
+          hostId={overlayHostId}
+          sessionId={activeTab?.id ?? 'default'}
+          cwd={state.cwd || '.'}
+          hosts={[...workers.hostGroups.entries()].map(([id, hg]) => ({ hostId: id, backendId: hg.backendId }))}
+          onSwitchHost={setOverlayHostId}
+          onClose={() => setOverlayHostId(null)}
+          muted={muted}
+          listening={effectiveListening}
+          onToggleMute={() => setMuted((v) => !v)}
+          onInterrupt={interrupt}
+        />
       )}
 
       <SourcePicker

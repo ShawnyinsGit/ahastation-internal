@@ -6,7 +6,7 @@
 // the same backend (e.g. two OpenCode workers share backendId + meeting tab
 // sessionId), which made the second editor window impossible to open.
 
-import { BrowserWindow, app, nativeTheme, screen } from 'electron';
+import { BrowserWindow, app, nativeTheme, screen, webContents } from 'electron';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getSettings } from '../store.js';
@@ -59,6 +59,54 @@ export function getEditorEntryByWebContentsId(id: number): EditorWindowEntry | n
   return null;
 }
 
+// ── Editor overlay binding (Phase 6a) ──────────────────────────────────────
+// In handheld mode the editor UI runs INSIDE the main window's renderer as a
+// full-screen overlay (App subtree stays mounted — voice hooks survive). The
+// overlay registers its (hostId, sessionId, cwd) here against the MAIN
+// window's webContents so the exact same ide-files / ide-editor:get-state /
+// ide-pty channels and the point-to-point fan-out work unchanged — the
+// channels resolve context from this binding, never from renderer payloads.
+
+export interface EditorContext {
+  hostId: string;
+  sessionId: string;
+  cwd: string;
+}
+
+interface OverlayBinding extends EditorContext {
+  webContentsId: number;
+}
+
+let activeOverlay: OverlayBinding | null = null;
+
+export function setEditorOverlayBinding(binding: OverlayBinding | null): void {
+  activeOverlay = binding;
+}
+
+export function getEditorOverlayBinding(): OverlayBinding | null {
+  return activeOverlay;
+}
+
+/** Resolve the editor context (hostId/sessionId/cwd) for ANY editor-capable
+ *  sender: the overlay binding first (main window hosting the overlay),
+ *  then registered independent editor windows. */
+export function resolveEditorContextByWebContentsId(id: number): EditorContext | null {
+  if (activeOverlay && activeOverlay.webContentsId === id) {
+    return {
+      hostId: activeOverlay.hostId,
+      sessionId: activeOverlay.sessionId,
+      cwd: activeOverlay.cwd,
+    };
+  }
+  const entry = getEditorEntryByWebContentsId(id);
+  if (!entry) return null;
+  return {
+    hostId: entry.options.hostId,
+    sessionId: entry.options.sessionId,
+    cwd: entry.options.cwd,
+  };
+}
+
 // ── hostId ↔ opencode session binding + event fan-out (§2.2 rule 7) ────────
 // One binding table, co-located with the window registry (no third table):
 // the adapter binds (hostId → opencode sessionID) once its session exists —
@@ -79,12 +127,20 @@ export function getBoundOpenCodeSessionId(hostId: string): string | null {
   return sessionBindings.get(hostId) ?? null;
 }
 
-/** Point-to-point fan-out: send the payload ONLY to the editor window
- *  registered for this hostId (never a getAllWindows() broadcast). When no
- *  live window exists the event stays in main (the adapter keeps the
- *  snapshot; a re-attached window pulls it via ide-editor:get-state).
- *  Returns whether a live window received the event. */
+/** Point-to-point fan-out: send the payload ONLY to the editor surface
+ *  registered for this hostId — the overlay binding (main window) when it
+ *  matches, otherwise the independent editor window (never a
+ *  getAllWindows() broadcast). When no live surface exists the event stays
+ *  in main (the adapter keeps the snapshot; a re-attached surface pulls it
+ *  via ide-editor:get-state). Returns whether a live surface received it. */
 export function forwardToEditorWindow(hostId: string, payload: unknown): boolean {
+  if (activeOverlay && activeOverlay.hostId === hostId) {
+    const wc = webContents.fromId(activeOverlay.webContentsId);
+    if (wc && !wc.isDestroyed()) {
+      wc.send('ide-editor:event', { hostId, payload });
+      return true;
+    }
+  }
   const entry = editorWindows.get(editorWindowKey(hostId));
   if (!entry || entry.win.isDestroyed()) return false;
   entry.win.webContents.send('ide-editor:event', { hostId, payload });

@@ -3,7 +3,7 @@
 // list, session diff, activity timeline) fed point-to-point from main via
 // ideSession.getState() + ideSession.onEvent() (Phase 2 PR③).
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { ChevronRight, ChevronDown, File, Folder, RefreshCw } from 'lucide-react';
 import type {
   EditorActivityItem,
@@ -156,6 +156,10 @@ export function OpenCodeEditor({ hostId, backendId, sessionId, cwd, capabilities
         setFileContent(result.file.content);
         setFileMtime(result.file.mtimeMs);
         setDraft(result.file.content);
+        // Scene reporting for overlay ↔ window migration (Phase 6a).
+        void window.vibeMeet.ideOverlay.reportScene({
+          hostId, selectedFile: path, scrollTop: 0, updatedAt: Date.now(),
+        });
       } else {
         setError(result.error);
         setFileContent('');
@@ -168,7 +172,46 @@ export function OpenCodeEditor({ hostId, backendId, sessionId, cwd, capabilities
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [hostId]);
+
+  // Scene restore (Phase 6a): reopen the file that was open when the other
+  // form factor (window ↔ overlay) last showed this host, with its scroll.
+  const codeContentRef = useRef<HTMLDivElement | null>(null);
+  const sceneRestoredRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (sceneRestoredRef.current === hostId) return;
+    sceneRestoredRef.current = hostId;
+    void window.vibeMeet.ideOverlay.getScene(hostId).then((res) => {
+      if (!res.ok || !res.scene.selectedFile) return;
+      pendingScrollRef.current = res.scene.scrollTop;
+      void openFile(res.scene.selectedFile);
+    }).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hostId]);
+
+  // Apply the restored scroll position once new content is on screen.
+  const pendingScrollRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (pendingScrollRef.current === null) return;
+    const el = codeContentRef.current;
+    if (!el) return;
+    el.scrollTop = pendingScrollRef.current;
+    pendingScrollRef.current = null;
+  }, [fileContent, highlightedHtml]);
+
+  // Track scroll for scene reporting (throttled to one report per second).
+  const scrollReportTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const handleCodeScroll = useCallback(() => {
+    if (scrollReportTimer.current) return;
+    scrollReportTimer.current = setTimeout(() => {
+      scrollReportTimer.current = null;
+      const el = codeContentRef.current;
+      if (!el || !selectedFile) return;
+      void window.vibeMeet.ideOverlay.reportScene({
+        hostId, selectedFile, scrollTop: el.scrollTop, updatedAt: Date.now(),
+      });
+    }, 1000);
+  }, [hostId, selectedFile]);
 
   // shiki highlight (async, per-language dynamic grammar). Falls back to the
   // plain <pre> while loading or for unknown extensions.
@@ -372,7 +415,7 @@ export function OpenCodeEditor({ hostId, backendId, sessionId, cwd, capabilities
                   </>
                 )}
               </div>
-              <div className="opencode-editor-code-content">
+              <div className="opencode-editor-code-content" ref={codeContentRef} onScroll={handleCodeScroll}>
                 {loading && <div className="opencode-editor-loading">加载中...</div>}
                 {error && <div className="opencode-editor-error">{error}</div>}
                 {saveError && <div className="opencode-editor-error">{saveError}</div>}

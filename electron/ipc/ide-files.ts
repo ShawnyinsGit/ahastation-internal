@@ -17,7 +17,7 @@
 import { readdir, readFile, realpath, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { z } from 'zod';
-import { getEditorEntryByWebContentsId } from '../ide/ide-window-manager.js';
+import { resolveEditorContextByWebContentsId } from '../ide/ide-window-manager.js';
 import { editorWindowSenderPolicy, handleSecure } from './validators.js';
 
 export interface FileEntry {
@@ -151,7 +151,7 @@ export async function resolveConfinedWriteTarget(
 }
 
 function getEditorCwd(senderId: number): string | null {
-  return getEditorEntryByWebContentsId(senderId)?.options.cwd ?? null;
+  return resolveEditorContextByWebContentsId(senderId)?.cwd ?? null;
 }
 
 export function registerIdeFilesIpc(): void {
@@ -243,11 +243,11 @@ export function registerIdeFilesIpc(): void {
     authorize: editorWindowSenderPolicy(),
     authorizeError: 'Sender is not a registered editor window',
     handler: async (payload, senderId) => {
-      const entry = getEditorEntryByWebContentsId(senderId);
-      if (!entry) {
+      const editorContext = resolveEditorContextByWebContentsId(senderId);
+      if (!editorContext) {
         return { ok: false, error: 'Sender is not a registered editor window' };
       }
-      const confined = await resolveConfinedWriteTarget(entry.options.cwd, payload.path);
+      const confined = await resolveConfinedWriteTarget(editorContext.cwd, payload.path);
       if (!confined.ok) {
         return { ok: false, error: confined.error };
       }

@@ -112,6 +112,14 @@ export interface IdeInfo {
   installed: boolean;
   version: string | null;
   comingSoon: boolean;
+  capabilities?: EditorCapabilities;
+}
+
+export interface EditorSceneState {
+  hostId: string;
+  selectedFile: string | null;
+  scrollTop: number;
+  updatedAt: number;
 }
 
 export interface IdeRegistryState {
@@ -537,6 +545,13 @@ export interface VibeMeetApi {
     setDefault: (id: string) => Promise<{ ok: boolean; error?: string }>;
     setOverride: (hostId: string, ideId: string | null) => Promise<{ ok: boolean; error?: string }>;
   };
+  ideOverlay: {
+    bind: (hostId: string, sessionId: string) => Promise<{ ok: boolean; error?: string }>;
+    close: () => Promise<{ ok: boolean; error?: string }>;
+    reportScene: (scene: EditorSceneState) => Promise<{ ok: boolean; error?: string }>;
+    getScene: (hostId: string) => Promise<{ ok: true; scene: EditorSceneState } | { ok: false; error: string }>;
+  };
+  onDisplayChanged: (cb: (info: { displayCount: number; added: boolean }) => void) => () => void;
   ideFiles: {
     list: (path?: string) => Promise<{ ok: true; entries: FileEntry[] } | { ok: false; error: string }>;
     read: (path: string) => Promise<{ ok: true; file: FileContent } | { ok: false; error: string }>;

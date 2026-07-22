@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, shell, nativeTheme, net, protocol } from 'electron';
+import { app, BrowserWindow, dialog, shell, nativeTheme, net, protocol, screen as electronScreen } from 'electron';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
 import type { AutoApproveScope } from './auto-approve-policy.js';
@@ -448,6 +448,53 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
   });
 
   createWindow();
+
+  // Dual-display migration (Phase 6a §3.2): moving windows only adjusts
+  // BrowserWindow bounds — webContents is NEVER rebuilt, so the voice link
+  // and all meeting state survive. The display-changed notification lets
+  // the renderer re-evaluate its handheld heuristic and run the
+  // overlay ↔ window form-factor migration itself.
+  const notifyDisplayChanged = (added: boolean) => {
+    const win = liveWindow();
+    if (!win) return;
+    win.webContents.send('display-changed', {
+      displayCount: electronScreen.getAllDisplays().length,
+      added,
+    });
+  };
+
+  electronScreen.on('display-added', () => {
+    // Move the main window onto the new external display's work area.
+    const win = liveWindow();
+    const displays = electronScreen.getAllDisplays();
+    const external = displays.find((d) => d.internal === false)
+      ?? displays.find((d) => d.id !== electronScreen.getPrimaryDisplay().id)
+      ?? null;
+    if (win && external) {
+      win.setBounds(external.workArea);
+    }
+    notifyDisplayChanged(true);
+  });
+
+  electronScreen.on('display-removed', () => {
+    // Gather every window back onto the primary display.
+    const primary = electronScreen.getPrimaryDisplay().workArea;
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (win.isDestroyed()) continue;
+      const b = win.getBounds();
+      const outside = b.x < primary.x || b.y < primary.y
+        || b.x >= primary.x + primary.width || b.y >= primary.y + primary.height;
+      if (outside) {
+        win.setBounds({
+          x: primary.x + 40,
+          y: primary.y + 40,
+          width: Math.min(b.width, primary.width - 80),
+          height: Math.min(b.height, primary.height - 80),
+        });
+      }
+    }
+    notifyDisplayChanged(false);
+  });
 
   // Keep the window chrome in sync when the user switches system light/dark
   // mode while the app is running. The renderer CSS follows prefers-color-scheme
