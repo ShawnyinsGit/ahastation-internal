@@ -8730,3 +8730,199 @@ html.popout-view #root {
   font-size: 12px;
   color: var(--text-2);
 }
+
+/* ==========================================================================
+   Phase 5 — Handheld UI mode (§3.3). APPEND-ONLY block.
+   All overrides hang off the root .handheld class driven by useHandheldMode
+   (settings three-way override + auto heuristic); raw width breakpoints are
+   NOT used to pick the mode, only for in-mode fine-tuning below.
+   ========================================================================== */
+
+:root { --density-scale: 1; }
+html.handheld { --density-scale: 1.2; }
+
+/* ---- B. density + touch targets ---------------------------------------- */
+
+/* ≥44px touch targets on the bottom toolbar. */
+.handheld .toolbar {
+  padding: calc(10px * var(--density-scale)) calc(14px * var(--density-scale));
+  gap: 10px;
+}
+.handheld .tb-btn,
+.handheld .tb-leave {
+  min-height: 44px;
+  min-width: calc(60px * var(--density-scale));
+  padding: calc(8px * var(--density-scale)) calc(14px * var(--density-scale));
+}
+.handheld .tb-btn-label { font-size: calc(11px * var(--density-scale)); }
+
+/* Tile corner actions: hover-only 22px on desktop → always-visible 44px in
+   handheld mode and on any coarse pointer. */
+.handheld .tiles-gallery-actions { opacity: 1; }
+@media (pointer: coarse) {
+  .tiles-gallery-actions { opacity: 1; }
+}
+.handheld .tiles-gallery-action-btn {
+  width: 44px;
+  height: 44px;
+  border-radius: 8px;
+}
+@media (pointer: coarse) {
+  .tiles-gallery-action-btn { width: 44px; height: 44px; border-radius: 8px; }
+}
+
+/* ---- C. meeting small-screen layout (mode-class driven) ----------------- */
+
+/* Column layout: stage full-width on top, drawer becomes a bottom sheet. */
+.handheld .mtg-main {
+  grid-template-columns: 1fr;
+  grid-template-rows: minmax(0, 1fr);
+  gap: 8px;
+  padding: 8px;
+}
+.handheld .stage-wrap { height: 100%; }
+
+/* Gallery tiles → horizontal chip strip (avatar + status light). */
+.handheld .tiles-gallery-scroll {
+  gap: 8px;
+  max-height: calc(72px * var(--density-scale));
+}
+.handheld .tiles-gallery-tile-wrap {
+  flex: 0 0 auto;
+  min-width: calc(120px * var(--density-scale));
+  max-width: none;
+}
+.handheld .stage-gallery { padding: 4px 8px 0; }
+
+/* Chat drawer → bottom sheet (chat entry lives in the toolbar 更多 menu). */
+.handheld .drawer {
+  position: fixed;
+  left: 0; right: 0; bottom: 0;
+  z-index: 40;
+  width: 100%;
+  height: 0;
+  border-radius: 16px 16px 0 0;
+  transition: height var(--transition);
+}
+.handheld .drawer-open {
+  width: 100%;
+  height: 55%;
+  max-height: 480px;
+}
+
+/* Landscape-first budget: header + toolbar + chip strip ≤ ~200px. */
+.handheld .meeting-header,
+.handheld header.meeting-header {
+  padding-top: 6px;
+  padding-bottom: 6px;
+  min-height: 0;
+}
+.handheld .tab-strip { min-height: 0; }
+
+/* Stage popout entry is disabled in handheld mode (§3.3). */
+.handheld .stage-tab-popout { display: none; }
+
+/* ---- Permission approval: toolbar badge + modal card -------------------- */
+
+.tb-more-wrap { position: relative; }
+.tb-more-menu {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  right: 0;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  min-width: 140px;
+  background: var(--bg-tile);
+  border: 1px solid var(--border-soft);
+  border-radius: 12px;
+  padding: 6px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.25);
+}
+.tb-more-menu button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  min-height: 44px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-primary);
+  cursor: pointer;
+  text-align: left;
+}
+.tb-more-menu button:hover:not(:disabled) { background: var(--bg-elevated); }
+.tb-more-menu button:disabled { opacity: 0.45; cursor: default; }
+
+.tb-perm-badge { position: relative; }
+.tb-perm-badge-count {
+  position: absolute;
+  top: 2px;
+  right: 6px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  border-radius: 9px;
+  background: var(--danger, #ff3b30);
+  color: #fff;
+  font-size: 11px;
+  line-height: 18px;
+  text-align: center;
+  font-weight: 600;
+}
+
+.perm-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+.perm-modal {
+  width: min(560px, 100%);
+  max-height: 80vh;
+  overflow: auto;
+  background: var(--bg-tile);
+  border: 1px solid var(--border-soft);
+  border-radius: 16px;
+  padding: 16px;
+}
+
+/* ---- Settings: handheld mode three-way switch --------------------------- */
+
+.handheld-mode-switch {
+  display: flex;
+  gap: 4px;
+  background: var(--bg-elevated);
+  border-radius: 10px;
+  padding: 3px;
+}
+.handheld-mode-option {
+  padding: 6px 12px;
+  min-height: 32px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.handheld-mode-option-active {
+  background: var(--accent);
+  color: #fff;
+}
+.handheld .handheld-mode-option { min-height: 44px; }
+
+/* Version tag in the IDE manager list (Phase 4 panel). */
+.ide-manager-ide-version { color: var(--text-secondary); font-size: 12px; }
+
+/* ---- In-mode fine-tuning (the ONLY width breakpoints here) -------------- */
+
+/* compact band inside handheld mode (720–1100px): keep the sheet a bit
+   shorter so the stage stays visible behind it. */
+@media (min-width: 720px) and (max-width: 1100px) {
+  html.handheld .drawer-open { height: 50%; }
+}

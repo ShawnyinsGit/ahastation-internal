@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react';
+import { useState } from 'react';
 import {
   Mic,
   MicOff,
@@ -11,6 +12,8 @@ import {
   Camera,
   Square,
   MessageSquare,
+  MoreHorizontal,
+  ShieldAlert,
   X,
 } from 'lucide-react';
 import type { MicrophoneCaptureStatus } from '../lib/microphone-ui-state';
@@ -35,6 +38,12 @@ interface BottomToolbarProps {
   chatOpen: boolean;
   onToggleChat: () => void;
   onLeave: () => void;
+  /** Handheld mode (§3.3): fixed 5 keys + 更多 menu + permission badge. */
+  handheld?: boolean;
+  /** Pending permission requests — badge count in handheld mode. */
+  permissionCount?: number;
+  /** Opens the permission approval modal (handheld mode). */
+  onOpenPermission?: () => void;
 }
 
 interface ToolbarButtonProps {
@@ -86,10 +95,14 @@ export function BottomToolbar({
   chatOpen,
   onToggleChat,
   onLeave,
+  handheld = false,
+  permissionCount = 0,
+  onOpenPermission,
 }: BottomToolbarProps) {
   const meterWidth = Math.max(0, Math.min(1, speechLevel)) * 100;
   const asrBadge = asrMode === 'whisper' ? 'Whisper' : asrMode === 'browser' ? 'Browser SR' : '…';
   const micBusy = micStatus === 'requesting-permission' || micStatus === 'initializing';
+  const [moreOpen, setMoreOpen] = useState(false);
   const micIcon = micRetryable
     ? <RefreshCw size={ICON_SIZE} />
     : muted
@@ -106,6 +119,103 @@ export function BottomToolbar({
         : listening
           ? 'Listening'
           : 'Mic';
+
+  // Handheld layout (§3.3): fixed 5 keys — mic / speaker / share / interrupt
+  // / leave. Snapshot + chat collapse into a 更多 menu (chat is also the
+  // bottom-drawer entry); pending permissions surface as a badge button
+  // opening the approval modal.
+  if (handheld) {
+    return (
+      <div className="toolbar toolbar-handheld">
+        <div className="toolbar-group">
+          <div className="tb-mic-cluster">
+            <ToolbarButton
+              icon={micIcon}
+              label={micLabel}
+              onClick={micRetryable ? onRetryMic : onToggleMute}
+              active={!muted && listening}
+              warning={muted || micRetryable}
+              disabled={!micSupported}
+              title={micRetryable ? 'Microphone failed to start. Click to retry.' : undefined}
+            />
+            <div className="tb-mic-meter" aria-hidden="true">
+              <div
+                className="tb-mic-meter-fill"
+                style={{ width: `${muted ? 0 : meterWidth}%` }}
+              />
+            </div>
+          </div>
+          <ToolbarButton
+            icon={ttsOn ? <Volume2 size={ICON_SIZE} /> : <VolumeX size={ICON_SIZE} />}
+            label={ttsOn ? 'Voice on' : 'Voice off'}
+            onClick={onToggleTts}
+            active={ttsOn}
+          />
+        </div>
+
+        <div className="toolbar-group toolbar-group-primary">
+          <ToolbarButton
+            icon={sharing ? <Monitor size={ICON_SIZE} /> : <MonitorUp size={ICON_SIZE} />}
+            label={sharing ? 'Stop sharing' : 'Share my screen'}
+            onClick={onToggleShare}
+            active={sharing}
+            danger={sharing}
+          />
+          <ToolbarButton
+            icon={<Square size={ICON_SIZE} />}
+            label="Interrupt"
+            onClick={onInterrupt}
+          />
+        </div>
+
+        <div className="toolbar-group">
+          {permissionCount > 0 && (
+            <button
+              className="tb-btn tb-perm-badge"
+              onClick={onOpenPermission}
+              title={`${permissionCount} 个权限请求待审批`}
+            >
+              <span className="tb-btn-icon" aria-hidden="true"><ShieldAlert size={ICON_SIZE} /></span>
+              <span className="tb-btn-label">审批</span>
+              <span className="tb-perm-badge-count">{permissionCount}</span>
+            </button>
+          )}
+          <div className="tb-more-wrap">
+            <ToolbarButton
+              icon={<MoreHorizontal size={ICON_SIZE} />}
+              label="更多"
+              onClick={() => setMoreOpen((v) => !v)}
+              active={moreOpen || chatOpen}
+            />
+            {moreOpen && (
+              <div className="tb-more-menu" role="menu">
+                <button
+                  type="button"
+                  role="menuitem"
+                  disabled={!snapshotEnabled}
+                  onClick={() => { setMoreOpen(false); onSnapshot(); }}
+                >
+                  <Camera size={16} /> 快照
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => { setMoreOpen(false); onToggleChat(); }}
+                >
+                  <MessageSquare size={16} /> 聊天
+                </button>
+              </div>
+            )}
+          </div>
+          <button className="tb-leave" onClick={onLeave}>
+            <span className="tb-btn-icon" aria-hidden="true"><X size={ICON_SIZE} /></span>
+            <span className="tb-btn-label">Leave</span>
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="toolbar">
       <div className="toolbar-group">

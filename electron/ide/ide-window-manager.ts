@@ -6,9 +6,10 @@
 // the same backend (e.g. two OpenCode workers share backendId + meeting tab
 // sessionId), which made the second editor window impossible to open.
 
-import { BrowserWindow, app, nativeTheme } from 'electron';
+import { BrowserWindow, app, nativeTheme, screen } from 'electron';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { getSettings } from '../store.js';
 import {
   NO_EDITOR_CAPABILITIES,
   serializeEditorCapabilities,
@@ -111,9 +112,17 @@ export function createEditorWindow(options: EditorWindowOptions): BrowserWindow 
 
   const dev = !app.isPackaged && !!process.env.VITE_DEV_SERVER_URL;
 
+  // Default to the usable work area (never larger); maximize in handheld
+  // mode (forced, or auto on a small screen — pointer can't be probed from
+  // main, so width is the proxy). Deliberately NO minWidth (§3.3).
+  const workArea = screen.getPrimaryDisplay().workAreaSize;
+  const handheldPref = getSettings().handheldMode ?? 'auto';
+  const handheldish = handheldPref === 'handheld'
+    || (handheldPref === 'auto' && workArea.width <= 1300);
+
   const win = new BrowserWindow({
-    width: 1200,
-    height: 800,
+    width: Math.min(1200, workArea.width),
+    height: Math.min(800, workArea.height),
     title: options.title ?? `Editor - ${options.hostId}`,
     backgroundColor: getThemeBackgroundColor(),
     transparent: false,
@@ -141,6 +150,10 @@ export function createEditorWindow(options: EditorWindowOptions): BrowserWindow 
 
   const entry: EditorWindowEntry = { win, options };
   editorWindows.set(key, entry);
+
+  if (handheldish) {
+    win.maximize();
+  }
 
   win.on('closed', () => {
     editorWindows.delete(key);

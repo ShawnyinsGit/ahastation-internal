@@ -32,14 +32,15 @@ export function registerSettingsIpc(): void {
       speechFilterMode: s.speechFilterMode ?? 'strict',
       voicePolishEnabled: Boolean(s.voicePolishEnabled),
       reportModeEnabled: Boolean(s.reportModeEnabled),
+      handheldMode: s.handheldMode ?? 'auto',
     };
   });
 
   ipcMain.handle('settings:set-voice-pref', async (
     _e,
-    patch: { selectedVoiceName?: string | null; guidanceDismissed?: boolean; speechFilterMode?: 'strict' | 'off'; voicePolishEnabled?: boolean; reportModeEnabled?: boolean },
+    patch: { selectedVoiceName?: string | null; guidanceDismissed?: boolean; speechFilterMode?: 'strict' | 'off'; voicePolishEnabled?: boolean; reportModeEnabled?: boolean; handheldMode?: 'auto' | 'handheld' | 'desktop' },
   ) => {
-    const next: Partial<{ selectedVoiceName: string | null; voiceGuidanceDismissed: boolean; speechFilterMode: 'strict' | 'off'; voicePolishEnabled: boolean; reportModeEnabled: boolean }> = {};
+    const next: Partial<{ selectedVoiceName: string | null; voiceGuidanceDismissed: boolean; speechFilterMode: 'strict' | 'off'; voicePolishEnabled: boolean; reportModeEnabled: boolean; handheldMode: 'auto' | 'handheld' | 'desktop' }> = {};
     if (Object.prototype.hasOwnProperty.call(patch, 'selectedVoiceName')) {
       next.selectedVoiceName = patch.selectedVoiceName ?? null;
     }
@@ -54,6 +55,9 @@ export function registerSettingsIpc(): void {
     }
     if (Object.prototype.hasOwnProperty.call(patch, 'reportModeEnabled')) {
       next.reportModeEnabled = Boolean(patch.reportModeEnabled);
+    }
+    if (patch.handheldMode === 'auto' || patch.handheldMode === 'handheld' || patch.handheldMode === 'desktop') {
+      next.handheldMode = patch.handheldMode;
     }
     await updateSettings(next);
     return { ok: true };

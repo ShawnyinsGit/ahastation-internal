@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { setSelectedVoiceName, setSpeechFilterMode, useVoices, warmupTTS } from './useSpeech';
 import type { SpeechFilterMode } from '../lib/speech-format';
+import type { HandheldOverride } from '../lib/handheld-mode';
 import { hasPremiumChineseVoice, listChineseVoices } from '../lib/voice-quality';
 
 export function useVoicePreferences() {
@@ -11,6 +12,7 @@ export function useVoicePreferences() {
   const [filterMode, setFilterModeState] = useState<SpeechFilterMode>('strict');
   const [voicePolishEnabled, setVoicePolishEnabled] = useState(false);
   const [reportModeEnabled, setReportModeEnabled] = useState(false);
+  const [handheldMode, setHandheldMode] = useState<HandheldOverride>('auto');
 
   const { voices, ready: voicesReady } = useVoices();
   const isMac = typeof navigator !== 'undefined' && /Mac/i.test(navigator.platform);
@@ -24,6 +26,7 @@ export function useVoicePreferences() {
       setFilterModeState(pref.speechFilterMode);
       setVoicePolishEnabled(pref.voicePolishEnabled);
       setReportModeEnabled(pref.reportModeEnabled);
+      setHandheldMode(pref.handheldMode);
       setSelectedVoiceName(pref.selectedVoiceName);
       setSpeechFilterMode(pref.speechFilterMode);
     }).catch(() => {});
@@ -70,6 +73,11 @@ export function useVoicePreferences() {
     void window.vibeMeet.setVoicePref({ reportModeEnabled: enabled });
   }, []);
 
+  const handleHandheldModeChange = useCallback((mode: HandheldOverride) => {
+    setHandheldMode(mode);
+    void window.vibeMeet.setVoicePref({ handheldMode: mode });
+  }, []);
+
   const handleOpenGuide = useCallback(() => setGuideOpen(true), []);
   const handleGuideClose = useCallback(() => {
     setGuideOpen(false);
@@ -87,6 +95,7 @@ export function useVoicePreferences() {
     filterMode,
     voicePolishEnabled,
     reportModeEnabled,
+    handheldMode,
     voices,
     voicesReady,
     guideOpen,
@@ -94,6 +103,7 @@ export function useVoicePreferences() {
     handleFilterModeChange,
     handleVoicePolishChange,
     handleReportModeChange,
+    handleHandheldModeChange,
     handleOpenGuide,
     handleGuideClose,
     handleDismissForever,
