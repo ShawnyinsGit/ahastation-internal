@@ -4,6 +4,7 @@ import { App } from './App';
 import { SettingsWindow } from './components/SettingsWindow';
 import { PopoutPlaceholder } from './components/PopoutPlaceholder';
 import { OpenCodeEditor } from './components/OpenCodeEditor';
+import { CompanionScreen } from './components/CompanionScreen';
 import { AppErrorBoundary } from './components/AppErrorBoundary';
 import { parseEditorCapabilities } from './types';
 import './styles.css';
@@ -13,6 +14,12 @@ const viewParam = params.get('view');
 const isSettingsView = viewParam === 'settings';
 const isPopoutView = viewParam === 'popout';
 const isOpenCodeEditorView = viewParam === 'opencode-editor';
+const isCompanionView = viewParam === 'companion';
+
+if (isCompanionView) {
+  document.documentElement.classList.add('companion-view');
+  document.title = '陪伴屏';
+}
 
 if (isSettingsView) {
   document.documentElement.classList.add('settings-view');
@@ -37,14 +44,16 @@ root.render(
       ? <SettingsWindow />
       : isPopoutView
         ? <PopoutPlaceholder />
-        : isOpenCodeEditorView
-          ? <OpenCodeEditor
-              hostId={params.get('hostId') ?? ''}
-              backendId={params.get('backendId') ?? ''}
-              sessionId={params.get('sessionId') ?? ''}
-              cwd={params.get('cwd') ?? ''}
-              capabilities={parseEditorCapabilities(params.get('caps'))}
-            />
-          : <App />}
+        : isCompanionView
+          ? <CompanionScreen />
+          : isOpenCodeEditorView
+            ? <OpenCodeEditor
+                hostId={params.get('hostId') ?? ''}
+                backendId={params.get('backendId') ?? ''}
+                sessionId={params.get('sessionId') ?? ''}
+                cwd={params.get('cwd') ?? ''}
+                capabilities={parseEditorCapabilities(params.get('caps'))}
+              />
+            : <App />}
   </AppErrorBoundary>,
 );

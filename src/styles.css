@@ -9005,3 +9005,54 @@ html.handheld { --density-scale: 1.2; }
   border-bottom: 1px solid var(--border-soft);
 }
 .settings-window-version a { color: var(--accent); }
+
+/* ----- Companion Screen (Phase 8) ----- */
+.companion-root {
+  display: flex;
+  flex-direction: column;
+  width: 100vw;
+  height: 100vh;
+  background: #141416;
+  overflow: hidden;
+  user-select: none;
+}
+.companion-titlebar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 28px;
+  padding: 0 6px 0 10px;
+  -webkit-app-region: drag;
+  flex: 0 0 auto;
+}
+.companion-title {
+  flex: 1;
+  font-size: 12px;
+  color: #9a9aa0;
+  font-family: monospace;
+}
+.companion-titlebar-btn {
+  -webkit-app-region: no-drag;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: #9a9aa0;
+  cursor: pointer;
+}
+.companion-titlebar-btn:hover {
+  background: #2a2a2e;
+  color: #e8e8ea;
+}
+.companion-stage {
+  flex: 1;
+  min-height: 0;
+}
+.companion-stage canvas {
+  display: block;
+  outline: none;
+}

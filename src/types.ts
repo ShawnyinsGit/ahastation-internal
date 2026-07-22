@@ -554,6 +554,7 @@ export interface VibeMeetApi {
   onDisplayChanged: (cb: (info: { displayCount: number; added: boolean }) => void) => () => void;
   appVersion: () => Promise<string>;
   onUpdateAvailable: (cb: (info: { latest: string; url: string }) => void) => () => void;
+  companion: CompanionApi;
   ideFiles: {
     list: (path?: string) => Promise<{ ok: true; entries: FileEntry[] } | { ok: false; error: string }>;
     read: (path: string) => Promise<{ ok: true; file: FileContent } | { ok: false; error: string }>;
@@ -585,6 +586,44 @@ export interface VibeMeetApi {
     addendum: string,
   ) => Promise<{ ok: true; queued: boolean } | { ok: false; error: string; reason?: string }>;
   onEvent: (cb: (e: RendererEvent) => void) => () => void;
+}
+
+// ── Companion screen (Phase 8) ─────────────────────────────────────────────
+
+export type CompanionStatus = 'idle' | 'working' | 'stalled' | 'celebrating' | 'alert';
+export type CompanionAlertLevel = 'none' | 'light' | 'strong';
+
+export interface CompanionBubbleState {
+  text: string;
+  startedAt: number;
+  count: number;
+}
+
+export interface CompanionParticipantState {
+  hostId: string;
+  backendId: string;
+  seat: number | 'standing';
+  vacated: boolean;
+  status: CompanionStatus;
+  statusChangedAt: number;
+  bubble: CompanionBubbleState | null;
+  pendingPermission: boolean;
+}
+
+export interface CompanionState {
+  participants: CompanionParticipantState[];
+  mascot: { text: string; alertLevel: CompanionAlertLevel; coordinatorHostId: string };
+  ttsActive: boolean;
+}
+
+export interface CompanionApi {
+  toggle: () => Promise<{ ok: boolean; open?: boolean; error?: string }>;
+  ttsState: (active: boolean) => void;
+  /** Companion-window bridge only (preload-companion.cjs). */
+  getState?: () => Promise<{ ok: true; state: CompanionState } | { ok: false; error: string }>;
+  onEvent?: (cb: (state: CompanionState) => void) => () => void;
+  getPrefs?: () => Promise<{ ok: boolean; soundEnabled?: boolean }>;
+  setSound?: (soundEnabled: boolean) => Promise<{ ok: boolean; error?: string }>;
 }
 
 export interface TranscriptsApi {

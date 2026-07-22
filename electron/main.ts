@@ -9,6 +9,7 @@ import type { IpcContext, IpcEmittedEvent } from './ipc/context.js';
 import { BrowserTabManager } from './browser-tab-manager.js';
 import { requestMicrophoneAccess } from './microphone-access.js';
 import { checkForUpdateCached } from './update-check.js';
+import { getCompanionFeed } from './companion/companion-feed.js';
 import {
   buildRendererSecurityHeaders,
   resolveAppAssetPath,

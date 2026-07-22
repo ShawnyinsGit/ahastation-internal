@@ -17,7 +17,7 @@
     "dev": "vite",
     "dev:electron": "VITE_DEV_SERVER_URL=http://localhost:5173 tsc -p tsconfig.electron.json && electron .",
     "build:renderer": "vite build",
-    "build:electron": "tsc -p tsconfig.electron.json && cp electron/preload.cjs dist-electron/preload.cjs && cp electron/preload-editor.cjs dist-electron/preload-editor.cjs",
+    "build:electron": "tsc -p tsconfig.electron.json && cp electron/preload.cjs dist-electron/preload.cjs && cp electron/preload-editor.cjs dist-electron/preload-editor.cjs && cp electron/preload-companion.cjs dist-electron/preload-companion.cjs",
     "build": "npm run build:renderer && npm run build:electron",
     "start": "npm run build && electron .",
     "test": "npm run build:electron && node --import \"data:text/javascript,import { register } from 'node:module'; import { pathToFileURL } from 'node:url'; register('./tests/electron-stub.mjs', pathToFileURL('./'));\" --test tests/*.test.mjs",

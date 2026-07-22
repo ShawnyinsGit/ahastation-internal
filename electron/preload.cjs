@@ -181,6 +181,13 @@ const api = {
     ipcRenderer.on('update-available', listener);
     return () => ipcRenderer.removeListener('update-available', listener);
   },
+  companion: {
+    // Main-window side: toggle the floating companion window + relay the
+    // TTS-active flag (sound ducking). The companion window itself uses the
+    // narrow preload-companion.cjs bridge instead.
+    toggle: () => ipcRenderer.invoke('companion:toggle'),
+    ttsState: (active) => ipcRenderer.send('companion:tts-state', { active }),
+  },
   // Secure editor file browsing. No cwd is ever sent — the main process
   // resolves the workspace from the sender's editor-window registration.
   ideFiles: {

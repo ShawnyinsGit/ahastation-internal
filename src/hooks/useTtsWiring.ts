@@ -22,6 +22,7 @@ export function useTtsWiring({ ttsOn, speakingRef, setAiSpeaking, setSpeakCallba
       cancelSpeech();
       speakingRef.current = false;
       setAiSpeaking(false);
+      window.vibeMeet.companion?.ttsState?.(false);
       return;
     }
     const armSpeaking = () => {
@@ -31,10 +32,13 @@ export function useTtsWiring({ ttsOn, speakingRef, setAiSpeaking, setSpeakCallba
       }
       speakingRef.current = true;
       setAiSpeaking(true);
+      // 陪伴屏音效互斥（§3.4）：TTS 活动期间陪伴屏静默。
+      window.vibeMeet.companion?.ttsState?.(true);
     };
     const finishSpeaking = () => {
       speakingRef.current = false;
       setAiSpeaking(false);
+      window.vibeMeet.companion?.ttsState?.(false);
     };
     const handle: SpeakHandle = {
       supersede: (text, onDone) => {

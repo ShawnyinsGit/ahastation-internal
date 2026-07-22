@@ -15,7 +15,6 @@
 import { ipcMain } from 'electron';
 import { z } from 'zod';
 import type { IpcContext, IpcEmittedEvent } from '../ipc/context.js';
-import type { NormalizedMessage } from '../backends/cli-backend.js';
 import { getSettings, updateSettings } from '../store.js';
 import {
   CompanionModel,
@@ -77,24 +76,35 @@ export class CompanionFeed {
 }
 
 /** Map a flattened orchestrator event to a model input. 'roster' marks
- *  events that only require a roster reconciliation. */
+ *  events that only require a roster reconciliation. NOTE: `permission-
+ *  cancelled` rides this stream at runtime (BackendSessionEvent) but is not
+ *  declared in the SessionEvent union, so payloads are read defensively
+ *  here rather than via TS narrowing. */
 function mapOrchestratorEvent(e: IpcEmittedEvent): CompanionEvent | 'roster' | null {
   const hostId = e.hostId ?? 'default';
-  switch (e.kind) {
+  const ev = e.event as { kind: string } & Record<string, unknown>;
+  switch (ev.kind) {
     case 'message': {
-      const msg = e.message as NormalizedMessage;
-      if (msg.type === 'result') return { kind: 'idle-signal', hostId };
-      const content = msg.message?.content;
+      const msg = ev.message as { type?: string; message?: { content?: unknown } } | undefined;
+      if (msg?.type === 'result') return { kind: 'idle-signal', hostId };
+      const content = msg?.message?.content;
       if (Array.isArray(content)) {
         const textBlock = content.find(
-          (b): b is { type: 'text'; text: string } => b.type === 'text' && typeof (b as { text?: unknown }).text === 'string',
-        );
+          (b) => !!b && typeof b === 'object'
+            && (b as { type?: unknown }).type === 'text'
+            && typeof (b as { text?: unknown }).text === 'string',
+        ) as { text: string } | undefined;
         if (textBlock) return { kind: 'text', hostId, text: textBlock.text };
         const toolBlock = content.find(
-          (b): b is { type: 'tool_use'; name: string; input: Record<string, unknown> } => b.type === 'tool_use',
-        );
+          (b) => !!b && typeof b === 'object' && (b as { type?: unknown }).type === 'tool_use',
+        ) as { name?: unknown; input?: unknown } | undefined;
         if (toolBlock) {
-          return { kind: 'tool', hostId, toolName: toolBlock.name, input: toolBlock.input ?? {} };
+          return {
+            kind: 'tool',
+            hostId,
+            toolName: typeof toolBlock.name === 'string' ? toolBlock.name : 'tool',
+            input: (toolBlock.input ?? {}) as Record<string, unknown>,
+          };
         }
       }
       return null;
@@ -105,7 +115,7 @@ function mapOrchestratorEvent(e: IpcEmittedEvent): CompanionEvent | 'roster' | n
       return {
         kind: 'ended',
         hostId,
-        status: e.status === 'done' ? 'done' : e.status === 'failed' ? 'failed' : 'interrupted',
+        status: ev.status === 'done' ? 'done' : ev.status === 'failed' ? 'failed' : 'interrupted',
       };
     case 'worker-delivery':
       return { kind: 'delivered', hostId };
