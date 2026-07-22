@@ -155,7 +155,10 @@ export class IdeRegistry {
 
   getState(): IdeRegistryState {
     return {
-      ides: this.ides.map((i) => ({ ...i })),
+      ides: this.ides.map((i) => ({
+        ...i,
+        capabilities: this.adapters.get(i.id)?.capabilities,
+      })),
       defaultIdeId: this.persisted.defaultIdeId,
       perHostOverride: { ...this.persisted.perHostOverride },
     };

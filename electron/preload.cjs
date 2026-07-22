@@ -140,6 +140,41 @@ const api = {
     setDefault: (id) => ipcRenderer.invoke('ide-registry:set-default', { id }),
     setOverride: (hostId, ideId) => ipcRenderer.invoke('ide-registry:set-override', { hostId, ideId }),
   },
+  // Editor-surface APIs. In the main window these are used ONLY by the
+  // handheld editor overlay (Phase 6a) — every channel re-validates the
+  // sender against the overlay binding / window registry, so exposing them
+  // here grants nothing until the overlay is bound.
+  ideFiles: {
+    list: (path) => ipcRenderer.invoke('ide-files:list', { path }),
+    read: (path) => ipcRenderer.invoke('ide-files:read', { path }),
+    write: (path, content, expectedMtime) =>
+      ipcRenderer.invoke('ide-files:write', { path, content, expectedMtime }),
+  },
+  ideSession: {
+    getState: () => ipcRenderer.invoke('ide-editor:get-state'),
+    onEvent: (cb) => {
+      const listener = (_, msg) => cb(msg);
+      ipcRenderer.on('ide-editor:event', listener);
+      return () => ipcRenderer.removeListener('ide-editor:event', listener);
+    },
+  },
+  idePty: {
+    create: () => ipcRenderer.invoke('ide-pty:create'),
+    input: (data) => ipcRenderer.invoke('ide-pty:input', { data }),
+    resize: (rows, cols) => ipcRenderer.invoke('ide-pty:resize', { rows, cols }),
+    close: () => ipcRenderer.invoke('ide-pty:close'),
+  },
+  ideOverlay: {
+    bind: (hostId, sessionId) => ipcRenderer.invoke('ide-editor:overlay-bind', { active: true, hostId, sessionId }),
+    close: () => ipcRenderer.invoke('ide-editor:overlay-bind', { active: false }),
+    reportScene: (scene) => ipcRenderer.invoke('ide-editor:report-scene', { scene }),
+    getScene: (hostId) => ipcRenderer.invoke('ide-editor:get-scene', { hostId }),
+  },
+  onDisplayChanged: (cb) => {
+    const listener = (_, info) => cb(info);
+    ipcRenderer.on('display-changed', listener);
+    return () => ipcRenderer.removeListener('display-changed', listener);
+  },
   // Secure editor file browsing. No cwd is ever sent — the main process
   // resolves the workspace from the sender's editor-window registration.
   ideFiles: {

@@ -43,15 +43,19 @@ export function useHandheldMode(): {
     return () => { cancelled = true; };
   }, []);
 
-  // Track the auto-heuristic inputs.
+  // Track the auto-heuristic inputs. The display-changed IPC (Phase 6a) is
+  // the RELIABLE signal here: a window moved across displays changes
+  // screen.width without necessarily firing a window 'resize' event.
   useEffect(() => {
     const mq = window.matchMedia('(pointer: coarse)');
     const update = () => setSignals({ coarse: mq.matches, width: window.screen.width });
     mq.addEventListener('change', update);
     window.addEventListener('resize', update);
+    const disposeDisplay = window.vibeMeet.onDisplayChanged?.(update);
     return () => {
       mq.removeEventListener('change', update);
       window.removeEventListener('resize', update);
+      disposeDisplay?.();
     };
   }, []);
 
