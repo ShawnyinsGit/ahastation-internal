@@ -1,4 +1,6 @@
-// opencode-editor.ts — IPC handlers for OpenCode editor windows.
+// opencode-editor.ts — IPC handlers for IDE editor windows (Phase 3: the
+// channel names stay frozen per v1.2 churn control; resolution is now
+// IDE-generic via the IdeRegistry).
 //
 // Hardening over the original pass-through version (all channels registered
 // via the validators.ts handleSecure gate):
@@ -8,14 +10,16 @@
 //  - `open`'s cwd must match a LIVE meeting slot's cwd (SessionRegistry
 //    findByCwd) — the renderer cannot point an editor at an arbitrary
 //    directory.
+//  - Which IDE backs the window is resolved main-side:
+//    perHostOverride[hostId] ?? defaultIdeId (IdeRegistry).
 
 import { z } from 'zod';
 import {
-  createOpenCodeEditorWindow,
-  closeOpenCodeEditorWindow,
-  listOpenCodeEditorWindows,
+  closeEditorWindow,
+  listEditorWindows,
   getEditorEntryByWebContentsId,
 } from '../ide/ide-window-manager.js';
+import { getIdeRegistry } from '../ide/ide-registry.js';
 import type { IpcContext } from './context.js';
 import {
   editorWindowSenderPolicy,
@@ -44,12 +48,19 @@ export function registerOpenCodeEditorIpc(ctx: IpcContext): void {
   handleSecure('opencode-editor:open', {
     schema: openCodeEditorOpenPayloadSchema,
     authorize: mainWindowSenderPolicy(() => ctx.liveWindow()?.webContents.id ?? null),
-    handler: (payload) => {
+    handler: async (payload) => {
       // cwd whitelist: must be the cwd of a live meeting slot.
       if (!ctx.registry.findByCwd(payload.cwd)) {
         return { ok: false, error: 'cwd is not a live meeting workspace' };
       }
-      createOpenCodeEditorWindow(payload);
+      // IDE resolution is main-side: perHostOverride[hostId] ?? defaultIdeId.
+      const registry = getIdeRegistry();
+      await registry.init();
+      const adapter = registry.resolveAdapterForHost(payload.hostId);
+      if (!adapter) {
+        return { ok: false, error: 'No installed IDE resolved for this host' };
+      }
+      await adapter.attach(payload);
       return { ok: true };
     },
   });
@@ -57,14 +68,14 @@ export function registerOpenCodeEditorIpc(ctx: IpcContext): void {
   handleSecure('opencode-editor:close', {
     schema: openCodeEditorHostPayloadSchema,
     handler: (payload) => {
-      closeOpenCodeEditorWindow(payload.hostId);
+      closeEditorWindow(payload.hostId);
       return { ok: true };
     },
   });
 
   handleSecure('opencode-editor:list', {
     schema: emptyPayloadSchema,
-    handler: () => ({ ok: true, windows: listOpenCodeEditorWindows() }),
+    handler: () => ({ ok: true, windows: listEditorWindows() }),
   });
 
   // Editor panel initial state (Phase 2 PR③): the calling editor window gets

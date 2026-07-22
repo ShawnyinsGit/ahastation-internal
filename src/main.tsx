@@ -5,6 +5,7 @@ import { SettingsWindow } from './components/SettingsWindow';
 import { PopoutPlaceholder } from './components/PopoutPlaceholder';
 import { OpenCodeEditor } from './components/OpenCodeEditor';
 import { AppErrorBoundary } from './components/AppErrorBoundary';
+import { parseEditorCapabilities } from './types';
 import './styles.css';
 
 const params = new URLSearchParams(window.location.search);
@@ -42,6 +43,7 @@ root.render(
               backendId={params.get('backendId') ?? ''}
               sessionId={params.get('sessionId') ?? ''}
               cwd={params.get('cwd') ?? ''}
+              capabilities={parseEditorCapabilities(params.get('caps'))}
             />
           : <App />}
   </AppErrorBoundary>,

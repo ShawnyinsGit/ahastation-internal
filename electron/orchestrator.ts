@@ -283,6 +283,7 @@ export class Orchestrator implements OrchestratorBridge {
           autoApproveScope: opts.autoApproveScope,
           confirmDestructive: opts.confirmDestructive,
           hostId: actorHostId,
+          meetingId: this.meetingId,
           resumeSessionId: purpose === 'host'
             ? this.resumeBackendSessions[actorHostId]?.sessionId
             : undefined,

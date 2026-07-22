@@ -38,7 +38,6 @@ import type {
 import {
   basicAuthHeader,
   resolveOpencodeBinary,
-  spawnOpencodeServer,
   type OpencodeServerHandle,
 } from './opencode-server-process.js';
 import {
@@ -64,6 +63,10 @@ import {
   forwardToEditorWindow,
   unbindEditorSession,
 } from '../ide/ide-window-manager.js';
+import {
+  defaultServerSpawn,
+  getOpencodeServerRegistry,
+} from '../ide/opencode/opencode-server-registry.js';
 
 // ── SDK client (dynamic import so app startup isn't blocked) ────────────────
 
@@ -253,15 +256,24 @@ class OpenCodeSession implements BackendSession {
     }
   }
 
-  /** Single seam for obtaining a server handle. Phase 3 swaps this for a
-   *  shared per-(meetingId, cwd) server registry; everything else here
-   *  already talks to the handle, never to the process directly. */
+  /** Single seam for obtaining a server handle: the shared per-(meetingId,
+   *  cwd) registry (Phase 3). Same meeting + cwd → same server, refcounted;
+   *  the last release kills it. Everything else here still talks to the
+   *  handle, never to the process directly. */
+  private acquiredServerKey: string | null = null;
+
   private async acquireServer(): Promise<OpencodeServerHandle> {
-    return spawnOpencodeServer({
+    const acquired = await getOpencodeServerRegistry().acquire({
+      meetingId: this.config.meetingId ?? 'default',
       cwd: this.config.cwd,
-      config: OPENCODE_SERVER_CONFIG,
-      providerEnv: this.config.env,
+      spawn: () => defaultServerSpawn({
+        cwd: this.config.cwd,
+        config: OPENCODE_SERVER_CONFIG,
+        providerEnv: this.config.env,
+      }),
     });
+    this.acquiredServerKey = acquired.key;
+    return acquired.handle;
   }
 
   // ── Event stream with checkpoint-resync ─────────────────────────────────
@@ -646,9 +658,13 @@ class OpenCodeSession implements BackendSession {
     if (this.config.hostId) {
       unbindEditorSession(this.config.hostId);
     }
-    // Deliberately NO session.delete — the native session stays inspectable
-    // for as long as the server lives; the whole server goes away anyway.
-    this.server?.kill();
+    // Release the shared server refcount (sessionEnd lifecycle) instead of
+    // killing directly — the server dies only when the last session/window
+    // in this (meetingId, cwd) lets go. Deliberately NO session.delete.
+    if (this.acquiredServerKey) {
+      void getOpencodeServerRegistry().handleLifecycle('sessionEnd', this.acquiredServerKey);
+      this.acquiredServerKey = null;
+    }
     this.server = null;
     this.client = null;
     this.emit({ kind: 'ended' });

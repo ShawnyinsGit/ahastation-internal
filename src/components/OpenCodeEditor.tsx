@@ -7,6 +7,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { ChevronRight, ChevronDown, File, Folder, RefreshCw } from 'lucide-react';
 import type {
   EditorActivityItem,
+  EditorCapabilities,
   EditorKeyedActivity,
   EditorPanelEvent,
   EditorSnapshot,
@@ -20,6 +21,10 @@ interface OpenCodeEditorProps {
   backendId: string;
   sessionId: string;
   cwd: string;
+  /** Capability set of the IDE backing this window (from the `caps` query
+   *  param). Panels the IDE can't serve are hidden — a degraded adapter
+   *  (Hermes/Pi stub, all false) leaves plain fs browsing. */
+  capabilities: EditorCapabilities;
 }
 
 interface FileNode extends FileEntry {
@@ -63,7 +68,7 @@ function applyPanelEvent(prev: EditorSnapshot, ev: EditorPanelEvent): EditorSnap
 
 const EMPTY_PANEL: EditorSnapshot = { status: 'idle', todos: [], diff: [], activity: [] };
 
-export function OpenCodeEditor({ hostId, backendId, sessionId, cwd }: OpenCodeEditorProps) {
+export function OpenCodeEditor({ hostId, backendId, sessionId, cwd, capabilities }: OpenCodeEditorProps) {
   const [files, setFiles] = useState<FileNode[]>([]);
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [fileContent, setFileContent] = useState<string>('');
@@ -91,7 +96,9 @@ export function OpenCodeEditor({ hostId, backendId, sessionId, cwd }: OpenCodeEd
   }, [loadFiles]);
 
   // Live panel: initial snapshot, then point-to-point incremental events.
+  // Skipped entirely when the backing IDE has no event capability.
   useEffect(() => {
+    if (!capabilities.events) return;
     let cancelled = false;
     void window.vibeMeet.ideSession.getState().then((res) => {
       if (!cancelled && res.ok) setPanel(res.state);
@@ -104,7 +111,7 @@ export function OpenCodeEditor({ hostId, backendId, sessionId, cwd }: OpenCodeEd
       cancelled = true;
       dispose();
     };
-  }, [hostId]);
+  }, [hostId, capabilities.events]);
 
   const toggleDir = async (node: FileNode) => {
     if (!node.isDir) return;
@@ -213,21 +220,25 @@ export function OpenCodeEditor({ hostId, backendId, sessionId, cwd }: OpenCodeEd
           ← 返回会议
         </button>
         <div className="opencode-editor-title">
-          <span
-            className="opencode-editor-status-dot"
-            style={{
-              display: 'inline-block',
-              width: 8,
-              height: 8,
-              borderRadius: '50%',
-              backgroundColor: STATUS_COLOR[panel.status],
-              marginRight: 6,
-            }}
-            title={STATUS_LABEL[panel.status]}
-          />
+          {capabilities.events && (
+            <span
+              className="opencode-editor-status-dot"
+              style={{
+                display: 'inline-block',
+                width: 8,
+                height: 8,
+                borderRadius: '50%',
+                backgroundColor: STATUS_COLOR[panel.status],
+                marginRight: 6,
+              }}
+              title={STATUS_LABEL[panel.status]}
+            />
+          )}
           <span className="opencode-editor-backend">{backendId}</span>
           <span className="opencode-editor-session">{hostId}</span>
-          <span className="opencode-editor-session">{STATUS_LABEL[panel.status]}</span>
+          {capabilities.events && (
+            <span className="opencode-editor-session">{STATUS_LABEL[panel.status]}</span>
+          )}
         </div>
         <button
           type="button"
@@ -286,70 +297,84 @@ export function OpenCodeEditor({ hostId, backendId, sessionId, cwd }: OpenCodeEd
         </main>
 
         <aside className="opencode-editor-activity">
-          <div className="opencode-editor-activity-title">待办</div>
-          <div className="opencode-editor-activity-list">
-            {panel.todos.length === 0 && (
-              <div className="opencode-editor-activity-item">
-                <div className="opencode-editor-activity-text">暂无待办</div>
+          {capabilities.todo && (
+            <>
+              <div className="opencode-editor-activity-title">待办</div>
+              <div className="opencode-editor-activity-list">
+                {panel.todos.length === 0 && (
+                  <div className="opencode-editor-activity-item">
+                    <div className="opencode-editor-activity-text">暂无待办</div>
+                  </div>
+                )}
+                {panel.todos.map((t) => (
+                  <div key={t.id} className="opencode-editor-activity-item">
+                    <div className="opencode-editor-activity-text">
+                      {t.status === 'completed' ? '✅' : t.status === 'in_progress' ? '🔨' : '⬜'} {t.content}
+                    </div>
+                  </div>
+                ))}
               </div>
-            )}
-            {panel.todos.map((t) => (
-              <div key={t.id} className="opencode-editor-activity-item">
-                <div className="opencode-editor-activity-text">
-                  {t.status === 'completed' ? '✅' : t.status === 'in_progress' ? '🔨' : '⬜'} {t.content}
-                </div>
-              </div>
-            ))}
-          </div>
+            </>
+          )}
 
-          <div className="opencode-editor-activity-title">改动</div>
-          <div className="opencode-editor-activity-list">
-            {panel.diff.length === 0 && (
-              <div className="opencode-editor-activity-item">
-                <div className="opencode-editor-activity-text">暂无改动</div>
+          {capabilities.diff && (
+            <>
+              <div className="opencode-editor-activity-title">改动</div>
+              <div className="opencode-editor-activity-list">
+                {panel.diff.length === 0 && (
+                  <div className="opencode-editor-activity-item">
+                    <div className="opencode-editor-activity-text">暂无改动</div>
+                  </div>
+                )}
+                {panel.diff.map((d) => (
+                  <div
+                    key={d.file}
+                    className="opencode-editor-activity-item"
+                    role="button"
+                    tabIndex={0}
+                    title={`打开 ${d.file}`}
+                    onClick={() => void openFile(d.file)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        void openFile(d.file);
+                      }
+                    }}
+                  >
+                    <div className="opencode-editor-activity-text">
+                      {d.file} <span style={{ color: '#34c759' }}>+{d.additions}</span>{' '}
+                      <span style={{ color: '#ff3b30' }}>−{d.deletions}</span>
+                    </div>
+                  </div>
+                ))}
               </div>
-            )}
-            {panel.diff.map((d) => (
-              <div
-                key={d.file}
-                className="opencode-editor-activity-item"
-                role="button"
-                tabIndex={0}
-                title={`打开 ${d.file}`}
-                onClick={() => void openFile(d.file)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault();
-                    void openFile(d.file);
-                  }
-                }}
-              >
-                <div className="opencode-editor-activity-text">
-                  {d.file} <span style={{ color: '#34c759' }}>+{d.additions}</span>{' '}
-                  <span style={{ color: '#ff3b30' }}>−{d.deletions}</span>
-                </div>
-              </div>
-            ))}
-          </div>
+            </>
+          )}
 
-          <div className="opencode-editor-activity-title">活动日志</div>
-          <div className="opencode-editor-activity-list">
-            {panel.activity.length === 0 && (
-              <div className="opencode-editor-activity-item">
-                <div className="opencode-editor-activity-text">暂无活动</div>
+          {capabilities.events && (
+            <>
+              <div className="opencode-editor-activity-title">活动日志</div>
+              <div className="opencode-editor-activity-list">
+                {panel.activity.length === 0 && (
+                  <div className="opencode-editor-activity-item">
+                    <div className="opencode-editor-activity-text">暂无活动</div>
+                  </div>
+                )}
+                {[...panel.activity].reverse().map(renderActivityItem)}
               </div>
-            )}
-            {[...panel.activity].reverse().map(renderActivityItem)}
-          </div>
+            </>
+          )}
         </aside>
       </div>
 
-      <footer className="opencode-editor-terminal">
-        <div className="opencode-editor-terminal-title">终端</div>
-        <div className="opencode-editor-terminal-content">
-          <div className="opencode-editor-terminal-line">$ 终端：Phase 4 交付 PtyPanel</div>
-        </div>
-      </footer>
+      {capabilities.pty && (
+        <footer className="opencode-editor-terminal">
+          <div className="opencode-editor-terminal-title">终端</div>
+          <div className="opencode-editor-terminal-content">
+            <div className="opencode-editor-terminal-line">$ 终端：Phase 4 交付 PtyPanel</div>
+          </div>
+        </footer>
+      )}
     </div>
   );
 }

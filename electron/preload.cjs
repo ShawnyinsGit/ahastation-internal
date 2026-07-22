@@ -135,6 +135,11 @@ const api = {
     close: (hostId) => ipcRenderer.invoke('opencode-editor:close', { hostId }),
     list: () => ipcRenderer.invoke('opencode-editor:list'),
   },
+  ideRegistry: {
+    list: () => ipcRenderer.invoke('ide-registry:list'),
+    setDefault: (id) => ipcRenderer.invoke('ide-registry:set-default', { id }),
+    setOverride: (hostId, ideId) => ipcRenderer.invoke('ide-registry:set-override', { hostId, ideId }),
+  },
   // Secure editor file browsing. No cwd is ever sent — the main process
   // resolves the workspace from the sender's editor-window registration.
   ideFiles: {

@@ -9,21 +9,29 @@
 import { BrowserWindow, app, nativeTheme } from 'electron';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  NO_EDITOR_CAPABILITIES,
+  serializeEditorCapabilities,
+  type EditorIdeCapabilities,
+} from './ide-adapter.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-export interface OpenCodeEditorWindowOptions {
+export interface EditorWindowOptions {
   hostId: string;
   backendId: string;
   sessionId: string;
   cwd: string;
   title?: string;
+  /** UI-relevant capability set of the attaching IDE adapter — serialized
+   *  into the window query so the renderer hides panels it can't use. */
+  capabilities?: EditorIdeCapabilities;
 }
 
 export interface EditorWindowEntry {
   win: BrowserWindow;
-  options: OpenCodeEditorWindowOptions;
+  options: EditorWindowOptions;
 }
 
 const editorWindows = new Map<string, EditorWindowEntry>();
@@ -82,7 +90,7 @@ export function forwardToEditorWindow(hostId: string, payload: unknown): boolean
   return true;
 }
 
-export function createOpenCodeEditorWindow(options: OpenCodeEditorWindowOptions): BrowserWindow {
+export function createEditorWindow(options: EditorWindowOptions): BrowserWindow {
   const key = editorWindowKey(options.hostId);
   const existing = editorWindows.get(key);
   if (existing && !existing.win.isDestroyed()) {
@@ -95,7 +103,7 @@ export function createOpenCodeEditorWindow(options: OpenCodeEditorWindowOptions)
   const win = new BrowserWindow({
     width: 1200,
     height: 800,
-    title: options.title ?? `OpenCode - ${options.hostId}`,
+    title: options.title ?? `Editor - ${options.hostId}`,
     backgroundColor: getThemeBackgroundColor(),
     transparent: false,
     titleBarStyle: 'default',
@@ -104,10 +112,11 @@ export function createOpenCodeEditorWindow(options: OpenCodeEditorWindowOptions)
     maximizable: true,
     fullscreenable: true,
     webPreferences: {
-      // Narrow preload (editor view only needs ideFiles.list/read) — the
+      // Narrow preload (editor view only needs ideFiles/ideSession) — the
       // full meeting control surface in preload.cjs stays exclusive to the
-      // main / settings / popout windows.
-      preload: join(__dirname, 'preload-editor.cjs'),
+      // main / settings / popout windows. NB: this file lives in
+      // dist-electron/ide/, so the preload is one level up.
+      preload: join(__dirname, '..', 'preload-editor.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
@@ -174,26 +183,29 @@ export function createOpenCodeEditorWindow(options: OpenCodeEditorWindowOptions)
   });
 
   // Load the editor UI with query params so the renderer knows which
-  // host/backend/session to display.
+  // host/backend/session to display and which panels its IDE supports.
+  // (The `view=opencode-editor` value is frozen surface — v1.2 churn control.)
   const query = new URLSearchParams({
     view: 'opencode-editor',
     hostId: options.hostId,
     backendId: options.backendId,
     sessionId: options.sessionId,
     cwd: options.cwd,
+    caps: serializeEditorCapabilities(options.capabilities ?? NO_EDITOR_CAPABILITIES),
   });
 
   if (dev) {
     win.loadURL(`${process.env.VITE_DEV_SERVER_URL}?${query.toString()}`);
     win.webContents.openDevTools({ mode: 'detach' });
   } else {
-    win.loadFile(join(__dirname, '..', 'dist', 'index.html'), { query: Object.fromEntries(query) });
+    // NB: this file lives in dist-electron/ide/ — dist/ is two levels up.
+    win.loadFile(join(__dirname, '..', '..', 'dist', 'index.html'), { query: Object.fromEntries(query) });
   }
 
   return win;
 }
 
-export function closeOpenCodeEditorWindow(hostId: string): void {
+export function closeEditorWindow(hostId: string): void {
   const key = editorWindowKey(hostId);
   const entry = editorWindows.get(key);
   if (entry && !entry.win.isDestroyed()) {
@@ -201,7 +213,7 @@ export function closeOpenCodeEditorWindow(hostId: string): void {
   }
 }
 
-export function listOpenCodeEditorWindows(): Array<{
+export function listEditorWindows(): Array<{
   hostId: string;
   backendId: string;
   sessionId: string;
