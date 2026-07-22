@@ -64,6 +64,18 @@ export interface OpencodeServerRegistryDeps {
   now?: () => number;
 }
 
+export const STALE_RECORD_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** GC hint (Phase 7, pure): orphan records older than maxAge — the user
+ *  should be nudged to clear them (startup log, no fancy UI). */
+export function findStaleRecords(
+  records: readonly PersistedServerRecord[],
+  now: number,
+  maxAgeMs: number = STALE_RECORD_MAX_AGE_MS,
+): PersistedServerRecord[] {
+  return records.filter((r) => now - r.startedAt > maxAgeMs);
+}
+
 interface LiveEntry {
   key: string;
   meetingId: string;
@@ -275,6 +287,17 @@ export function getOpencodeServerRegistry(): OpencodeServerRegistry {
       load: loadRecords,
       save: saveRecords,
     });
+    // GC hint (Phase 7): nudge about ancient orphan records — adopt-or-kill
+    // handles same-cwd orphans at acquire time, but records for cwds the
+    // user never reopens would linger forever.
+    const stale = findStaleRecords(loadRecords(), Date.now());
+    if (stale.length > 0) {
+      console.log(
+        `[opencode-server-registry] ${stale.length} orphaned server record(s) older than 7 days ` +
+        `(oldest cwds: ${stale.slice(0, 3).map((r) => r.cwd).join(', ')}). ` +
+        `Clear them by deleting ${recordsPath()} if those workspaces are gone.`,
+      );
+    }
   }
   return singleton;
 }

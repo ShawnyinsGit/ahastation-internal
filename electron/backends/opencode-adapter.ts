@@ -46,6 +46,7 @@ import {
   mapPartToNormalizedMessage,
   mergeResyncParts,
   partKeyOf,
+  planSessionResume,
 } from './opencode-events.js';
 import {
   PermissionBroker,
@@ -179,6 +180,9 @@ class OpenCodeSession implements BackendSession {
   // results fan out point-to-point to this hostId's editor window, and a
   // freshly opened/re-attached window pulls the full snapshot.
   private readonly panel = new EditorPanelStore();
+  // Phase 7: set when this session was RESUMED from a journal snapshot.
+  // v1 resume is read-only — the first user prompt activates it.
+  private resumedReadOnly = false;
 
   constructor(
     private readonly config: BackendSessionConfig,
@@ -226,6 +230,58 @@ class OpenCodeSession implements BackendSession {
       // Subscribe-before-create: wait for the event stream to be live
       // BEFORE creating the session (no server-side replay — spike §5).
       await this.firstStreamOpened;
+
+      // Session resume (Phase 7): the journal snapshot carries the old
+      // opencode sessionId. The server persists sessions per directory, so
+      // after adopt-or-kill we verify it's still there — resume if yes,
+      // degrade to a fresh session WITH a visible notice if expired.
+      const resumeId = this.config.resumeSessionId ?? null;
+      if (resumeId) {
+        const listed = await this.client.session.list({
+          query: { directory: this.config.cwd },
+        }).catch(() => null);
+        const plan = planSessionResume(
+          resumeId,
+          (listed?.data ?? []).map((s) => s.id),
+        );
+        if (plan.kind === 'resume') {
+          this.sessionId = plan.sessionId;
+          this.ready = true;
+          // v1 resume is READ-ONLY: history restored, no prompt until the
+          // user explicitly sends one (see sendUserText).
+          this.resumedReadOnly = true;
+          if (this.config.hostId) {
+            bindEditorSession(this.config.hostId, plan.sessionId);
+          }
+          // Full pull restores the editor panel snapshot (todo/diff/
+          // activity) WITHOUT replaying history into the meeting chat —
+          // the meeting transcript comes from the meeting's own journal.
+          await this.resyncSnapshot(false);
+          this.emit({
+            kind: 'message',
+            message: {
+              type: 'system',
+              message: {
+                role: 'assistant',
+                content: [{ type: 'text', text: '已恢复 OpenCode 会话（只读查看历史）。发送消息即可激活继续。' }],
+              },
+            },
+          });
+          return;
+        }
+        if (plan.kind === 'expired') {
+          this.emit({
+            kind: 'message',
+            message: {
+              type: 'system',
+              message: {
+                role: 'assistant',
+                content: [{ type: 'text', text: '原 OpenCode 会话已过期（server 侧无此会话），已为你开启新会话。' }],
+              },
+            },
+          });
+        }
+      }
 
       const created = await this.client.session.create({
         query: { directory: this.config.cwd },
@@ -373,8 +429,10 @@ class OpenCodeSession implements BackendSession {
 
   /** Pull a full snapshot and merge it with events buffered during the
    *  resync window. Dedupe: (messageID, partID) last-write-wins, buffered
-   *  events win over the snapshot (they are newer). */
-  private async resyncSnapshot(): Promise<void> {
+   *  events win over the snapshot (they are newer). `chatReplay=false`
+   *  (session resume) feeds the panel store + seeds the dedupe revisions
+   *  WITHOUT re-emitting history into the meeting chat. */
+  private async resyncSnapshot(chatReplay = true): Promise<void> {
     if (!this.client || !this.sessionId) {
       // First connect — no session exists yet, nothing to resync.
       this.eventBuffer = [];
@@ -397,7 +455,7 @@ class OpenCodeSession implements BackendSession {
 
     const merged = mergeResyncParts(snapshotParts, bufferedParts);
     for (const part of merged) {
-      this.emitPartIfChanged(part);
+      this.emitPartIfChanged(part, chatReplay);
     }
     // Non-part events buffered during the window replay after the merge.
     for (const e of this.eventBuffer) {
@@ -408,7 +466,7 @@ class OpenCodeSession implements BackendSession {
     this.eventBuffer = [];
   }
 
-  private emitPartIfChanged(part: unknown): void {
+  private emitPartIfChanged(part: unknown, emitChat = true): void {
     if (part == null) return;
     const key = partKeyOf(part as { messageID?: unknown; id?: unknown });
     const json = safeJson(part);
@@ -417,7 +475,7 @@ class OpenCodeSession implements BackendSession {
       this.partRevisions.set(key, json);
     }
     const msg = mapPartToNormalizedMessage(part, part);
-    if (msg) {
+    if (msg && emitChat) {
       this.emit({ kind: 'message', message: msg });
     }
     this.feedPanelForPart(part);
@@ -586,6 +644,21 @@ class OpenCodeSession implements BackendSession {
 
   sendUserText(text: string, _priority?: InputPriority): void {
     if (!this.client || !this.sessionId || this.closed || !this.ready) return;
+    if (this.resumedReadOnly) {
+      // v1 resume read-only → the first explicit user prompt activates the
+      // resumed session (documented activation gesture, no extra UI).
+      this.resumedReadOnly = false;
+      this.emit({
+        kind: 'message',
+        message: {
+          type: 'system',
+          message: {
+            role: 'assistant',
+            content: [{ type: 'text', text: '已激活恢复的 OpenCode 会话，继续对话。' }],
+          },
+        },
+      });
+    }
     void this.client.session.prompt({
       path: { id: this.sessionId },
       body: {
@@ -644,6 +717,15 @@ class OpenCodeSession implements BackendSession {
     } catch (err) {
       console.warn('[opencode] interrupt failed:', err);
     }
+  }
+
+  /** Durable native handle for interrupted-meeting recovery (Phase 7): the
+   *  journal stores this per host and hands it back as resumeSessionId on
+   *  the next sessions:open. */
+  snapshot(): { protocol: string; sessionId: string; backendVersion?: string } | null {
+    return this.sessionId
+      ? { protocol: 'opencode', sessionId: this.sessionId, backendVersion: '1.18' }
+      : null;
   }
 
   end(): void {
