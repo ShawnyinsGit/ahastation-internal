@@ -46,6 +46,7 @@
     "lucide-react": "^1.16.0",
     "mammoth": "^1.12.0",
     "pdfjs-dist": "^5.7.284",
+    "phaser": "^4.2.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "shiki": "^4.3.1",
