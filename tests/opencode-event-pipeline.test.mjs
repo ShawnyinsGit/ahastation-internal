@@ -75,6 +75,43 @@ test('buildServerEnv passes only explicitly handed-in provider credentials', () 
 });
 
 // ---------------------------------------------------------------------------
+// OpenCodeBackend.buildEnv: settings key → provider env var (per chosen model)
+// ---------------------------------------------------------------------------
+
+test('buildEnv maps the settings apiKey to the provider of the chosen model', async () => {
+  const { OpenCodeBackend } = await import('../dist-electron/backends/opencode-adapter.js');
+  const backend = new OpenCodeBackend();
+
+  // Default model is anthropic/* — key lands in ANTHROPIC_API_KEY only.
+  const anthropic = backend.buildEnv({ authMode: 'apikey', apiKey: 'sk-ant-explicit' });
+  assert.equal(anthropic.ANTHROPIC_API_KEY, 'sk-ant-explicit');
+  assert.equal('OPENAI_API_KEY' in anthropic, false);
+
+  // An openai/* model routes the same key to OPENAI_API_KEY (+ base URL).
+  const openai = backend.buildEnv({
+    authMode: 'apikey', apiKey: 'sk-openai-explicit',
+    model: 'openai/gpt-5.4', baseUrl: 'https://gateway.example/v1',
+  });
+  assert.equal(openai.OPENAI_API_KEY, 'sk-openai-explicit');
+  assert.equal(openai.OPENAI_BASE_URL, 'https://gateway.example/v1');
+  assert.equal('ANTHROPIC_API_KEY' in openai, false);
+});
+
+test('buildEnv injects nothing without an apikey-mode key; extra passes through', async () => {
+  const { OpenCodeBackend } = await import('../dist-electron/backends/opencode-adapter.js');
+  const backend = new OpenCodeBackend();
+
+  const none = backend.buildEnv({ authMode: 'none' }, { HOME: '/home/u' });
+  assert.equal(none.HOME, '/home/u');
+  assert.equal('ANTHROPIC_API_KEY' in none, false);
+  assert.equal('OPENAI_API_KEY' in none, false);
+
+  // A stored key with authMode 'oauth' (CLI-login flow) is not injected.
+  const oauth = backend.buildEnv({ authMode: 'oauth', apiKey: 'sk-stale' });
+  assert.equal('ANTHROPIC_API_KEY' in oauth, false);
+});
+
+// ---------------------------------------------------------------------------
 // Password generation + Basic auth header
 // ---------------------------------------------------------------------------
 
