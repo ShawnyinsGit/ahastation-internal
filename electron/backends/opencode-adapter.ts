@@ -48,6 +48,12 @@ import {
   mergeResyncParts,
   partKeyOf,
 } from './opencode-events.js';
+import {
+  PermissionBroker,
+  type BrokerDecisionReason,
+  type BrokerPermissionRequest,
+  type OpencodePermissionResponse,
+} from '../permission-broker.js';
 
 // ── SDK client (dynamic import so app startup isn't blocked) ────────────────
 
@@ -132,8 +138,10 @@ class OpenCodeSession implements BackendSession {
   private firstStreamOpenedReject!: (err: unknown) => void;
   private firstStreamSettled = false;
 
-  // Phase 2 PR② seam: buffered permission requests (see permission.updated).
-  private pendingPermissions: unknown[] = [];
+  // Phase 2 PR②: permission requests are decided by the broker (auto-approve
+  // / native confirm / meeting-UI card / fail-closed timeout), which answers
+  // the server via replyPermission below.
+  private broker: PermissionBroker | null = null;
   // Phase 2 PR③ seam: latest todo/diff snapshots for the editor panel.
   private latestTodos: unknown[] = [];
   private latestDiff: unknown[] = [];
@@ -168,6 +176,17 @@ class OpenCodeSession implements BackendSession {
         // externally supplied value (spike §4: directory re-roots file APIs).
         directory: this.config.cwd,
         headers: { authorization: basicAuthHeader(handle.password) },
+      });
+
+      // Permission bridge (Phase 2 PR②): decides each permission.updated
+      // request (auto-approve / native confirm / meeting-UI card / fail-
+      // closed timeout) and answers the server via POST /session/{id}/
+      // permissions/{permissionID}.
+      this.broker = new PermissionBroker({
+        getAutoApproveScope: () => this.config.autoApproveScope ?? 'off',
+        confirmDestructive: this.config.confirmDestructive,
+        reply: (request, response, reason) => this.replyPermission(request, response, reason),
+        emitToMeeting: (event) => this.emit(event),
       });
 
       handle.onExit((code, signal) => this.onServerExit(code, signal));
@@ -423,17 +442,37 @@ class OpenCodeSession implements BackendSession {
         }
         return;
       }
-      case 'permission.updated':
-        // Phase 2 PR② seam: buffer — do not emit, do not drop. The
-        // PermissionBroker will drain pendingPermissions and answer via
-        // POST /session/{id}/permissions/{permissionID}.
-        this.pendingPermissions.push(properties);
+      case 'permission.updated': {
+        // Permission bridge: hand the request to the broker — it decides
+        // (auto-approve / native confirm / UI card / fail-closed timeout)
+        // and answers the server. Never dropped, never double-answered
+        // (broker dedupes on the permission id).
+        const perm = properties as {
+          id?: string;
+          type?: string;
+          title?: string;
+          sessionID?: string;
+          metadata?: Record<string, unknown>;
+        };
+        if (!perm?.id || !this.broker) return;
+        void this.broker.submit({
+          id: perm.id,
+          backendId: 'opencode',
+          sessionID: perm.sessionID ?? sid,
+          // opencode Permission.type carries the tool/permission kind
+          // (bash/edit/...); title is the human description.
+          toolName: perm.type ?? perm.title ?? 'unknown',
+          input: perm.metadata ?? {},
+          title: perm.title,
+          metadata: perm.metadata,
+        });
         return;
+      }
       case 'permission.replied': {
+        // Replied from ANY end (our own answers echo back too) — idempotent
+        // dequeue + meeting-UI card withdrawal.
         const pid = (properties as { permissionID?: string }).permissionID;
-        this.pendingPermissions = this.pendingPermissions.filter(
-          (p) => (p as { id?: string }).id !== pid,
-        );
+        if (pid) this.broker?.cancelExternal(pid);
         return;
       }
       case 'todo.updated':
@@ -481,11 +520,31 @@ class OpenCodeSession implements BackendSession {
     if (text) this.sendUserText(text);
   }
 
-  resolvePermission(_id: string, _decision: 'allow' | 'deny', _message?: string): void {
-    // Phase 2 PR②: answered through the PermissionBroker against
-    // POST /session/{id}/permissions/{permissionID}. Until then requests
-    // stay buffered in pendingPermissions (server config permission=ask) —
-    // the tool call blocks server-side; nothing is auto-allowed.
+  /** Deliver the broker's answer to the opencode server:
+   *  POST /session/{id}/permissions/{permissionID} { response }. */
+  private replyPermission(
+    request: BrokerPermissionRequest,
+    response: OpencodePermissionResponse,
+    reason: BrokerDecisionReason,
+  ): void {
+    console.log(`[opencode] permission ${request.id} (${request.toolName}) → ${response} [${reason}]`);
+    if (!this.client || this.closed) return;
+    void this.client.postSessionIdPermissionsPermissionId({
+      path: { id: request.sessionID, permissionID: request.id },
+      body: { response },
+    }).then((res) => {
+      if (res.error) {
+        console.warn('[opencode] permission reply rejected by server:', res.error);
+      }
+    }).catch((err) => {
+      console.warn('[opencode] permission reply failed:', err);
+    });
+  }
+
+  resolvePermission(id: string, decision: 'allow' | 'deny', _message?: string): void {
+    // Broadcast chain: every session's adapter gets the call — the broker
+    // acts only when it actually holds this permission id (mismatch no-op).
+    this.broker?.resolveUi(id, decision);
   }
 
   async interrupt(): Promise<void> {
@@ -504,6 +563,11 @@ class OpenCodeSession implements BackendSession {
     this.closed = true;
     this.streamAbort?.abort();
     this.streamAbort = null;
+    // fail-closed: deny everything still pending before tearing down (the
+    // server is about to die anyway, but the reject also fires when only the
+    // session is ending).
+    this.broker?.rejectAll('shutdown');
+    this.broker = null;
     // Deliberately NO session.delete — the native session stays inspectable
     // for as long as the server lives; the whole server goes away anyway.
     this.server?.kill();
