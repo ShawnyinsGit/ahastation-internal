@@ -9,12 +9,15 @@ import type {
   EditorActivityItem,
   EditorCapabilities,
   EditorKeyedActivity,
-  EditorPanelEvent,
   EditorSnapshot,
   EditorStatus,
+  EditorWindowEvent,
   FileEntry,
 } from '../types';
 import { EDITOR_ACTIVITY_CAP } from '../types';
+import { PtyPanel } from './PtyPanel';
+import { shikiLangForPath } from '../lib/editor-highlight';
+import { highlightToHtml } from '../lib/shiki-highlighter';
 
 interface OpenCodeEditorProps {
   hostId: string;
@@ -46,7 +49,7 @@ const STATUS_COLOR: Record<EditorStatus, string> = {
   error: '#ff3b30',
 };
 
-function applyPanelEvent(prev: EditorSnapshot, ev: EditorPanelEvent): EditorSnapshot {
+function applyPanelEvent(prev: EditorSnapshot, ev: EditorWindowEvent): EditorSnapshot {
   switch (ev.kind) {
     case 'status':
       return { ...prev, status: ev.status };
@@ -62,6 +65,7 @@ function applyPanelEvent(prev: EditorSnapshot, ev: EditorPanelEvent): EditorSnap
       return { ...prev, activity: next.slice(-EDITOR_ACTIVITY_CAP) };
     }
     default:
+      // pty-* payloads are consumed by PtyPanel, not the side panels.
       return prev;
   }
 }
@@ -72,6 +76,12 @@ export function OpenCodeEditor({ hostId, backendId, sessionId, cwd, capabilities
   const [files, setFiles] = useState<FileNode[]>([]);
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [fileContent, setFileContent] = useState<string>('');
+  const [fileMtime, setFileMtime] = useState<number | null>(null);
+  const [highlightedHtml, setHighlightedHtml] = useState<string | null>(null);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [panel, setPanel] = useState<EditorSnapshot>(EMPTY_PANEL);
@@ -138,21 +148,81 @@ export function OpenCodeEditor({ hostId, backendId, sessionId, cwd, capabilities
     setSelectedFile(path);
     setLoading(true);
     setError(null);
+    setEditing(false);
+    setSaveError(null);
     try {
       const result = await window.vibeMeet.ideFiles.read(path);
       if (result.ok) {
         setFileContent(result.file.content);
+        setFileMtime(result.file.mtimeMs);
+        setDraft(result.file.content);
       } else {
         setError(result.error);
         setFileContent('');
+        setFileMtime(null);
       }
     } catch (err) {
       setError(String(err));
       setFileContent('');
+      setFileMtime(null);
     } finally {
       setLoading(false);
     }
   }, []);
+
+  // shiki highlight (async, per-language dynamic grammar). Falls back to the
+  // plain <pre> while loading or for unknown extensions.
+  useEffect(() => {
+    if (editing || !selectedFile || !fileContent) {
+      setHighlightedHtml(null);
+      return;
+    }
+    let cancelled = false;
+    const lang = shikiLangForPath(selectedFile);
+    if (!lang) {
+      setHighlightedHtml(null);
+      return;
+    }
+    void highlightToHtml(fileContent, lang).then((html) => {
+      if (!cancelled) setHighlightedHtml(html);
+    });
+    return () => { cancelled = true; };
+  }, [selectedFile, fileContent, editing]);
+
+  const handleStartEdit = () => {
+    setDraft(fileContent);
+    setSaveError(null);
+    setEditing(true);
+  };
+
+  const handleSave = useCallback(async () => {
+    if (!selectedFile) return;
+    setSaving(true);
+    setSaveError(null);
+    try {
+      const res = await window.vibeMeet.ideFiles.write(
+        selectedFile,
+        draft,
+        fileMtime ?? undefined,
+      );
+      if (res.ok) {
+        setFileContent(draft);
+        setFileMtime(res.file.mtimeMs);
+        setEditing(false);
+        // Belt-and-braces: the server watcher tells the agent; we refresh
+        // the tree so sizes/mtimes are current even if watcher lags.
+        void loadFiles().then(setFiles);
+      } else if (res.conflict) {
+        setSaveError(`保存冲突：${res.error}（请重新加载后再改）`);
+      } else {
+        setSaveError(res.error);
+      }
+    } catch (err) {
+      setSaveError(String(err));
+    } finally {
+      setSaving(false);
+    }
+  }, [selectedFile, draft, fileMtime, loadFiles]);
 
   const handleSelectFile = async (node: FileNode) => {
     if (node.isDir) {
@@ -275,11 +345,55 @@ export function OpenCodeEditor({ hostId, backendId, sessionId, cwd, capabilities
             <div className="opencode-editor-code-view">
               <div className="opencode-editor-code-header">
                 <span className="opencode-editor-code-path">{selectedFile}</span>
+                {!loading && !error && !editing && (
+                  <button type="button" className="opencode-editor-refresh" onClick={handleStartEdit} title="编辑">
+                    编辑
+                  </button>
+                )}
+                {editing && (
+                  <>
+                    <button
+                      type="button"
+                      className="opencode-editor-refresh"
+                      onClick={() => void handleSave()}
+                      disabled={saving || draft === fileContent}
+                      title="保存"
+                    >
+                      {saving ? '保存中…' : '保存'}
+                    </button>
+                    <button
+                      type="button"
+                      className="opencode-editor-refresh"
+                      onClick={() => { setEditing(false); setDraft(fileContent); setSaveError(null); }}
+                      title="取消"
+                    >
+                      取消
+                    </button>
+                  </>
+                )}
               </div>
               <div className="opencode-editor-code-content">
                 {loading && <div className="opencode-editor-loading">加载中...</div>}
                 {error && <div className="opencode-editor-error">{error}</div>}
-                {!loading && !error && (
+                {saveError && <div className="opencode-editor-error">{saveError}</div>}
+                {!loading && !error && editing && (
+                  <textarea
+                    className="opencode-editor-code-text"
+                    style={{ width: '100%', height: '100%', resize: 'none', background: 'transparent', color: 'inherit', border: 'none', outline: 'none', fontFamily: 'inherit' }}
+                    value={draft}
+                    onChange={(e) => setDraft(e.target.value)}
+                    spellCheck={false}
+                  />
+                )}
+                {!loading && !error && !editing && highlightedHtml && (
+                  // shiki-generated markup from our own highlighter (file
+                  // content is HTML-escaped by shiki itself).
+                  <div
+                    className="opencode-editor-code-text"
+                    dangerouslySetInnerHTML={{ __html: highlightedHtml }}
+                  />
+                )}
+                {!loading && !error && !editing && !highlightedHtml && (
                   <pre className="opencode-editor-code-text">{fileContent}</pre>
                 )}
               </div>
@@ -371,7 +485,7 @@ export function OpenCodeEditor({ hostId, backendId, sessionId, cwd, capabilities
         <footer className="opencode-editor-terminal">
           <div className="opencode-editor-terminal-title">终端</div>
           <div className="opencode-editor-terminal-content">
-            <div className="opencode-editor-terminal-line">$ 终端：Phase 4 交付 PtyPanel</div>
+            <PtyPanel hostId={hostId} />
           </div>
         </footer>
       )}

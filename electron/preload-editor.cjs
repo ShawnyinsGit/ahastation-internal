@@ -14,6 +14,17 @@ const api = {
   ideFiles: {
     list: (path) => ipcRenderer.invoke('ide-files:list', { path }),
     read: (path) => ipcRenderer.invoke('ide-files:read', { path }),
+    write: (path, content, expectedMtime) =>
+      ipcRenderer.invoke('ide-files:write', { path, content, expectedMtime }),
+  },
+  // PTY terminal (Phase 4): main owns the WebSocket to the opencode server
+  // and injects auth; the renderer only sees this narrow API. Downlink data
+  // arrives on the same 'ide-editor:event' channel as ideSession events.
+  idePty: {
+    create: () => ipcRenderer.invoke('ide-pty:create'),
+    input: (data) => ipcRenderer.invoke('ide-pty:input', { data }),
+    resize: (rows, cols) => ipcRenderer.invoke('ide-pty:resize', { rows, cols }),
+    close: () => ipcRenderer.invoke('ide-pty:close'),
   },
   // Live panel state (Phase 2 PR③): initial snapshot pull + point-to-point
   // incremental events for THIS window's hostId (status / todo / diff /

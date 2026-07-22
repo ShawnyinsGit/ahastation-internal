@@ -12,6 +12,9 @@ export interface FileContent {
   path: string;
   content: string;
   truncated: boolean;
+  /** File mtime at read time — sent back as expectedMtime on write for
+   *  optimistic concurrency. */
+  mtimeMs: number;
 }
 
 // ── OpenCode editor live panels (Phase 2 PR③) ──────────────────────────────
@@ -57,6 +60,14 @@ export type EditorPanelEvent =
   | { kind: 'status'; status: EditorStatus }
   | { kind: 'todo'; todos: EditorTodoItem[] }
   | { kind: 'diff'; diff: EditorDiffEntry[] };
+
+// PTY downlink payloads share the same 'ide-editor:event' channel.
+export type PtyDownlink =
+  | { kind: 'pty-data'; data: string; encoding: 'utf8' | 'base64' }
+  | { kind: 'pty-exit'; exitCode: number | null }
+  | { kind: 'pty-error'; error: string };
+
+export type EditorWindowEvent = EditorPanelEvent | PtyDownlink;
 
 export const EDITOR_ACTIVITY_CAP = 200;
 
@@ -529,12 +540,24 @@ export interface VibeMeetApi {
   ideFiles: {
     list: (path?: string) => Promise<{ ok: true; entries: FileEntry[] } | { ok: false; error: string }>;
     read: (path: string) => Promise<{ ok: true; file: FileContent } | { ok: false; error: string }>;
+    write: (
+      path: string,
+      content: string,
+      expectedMtime?: number,
+    ) => Promise<{ ok: true; file: FileContent } | { ok: false; error: string; conflict?: boolean; currentMtime?: number }>;
+  };
+  /** PTY terminal (Phase 4). Only on the editor window's narrow preload. */
+  idePty: {
+    create: () => Promise<{ ok: true; ptyId: string; existing: boolean } | { ok: false; error: string }>;
+    input: (data: string) => Promise<{ ok: boolean; error?: string; dropped?: boolean }>;
+    resize: (rows: number, cols: number) => Promise<{ ok: boolean; error?: string }>;
+    close: () => Promise<{ ok: boolean; error?: string }>;
   };
   /** Editor-window live panel state. Only exposed by the narrow editor
    *  preload (preload-editor.cjs) — absent from the main window's bridge. */
   ideSession: {
     getState: () => Promise<{ ok: true; state: EditorSnapshot } | { ok: false; error: string }>;
-    onEvent: (cb: (msg: { hostId: string; payload: EditorPanelEvent }) => void) => () => void;
+    onEvent: (cb: (msg: { hostId: string; payload: EditorWindowEvent }) => void) => () => void;
   };
   popoutSession: (tabId: string) => Promise<{ ok: boolean }>;
   popoutStage: (windowId: string, type: string) => Promise<{ ok: boolean }>;
