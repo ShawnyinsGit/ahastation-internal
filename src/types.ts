@@ -62,6 +62,7 @@ export interface WorkerDeliveryFile {
 export type RendererEvent =
   | { kind: 'message'; message: any; source?: AgentSource; sessionId?: string; hostId?: string }
   | { kind: 'permission-request'; id: string; toolName: string; input: Record<string, unknown>; toolUseID: string; source?: AgentSource; sessionId?: string; hostId?: string }
+  | { kind: 'permission-cancelled'; id: string; source?: AgentSource; sessionId?: string; hostId?: string }
   | { kind: 'auth-required'; error: string; source?: AgentSource; sessionId?: string; hostId?: string }
   | { kind: 'error'; error: string; source?: AgentSource; sessionId?: string; hostId?: string }
   | { kind: 'ended'; source?: AgentSource; sessionId?: string; hostId?: string }

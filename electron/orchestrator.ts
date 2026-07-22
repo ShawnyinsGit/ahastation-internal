@@ -281,6 +281,7 @@ export class Orchestrator implements OrchestratorBridge {
           mcpServers: so.mcpServers as Record<string, unknown> | undefined,
           skills: Array.isArray(so.skills) ? so.skills : undefined,
           autoApproveScope: opts.autoApproveScope,
+          confirmDestructive: opts.confirmDestructive,
           resumeSessionId: purpose === 'host'
             ? this.resumeBackendSessions[actorHostId]?.sessionId
             : undefined,

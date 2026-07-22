@@ -94,6 +94,7 @@ export interface NormalizedMessage {
 export type BackendSessionEvent =
   | { kind: 'message'; message: NormalizedMessage }
   | { kind: 'permission-request'; id: string; toolName: string; input: Record<string, unknown>; toolUseID: string }
+  | { kind: 'permission-cancelled'; id: string }
   | { kind: 'auth-required'; error: string }
   | { kind: 'error'; error: string }
   | { kind: 'ended' };
@@ -130,6 +131,9 @@ export interface BackendSessionConfig {
   resumeSessionId?: string;
   /** Least-privilege execution profile selected by the meeting scheduler. */
   executionRole?: 'host' | 'worker';
+  /** Native OS confirmer for destructive tool calls (PermissionBroker). When
+   *  absent, destructive requests degrade to the meeting-UI approval card. */
+  confirmDestructive?: (toolName: string, input: Record<string, unknown>) => Promise<boolean>;
 }
 
 export interface BackendSessionSnapshot {

@@ -1242,6 +1242,15 @@ class MeetingStore {
       }
       return;
     }
+    if (e.kind === 'permission-cancelled') {
+      // Withdraw the approval card when the request was resolved elsewhere:
+      // permission.replied from any end, broker fail-closed timeout, or
+      // session teardown (PermissionBroker auto-reject).
+      this.updateWorker(slot, source, (w) => (
+        w.pendingPermission?.id === e.id ? { ...w, pendingPermission: null } : w
+      ), e.hostId);
+      return;
+    }
     if (e.kind === 'decision-pending') {
       const sideChannels = [
         e.calendarOk ? '日历' : null,
