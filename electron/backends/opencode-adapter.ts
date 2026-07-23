@@ -41,6 +41,10 @@ import {
   resolveOpencodeBinary,
   type OpencodeServerHandle,
 } from './opencode-server-process.js';
+import { parseUnifiedDiffCounts } from './opencode-editor-panel.js';
+
+/** Tools whose completion means a file was written/edited (derived diff). */
+const FILE_WRITE_TOOLS = new Set(['write', 'edit', 'multiedit', 'notebookedit']);
 import {
   createSseParser,
   extractEventSessionId,
@@ -509,12 +513,21 @@ class OpenCodeSession implements BackendSession {
     }
     if (p.type === 'tool') {
       const state = (p.state ?? {}) as Record<string, unknown>;
+      const toolName = typeof p.tool === 'string' ? p.tool : 'unknown';
+      const status = typeof state.status === 'string' ? state.status : 'pending';
+      const input = (state.input ?? undefined) as Record<string, unknown> | undefined;
       this.feedPanel(this.panel.noteToolCall(
         String(p.callID ?? p.id ?? ''),
-        typeof p.tool === 'string' ? p.tool : 'unknown',
-        typeof state.status === 'string' ? state.status : 'pending',
-        (state.input ?? undefined) as Record<string, unknown> | undefined,
+        toolName,
+        status,
+        input,
       ));
+      // Derived diff source (server session.diff is empty in 1.18.4): a
+      // completed write/edit names the changed file in input.filePath.
+      const filePath = typeof input?.filePath === 'string' ? input.filePath : undefined;
+      if (status === 'completed' && filePath && FILE_WRITE_TOOLS.has(toolName.toLowerCase())) {
+        this.feedPanel(this.panel.noteFileChange(filePath));
+      }
     }
   }
 
@@ -613,6 +626,13 @@ class OpenCodeSession implements BackendSession {
           title: parsed.title,
           metadata: parsed.metadata,
         });
+        // Derived diff source: permission.asked for edit/write carries the
+        // full unified diff in metadata ({filepath, diff}) — parse +/-.
+        const diffText = typeof parsed.metadata?.diff === 'string' ? parsed.metadata.diff : undefined;
+        const diffFile = typeof parsed.metadata?.filepath === 'string' ? parsed.metadata.filepath : undefined;
+        if (diffText && diffFile) {
+          this.feedPanel(this.panel.noteFileChange(diffFile, parseUnifiedDiffCounts(diffText)));
+        }
         return;
       }
       case 'permission.replied': {

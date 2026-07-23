@@ -53,6 +53,25 @@ export type EditorPanelEvent =
 
 export const EDITOR_ACTIVITY_CAP = 200;
 
+/** Count +/- lines of a unified diff (permission.asked metadata carries one
+ *  for edit/write requests). '+++'/'---' header lines are excluded. */
+export function parseUnifiedDiffCounts(diffText: string): { additions: number; deletions: number } {
+  let additions = 0;
+  let deletions = 0;
+  for (const line of diffText.split('\n')) {
+    if (line.startsWith('+++') || line.startsWith('---')) continue;
+    if (line.startsWith('+')) additions += 1;
+    else if (line.startsWith('-')) deletions += 1;
+  }
+  return { additions, deletions };
+}
+
+/** opencode 1.18.4 emits session.diff events but always with diff: [] (live-
+ *  verified in git and non-git dirs, snapshot flag on — server-side gap).
+ *  The panel therefore keeps a DERIVED file-change list fed by completed
+ *  write/edit tool calls and permission.asked diff metadata; a non-empty
+ *  server session.diff always wins when it eventually carries data. */
+
 // ── Fan-out routing (pure) ──────────────────────────────────────────────────
 
 /** §2.2 rule 7 routing decision: which webContents (if any) owns this
@@ -75,18 +94,23 @@ function truncate(text: string, max: number): string {
 export class EditorPanelStore {
   private status: EditorStatus = 'idle';
   private todos: EditorTodoItem[] = [];
-  private diff: EditorDiffEntry[] = [];
+  private serverDiff: EditorDiffEntry[] | null = null;
+  private derivedDiff = new Map<string, EditorDiffEntry>();
   private activity: EditorKeyedActivity[] = [];
   private activityIndex = new Map<string, number>();
   private instanceSeq = 0;
 
   constructor(private readonly now: () => number = Date.now) {}
 
+  private diffEntries(): EditorDiffEntry[] {
+    return this.serverDiff ?? [...this.derivedDiff.values()];
+  }
+
   snapshot(): EditorSnapshot {
     return {
       status: this.status,
       todos: this.todos.map((t) => ({ ...t })),
-      diff: this.diff.map((d) => ({ ...d })),
+      diff: this.diffEntries().map((d) => ({ ...d })),
       activity: this.activity.map((a) => ({ key: a.key, item: { ...a.item } })),
     };
   }
@@ -176,7 +200,7 @@ export class EditorPanelStore {
 
   setDiff(raw: unknown): EditorPanelEvent {
     const list = Array.isArray(raw) ? raw : [];
-    this.diff = list
+    const parsed = list
       .filter((d): d is Record<string, unknown> => !!d && typeof d === 'object')
       .map((d) => ({
         file: typeof d.file === 'string' ? d.file : '',
@@ -184,6 +208,22 @@ export class EditorPanelStore {
         deletions: typeof d.deletions === 'number' ? d.deletions : 0,
       }))
       .filter((d) => d.file !== '');
+    // Server is authoritative only when it actually carries entries — the
+    // 1.18.4 empty-array events must NOT wipe the derived list.
+    if (parsed.length > 0) this.serverDiff = parsed;
+    return { kind: 'diff', diff: this.snapshot().diff };
+  }
+
+  /** Derived diff source (server session.diff is empty in 1.18.4): a file
+   *  write/edit completed, or a permission.asked carried its unified diff.
+   *  Later calls with real counts upgrade the entry. */
+  noteFileChange(file: string, counts?: { additions: number; deletions: number }): EditorPanelEvent {
+    const existing = this.derivedDiff.get(file);
+    this.derivedDiff.set(file, {
+      file,
+      additions: counts?.additions ?? existing?.additions ?? 0,
+      deletions: counts?.deletions ?? existing?.deletions ?? 0,
+    });
     return { kind: 'diff', diff: this.snapshot().diff };
   }
 }
