@@ -1,10 +1,9 @@
 {
-  "name": "aha-meet",
-  "version": "0.16.3",
-  "description": "Real-time meeting-style collaboration with Claude Code",
+  "name": "ahastation",
+  "version": "0.17.0",
+  "description": "AhaStation — 语音会议式 AI 编程协作（数字员工开会）",
   "author": {
-    "name": "AhaMeet",
-    "email": "contact@ahameet.com"
+    "name": "AhaStation"
   },
   "private": true,
   "type": "module",

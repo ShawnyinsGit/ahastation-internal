@@ -745,7 +745,7 @@ function BackendCard({
       {!b.available && b.installHint && (
         <div className="backend-card-install">
           <code>{b.installHint}</code>
-          {b.installHint !== 'Bundled with AhaMeet' && (
+          {b.installHint !== 'Bundled with AhaStation' && (
             <button
               type="button"
               className="backend-btn backend-install-btn"

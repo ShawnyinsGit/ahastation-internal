@@ -53,7 +53,7 @@ const CODEX_CAPABILITIES: BackendCapabilities = {
   executeTasks: false,
   displayName: 'Codex',
   iconId: 'codex',
-  // The SDK can report MCP calls, but this adapter cannot mount AhaMeet MCP
+  // The SDK can report MCP calls, but this adapter cannot mount AhaStation MCP
   // servers or broker interactive approval requests yet.
   mcp: false,
   permissions: false,
@@ -746,7 +746,7 @@ async function materializeCodexInput(
   let totalBytes = 0;
   try {
     if (images.length > 0) {
-      directory = await mkdtemp(join(tmpdir(), 'aha-meet-codex-'));
+      directory = await mkdtemp(join(tmpdir(), 'ahastation-codex-'));
       await chmod(directory, 0o700);
     }
     let imageIndex = 0;

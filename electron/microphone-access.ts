@@ -55,8 +55,8 @@ export function requestMicrophoneAccess(offerSettings = false): Promise<boolean>
       const options = {
         type: 'warning' as const,
         title: '需要麦克风权限',
-        message: 'AhaMeet 无法访问麦克风',
-        detail: '请在“系统设置 → 隐私与安全性 → 麦克风”中允许 AhaMeet，然后重新开启语音。',
+        message: 'AhaStation 无法访问麦克风',
+        detail: '请在“系统设置 → 隐私与安全性 → 麦克风”中允许 AhaStation，然后重新开启语音。',
         buttons: ['打开系统设置', '稍后'],
         defaultId: 0,
         cancelId: 1,

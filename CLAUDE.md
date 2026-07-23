@@ -1,4 +1,4 @@
-# vibe-meet — Claude working notes
+# AhaStation — Claude working notes
 
 ## Environment paths
 

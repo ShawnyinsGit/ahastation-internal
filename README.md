@@ -1,105 +1,56 @@
-# AhaMeet
+# AhaStation
 
-A real-time meeting-style collaboration app that pairs you with Claude Code over screen sharing and voice. Think of it as having an AI engineering co-pilot in a video call — you talk, Claude listens, sees your screen, writes and runs code, and narrates what it's doing.
+**语音会议式 AI 编程协作客户端** — 多个 CLI coding agent（Claude Code / Codex / Kimi / OpenCode / Qoder）以「数字员工参会者」身份加入你的视频会议：你说话，它们听、看、写代码、跑命令，并把进展讲给你听。
 
-## Features
+每个 backend 都是一个数字员工，语音对话开会即可完成协作；要看细节，点开任意员工的独立编辑器窗口。运行于桌面（macOS 优先），并为 RK3588 掌机（AhaStation 硬件）做了掌机模式与双屏适配。
 
-- **Voice-first interaction** — speak naturally, Claude transcribes and responds in real-time using on-device Whisper ASR
-- **Screen sharing** — take manual snapshots of any window or screen and send them to Claude as context
-- **Multi-agent execution** — Claude spawns parallel worker agents to tackle complex tasks concurrently, each shown as a tile in the meeting view
-- **Text-to-speech narration** — Claude's replies are spoken aloud with macOS system voices (supports Siri Premium / Lili voices)
-- **Voice lock** — enroll a voice print so only your voice triggers Claude
-- **Cross-meeting memory** — key decisions, todos, and facts are stored and recalled across sessions
-- **Claude authentication** — use an Anthropic API key or log in with your Claude Pro/Max subscription account
+## 核心特性
 
-## Requirements
+- **会议模式（默认）** — 语音优先的会议界面：员工磁贴（状态/speaking/权限卡）、屏幕共享与快照、会议级 Coordinator 编排多员工并行交付
+- **员工独立编辑器窗口** — 每个数字员工一扇：文件树、代码查看（shiki 高亮）与编辑保存、Diff/Todo/活动实时面板、PTY 终端（xterm.js）
+- **权限桥** — 工具调用的审批统一走会议 UI，destructive 操作落 macOS 原生确认框（防 renderer 伪造）；fail-closed 超时
+- **陪伴屏** — 像素风虚拟会议室悬浮窗：每个员工一个角色一个工位，状态动画 + NPC 气泡 + 吉祥物聚合提醒（"3 人工作中 · 1 人卡住 · 1 条待审批"）
+- **语音链路** — 本地 whisper.cpp ASR（Apple Silicon 实测）+ 系统 TTS；VAD barge-in 打断、声纹锁
+- **掌机模式** — 小屏布局（chip 条/底部抽屉/审批模态卡）、编辑器 App 内 overlay（语音不断）、双屏热插拔迁移（外接显示器 = 桌面模式，内置屏 = 陪伴屏）
+- **会话恢复** — append-only journal，重启后会议与员工会话可恢复（只读再激活）
 
-- macOS (Apple Silicon arm64)
-- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) — bundled inside the app
-- Anthropic API key **or** Claude Pro / Max subscription
+## 运行要求
 
-## Installation
+- macOS（Apple Silicon arm64）— 当前发布形态；Linux/Windows 在 CI matrix 上推进中
+- Node.js 22+
+- 至少一家 backend 的凭证（Anthropic / OpenAI / Kimi Code API key，或 Claude Pro/Max 订阅）
 
-1. Download `AhaMeet-0.5.5-arm64.dmg` from [Releases](../../releases)
-2. Open the DMG and drag AhaMeet to Applications
-3. Right-click → Open (first launch only, app is unsigned)
-
-**Linux (AppImage)**: AppImage requires **FUSE2** (`sudo apt install libfuse2` on Ubuntu/Debian; Fedora 默认自带）。然后 `chmod +x AhaMeet-*.AppImage && ./AhaMeet-*.AppImage`。AppImage 与 deb 均有 x64 与 arm64 构建（arm64 目前标注未验证，验证走 CI 的 linux-arm64 手动 job）。
-
-## Authentication
-
-On the login screen, expand **Claude authentication** and choose one of:
-
-| Method | When to use |
-|--------|-------------|
-| **API Key** | You have an `sk-ant-...` key from [console.anthropic.com](https://console.anthropic.com) |
-| **Claude Account** | You have a Claude Pro or Max subscription at [claude.ai](https://claude.ai) |
-
-For the API key method, paste your key and click Save. For the subscription method, click **Log in with Claude** — a browser window will open for OAuth.
-
-## Usage
-
-1. Choose your authentication method (first time only)
-2. Pick a working directory — Claude will read and write files here
-3. Click **Start meeting**
-4. Talk naturally or type; use ⌥ (Option) to interrupt Claude mid-reply
-5. Click the screen icon in the toolbar to send a snapshot of your screen
-
-## Building from source
+## 开发
 
 ```bash
-# Install dependencies
-npm install
-
-# Development (renderer only, hot reload)
-npm run dev
-
-# Full build
-npm run build
-
-# Package as DMG (downloads Whisper model ~190MB on first run)
-npm run dist:dmg
+npm ci
+npm run dev          # vite + electron 开发模式
+npm test             # 256 项 node 测试（先构建 electron 侧）
+# 双侧 typecheck
+node node_modules/typescript/bin/tsc --noEmit -p tsconfig.json
+node node_modules/typescript/bin/tsc --noEmit -p tsconfig.electron.json
 ```
 
-### Prerequisites for building
+## E2E 冒烟（OpenCode 后端全链）
 
-- Node.js 18+
-- macOS with Xcode Command Line Tools (`xcode-select --install`)
-
-## Tech stack
-
-| Layer | Technology |
-|-------|-----------|
-| Shell | Electron 33 |
-| UI | React 18 + TypeScript |
-| Bundler | Vite 6 |
-| AI | Claude Code SDK (`@anthropic-ai/claude-agent-sdk`) |
-| ASR | Whisper (via `whisper-cli` binary, ONNX Runtime on-device) |
-| TTS | macOS Web Speech Synthesis API |
-| Voice detection | `@ricky0123/vad-web` (Silero VAD, ONNX) |
-
-## Project structure
-
+```bash
+export AHAMEET_E2E_API_KEY=sk-...        # 或 OpenAI / Kimi Code key
+export AHAMEET_E2E_PROVIDER=anthropic    # anthropic(默认) | openai | kimi
+npm run build:electron && node scripts/e2e-opencode-smoke.mjs
 ```
-electron/          Electron main process
-  main.ts          Window, IPC handlers, auth
-  orchestrator.ts  Multi-agent session coordinator
-  claude-session.ts  Claude Code SDK wrapper
-  settings-loader.ts  Subprocess env (API key injection)
-  store.ts         Persistent settings (JSON)
-  memory.ts        Cross-meeting memory store
-  whisper.ts       On-device ASR
 
-src/               Renderer (React)
-  App.tsx          Top-level state, session lifecycle
-  components/      UI components
-  lib/             Meeting store, hooks (speech, VAD, ASR)
+覆盖：二进制分发 → 密钥注入 → 会话与事件流 → 权限答复 → Diff/Todo 数据源 → 断流重连 → 进程卫生，共 10 项。
 
-scripts/           Build helpers
-  fetch-whisper.mjs     Downloads Whisper model + CLI
-  bundle-claude-defaults.mjs  Bundles Claude agent defaults
+## 构建安装包
+
+```bash
+npm run dist:dmg     # macOS arm64 DMG（未签名体验版）
 ```
+
+## 文档
+
+`docs/` 下有设计/调研文档：OpenCode server 接入实测（`spike-opencode-server.md`）、Phase 2 验收清单（`e2e-phase2-checklist.md`）、Qoder/多后端 harness 调研、掌机与 UI 规划等。
 
 ## License
 
-MIT
+待定（未定开源协议前，保留所有权利）。

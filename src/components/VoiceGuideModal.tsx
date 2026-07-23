@@ -57,7 +57,7 @@ export function VoiceGuideModal({ open, onClose, onDismissForever }: VoiceGuideM
               在「中文（中国大陆）」下找到 <b>语音 1 / 2 / 3 / 4</b> 或者 <b>Lili Premium</b>，
               点 ↓ 下载（每个约 200 MB）。
             </li>
-            <li>下载完成后切回 AhaMeet，播报会自动用上新音色。</li>
+            <li>下载完成后切回 AhaStation，播报会自动用上新音色。</li>
           </ol>
 
           {/* Screenshot placeholder — slot in step-by-step images later. */}

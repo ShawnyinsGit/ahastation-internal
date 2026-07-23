@@ -121,7 +121,7 @@ test('app-server rejects a runtime that does not match its locked schema', async
 
 test('Codex runtime version is extracted from the real desktop user agent shape', () => {
   assert.equal(
-    extractCodexRuntimeVersion('Codex Desktop/0.144.1 (Mac OS; arm64) dumb (ahameet; 0.15.1)'),
+    extractCodexRuntimeVersion('Codex Desktop/0.144.1 (Mac OS; arm64) dumb (ahastation; 0.15.1)'),
     '0.144.1',
   );
 });

@@ -238,10 +238,10 @@ export function Lobby({ lastError }: LobbyProps) {
       <div className="join-card lobby-card">
         <div className="join-brand">
           <div className="join-logo">
-            <img src="icon-96.png" alt="AhaMeet" className="join-logo-img" />
+            <img src="icon-96.png" alt="AhaStation" className="join-logo-img" />
           </div>
           <div>
-            <div className="join-title">AhaMeet</div>
+            <div className="join-title">AhaStation</div>
             <div className="join-sub">Pair with AI over screen + voice</div>
           </div>
         </div>
@@ -408,7 +408,7 @@ export function Lobby({ lastError }: LobbyProps) {
                   <div className="join-auth-hint">
                     {currentBackend.installHint ?? `${currentBackend.displayName} is not installed. Install it to use this backend.`}
                   </div>
-                  {currentBackend.installHint && currentBackend.installHint !== 'Bundled with AhaMeet' && (
+                  {currentBackend.installHint && currentBackend.installHint !== 'Bundled with AhaStation' && (
                     <button
                       type="button"
                       className="join-auth-btn lobby-install-btn"

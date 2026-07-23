@@ -19,12 +19,12 @@ test('packaged renderer enables local ONNX/VAD execution and cross-origin isolat
 
 test('app protocol only serves files inside the renderer bundle', () => {
   assert.equal(
-    resolveAppAssetPath('/Applications/AhaMeet/dist', 'app://bundle/assets/app.js'),
-    '/Applications/AhaMeet/dist/assets/app.js',
+    resolveAppAssetPath('/Applications/AhaStation/dist', 'app://bundle/assets/app.js'),
+    '/Applications/AhaStation/dist/assets/app.js',
   );
-  assert.equal(resolveAppAssetPath('/Applications/AhaMeet/dist', 'app://other/index.html'), null);
-  assert.equal(resolveAppAssetPath('/Applications/AhaMeet/dist', 'app://bundle/%2F..%2F..%2Fsecret.txt'), null);
-  assert.equal(resolveAppAssetPath('/Applications/AhaMeet/dist', 'app://bundle/'), '/Applications/AhaMeet/dist/index.html');
+  assert.equal(resolveAppAssetPath('/Applications/AhaStation/dist', 'app://other/index.html'), null);
+  assert.equal(resolveAppAssetPath('/Applications/AhaStation/dist', 'app://bundle/%2F..%2F..%2Fsecret.txt'), null);
+  assert.equal(resolveAppAssetPath('/Applications/AhaStation/dist', 'app://bundle/'), '/Applications/AhaStation/dist/index.html');
 });
 
 test('development renderer scopes HMR access to the configured Vite origin', () => {

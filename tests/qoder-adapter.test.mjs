@@ -120,7 +120,7 @@ test('Qoder auth expiry emits one auth-required circuit breaker event', async ()
 });
 
 test('packaged Qoder runtime resolves to an unpacked executable', async (t) => {
-  const resources = await mkdtemp(join(tmpdir(), 'ahameet-qoder-resources-'));
+  const resources = await mkdtemp(join(tmpdir(), 'ahastation-qoder-resources-'));
   t.after(() => rm(resources, { recursive: true, force: true }));
   const binary = join(resources, 'app.asar.unpacked', 'node_modules', '@qoder-ai', 'qodercli', 'bundle', 'qodercli.js');
   await mkdir(join(binary, '..'), { recursive: true });

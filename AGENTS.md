@@ -1,4 +1,4 @@
-# AhaStation (AhaMeet client) — Codex working notes
+# AhaStation — Codex working notes
 
 ## Environment paths
 

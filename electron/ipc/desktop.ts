@@ -38,9 +38,9 @@ export function registerDesktopIpc(): void {
         : 'granted';
       if (status !== 'granted') {
         // Not-determined needs special handling on macOS: calling getSources
-        // is what registers AhaMeet in the Screen Recording list under System
+        // is what registers AhaStation in the Screen Recording list under System
         // Settings, so we still fire it (best-effort, ignore the result) before
-        // returning. Without that ping, AhaMeet won't appear for the user to
+        // returning. Without that ping, AhaStation won't appear for the user to
         // toggle on. The OS may also raise its own prompt at this point.
         if (status === 'not-determined') {
           desktopCapturer
@@ -69,7 +69,7 @@ export function registerDesktopIpc(): void {
 
   // One-click relaunch after the user grants Screen Recording in System
   // Settings. macOS only applies new screen-capture permissions to processes
-  // that start *after* the grant, so the running AhaMeet keeps seeing 'denied'
+  // that start *after* the grant, so the running AhaStation keeps seeing 'denied'
   // until we restart.
   ipcMain.handle('app:relaunch', async () => {
     app.relaunch();

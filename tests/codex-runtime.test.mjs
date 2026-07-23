@@ -11,7 +11,7 @@ test('resolveCodexRuntime prefers an executable unpacked native binary', async (
     t.skip('fixture currently targets the macOS ARM64 release build');
     return;
   }
-  const root = await mkdtemp(join(tmpdir(), 'ahameet-codex-runtime-'));
+  const root = await mkdtemp(join(tmpdir(), 'ahastation-codex-runtime-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const binary = join(
     root,

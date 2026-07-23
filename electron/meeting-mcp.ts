@@ -213,7 +213,7 @@ export function buildTalkerMcp(
       ),
       tool(
         MEETING_TOOLS.REQUEST_DECISION,
-        'Ask the user to weigh in on a decision while you keep working. Use this when there is a non-trivial fork (e.g. multiple valid approaches, ambiguous requirements, irreversible tradeoffs) and you do NOT want to block on the user. Behavior: writes a markdown doc to ~/Documents/AhaMeet/decisions, schedules a Calendar event + Reminder at the deadline, and immediately returns the option you should proceed with. The user can later edit the doc; if they pick something different, you will receive a system message and should adjust course. Do NOT use for trivial yes/no — just ask in chat.',
+        'Ask the user to weigh in on a decision while you keep working. Use this when there is a non-trivial fork (e.g. multiple valid approaches, ambiguous requirements, irreversible tradeoffs) and you do NOT want to block on the user. Behavior: writes a markdown doc to ~/Documents/AhaStation/decisions, schedules a Calendar event + Reminder at the deadline, and immediately returns the option you should proceed with. The user can later edit the doc; if they pick something different, you will receive a system message and should adjust course. Do NOT use for trivial yes/no — just ask in chat.',
         requestDecisionArgsSchema,
         async ({ question, context, options, deadlineMs }) => {
           if (!canCoordinate()) return denied();

@@ -42,7 +42,7 @@ export class TaskWorkspaceManager {
     if (this.isGitRepository()) {
       const root = join(app.getPath('userData'), 'worktrees', safeSegment(this.meetingId));
       const cwd = join(root, safeSegment(taskId));
-      const branch = `ahameet/${safeSegment(this.meetingId).slice(0, 12)}/${safeSegment(taskId)}`;
+      const branch = `ahastation/${safeSegment(this.meetingId).slice(0, 12)}/${safeSegment(taskId)}`;
       mkdirSync(root, { recursive: true, mode: 0o700 });
       if (!existsSync(cwd)) {
         execFileSync('git', ['worktree', 'add', '-b', branch, cwd, 'HEAD'], {

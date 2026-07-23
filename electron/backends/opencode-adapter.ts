@@ -1,7 +1,7 @@
 // opencode-adapter.ts — OpenCode AI coding agent backend adapter.
 //
 // Architecture (rewritten in Phase 2 PR①):
-//   AhaMeet main process
+//   AhaStation main process
 //     └── opencode serve (spawned by opencode-server-process.ts: bundled
 //         binary, env whitelist, per-launch random Basic-auth password)
 //           └── one session per meeting participant
@@ -292,7 +292,7 @@ class OpenCodeSession implements BackendSession {
 
       const created = await this.client.session.create({
         query: { directory: this.config.cwd },
-        body: { title: `AhaMeet ${this.config.cwd}` },
+        body: { title: `AhaStation ${this.config.cwd}` },
       });
       if (!created.data) {
         throw new Error('Failed to create OpenCode session');

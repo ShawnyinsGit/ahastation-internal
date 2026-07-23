@@ -172,7 +172,7 @@ const CLAUDE_CODE_CAPABILITIES: BackendCapabilities = {
     'claude-opus-4-20250514',
   ],
   npmPackage: '@anthropic-ai/claude-agent-sdk',
-  installHint: 'Bundled with AhaMeet',
+  installHint: 'Bundled with AhaStation',
 };
 
 export class ClaudeCodeBackend implements CliBackend {
