@@ -61,7 +61,7 @@ test('Kimi session readiness does not spend a model turn', async () => {
 });
 
 test('Kimi authentication failure emits one auth-required circuit breaker', async (t) => {
-  const dir = await mkdtemp(join(tmpdir(), 'ahameet-kimi-auth-'));
+  const dir = await mkdtemp(join(tmpdir(), 'ahastation-kimi-auth-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const binary = join(dir, 'kimi');
   await writeFile(binary, '#!/bin/sh\nprintf \'%s\\n\' \'{"error":{"message":"401 Unauthorized","code":"unauthorized"}}\'\nexit 1\n');
@@ -83,7 +83,7 @@ test('Kimi authentication failure emits one auth-required circuit breaker', asyn
 });
 
 test('Kimi credential probe rejects stale or malformed files instead of trusting existence', async (t) => {
-  const dir = await mkdtemp(join(tmpdir(), 'ahameet-kimi-creds-'));
+  const dir = await mkdtemp(join(tmpdir(), 'ahastation-kimi-creds-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const path = join(dir, 'credentials.json');
   await writeFile(path, '{not json');
@@ -104,8 +104,8 @@ test('Kimi applies the system prompt to a first multimodal turn', () => {
 });
 
 test('Kimi ACP file reads reject symlinks escaping the workspace', async (t) => {
-  const root = await mkdtemp(join(tmpdir(), 'ahameet-kimi-root-'));
-  const outside = await mkdtemp(join(tmpdir(), 'ahameet-kimi-outside-'));
+  const root = await mkdtemp(join(tmpdir(), 'ahastation-kimi-root-'));
+  const outside = await mkdtemp(join(tmpdir(), 'ahastation-kimi-outside-'));
   t.after(() => Promise.all([
     rm(root, { recursive: true, force: true }),
     rm(outside, { recursive: true, force: true }),

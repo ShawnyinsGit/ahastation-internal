@@ -87,7 +87,7 @@ function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 820,
-    title: 'AhaMeet',
+    title: 'AhaStation',
     backgroundColor: getThemeBackgroundColor(),
     // hiddenInset only works on macOS; Windows/Linux use the default title bar.
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',

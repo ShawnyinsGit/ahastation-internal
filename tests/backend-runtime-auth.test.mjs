@@ -10,7 +10,7 @@ import { ClaudeCodeBackend } from '../dist-electron/backends/claude-code-adapter
 import { resolveBinaryFromPath } from '../dist-electron/backends/subprocess-backend.js';
 
 test('packaged runtime resolver finds the canonical Kimi Code install directory', async (t) => {
-  const home = await mkdtemp(join(tmpdir(), 'ahameet-kimi-home-'));
+  const home = await mkdtemp(join(tmpdir(), 'ahastation-kimi-home-'));
   t.after(() => rm(home, { recursive: true, force: true }));
   const binary = join(home, '.kimi-code', 'bin', 'kimi');
   await mkdir(join(home, '.kimi-code', 'bin'), { recursive: true });

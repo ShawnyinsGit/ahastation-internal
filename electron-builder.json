@@ -1,6 +1,6 @@
 {
-  "appId": "com.ahameet.app",
-  "productName": "AhaMeet",
+  "appId": "com.ahastation.app",
+  "productName": "AhaStation",
   "icon": "build/icon.icns",
   "directories": {
     "output": "release",
@@ -37,12 +37,12 @@
     "entitlements": "build/entitlements.mac.plist",
     "entitlementsInherit": "build/entitlements.mac.plist",
     "extendInfo": {
-      "NSMicrophoneUsageDescription": "AhaMeet 需要使用麦克风进行语音输入、转写和会议交互。"
+      "NSMicrophoneUsageDescription": "AhaStation 需要使用麦克风进行语音输入、转写和会议交互。"
     }
   },
   "dmg": {
     "icon": null,
-    "title": "AhaMeet ${version}"
+    "title": "AhaStation ${version}"
   },
   "win": {
     "target": [

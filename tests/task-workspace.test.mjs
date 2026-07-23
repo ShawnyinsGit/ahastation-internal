@@ -8,7 +8,7 @@ import { execFileSync } from 'node:child_process';
 import { TaskWorkspaceManager } from '../dist-electron/task-workspace.js';
 
 test('non-git tasks enforce declared write-path locks', async (t) => {
-  const cwd = await mkdtemp(join(tmpdir(), 'ahameet-nongit-'));
+  const cwd = await mkdtemp(join(tmpdir(), 'ahastation-nongit-'));
   t.after(() => rm(cwd, { recursive: true, force: true }));
   const manager = new TaskWorkspaceManager('meeting', cwd);
   const first = manager.prepare('a', ['output/report.md']);
@@ -21,7 +21,7 @@ test('non-git tasks enforce declared write-path locks', async (t) => {
 });
 
 test('non-git locks serialize overlapping parent and child paths', async (t) => {
-  const cwd = await mkdtemp(join(tmpdir(), 'ahameet-nongit-'));
+  const cwd = await mkdtemp(join(tmpdir(), 'ahastation-nongit-'));
   t.after(() => rm(cwd, { recursive: true, force: true }));
   const manager = new TaskWorkspaceManager('meeting', cwd);
   manager.prepare('parent-owner', ['output']);
@@ -32,7 +32,7 @@ test('non-git locks serialize overlapping parent and child paths', async (t) => 
 });
 
 test('whole-workspace locks block every narrower write scope', async (t) => {
-  const cwd = await mkdtemp(join(tmpdir(), 'ahameet-nongit-'));
+  const cwd = await mkdtemp(join(tmpdir(), 'ahastation-nongit-'));
   t.after(() => rm(cwd, { recursive: true, force: true }));
   const manager = new TaskWorkspaceManager('meeting', cwd);
   manager.prepare('unknown-writer');
@@ -40,14 +40,14 @@ test('whole-workspace locks block every narrower write scope', async (t) => {
 });
 
 test('non-git write paths cannot escape the workspace', async (t) => {
-  const cwd = await mkdtemp(join(tmpdir(), 'ahameet-nongit-'));
+  const cwd = await mkdtemp(join(tmpdir(), 'ahastation-nongit-'));
   t.after(() => rm(cwd, { recursive: true, force: true }));
   const manager = new TaskWorkspaceManager('meeting', cwd);
   assert.throws(() => manager.prepare('a', ['../outside']), /escapes workspace/);
 });
 
 test('git tasks receive isolated worktrees without touching dirty files', async (t) => {
-  const cwd = await mkdtemp(join(tmpdir(), 'ahameet-git-'));
+  const cwd = await mkdtemp(join(tmpdir(), 'ahastation-git-'));
   const meetingId = `meeting-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   t.after(() => rm(cwd, { recursive: true, force: true }));
   execFileSync('git', ['init'], { cwd, stdio: 'ignore' });

@@ -1,7 +1,7 @@
 // decisions.ts — async, suspend-able "request user decision" mechanism.
 //
 //   The talker hits a fork in the road, picks the highest-recommendation option
-//   to keep moving, AND drops a markdown doc into ~/Documents/AhaMeet/decisions.
+//   to keep moving, AND drops a markdown doc into ~/Documents/AhaStation/decisions.
 //   That doc lists every option with pros/cons + an empty "✅ 确认结论" section.
 //   Calendar.app + Reminders.app entries are spawned via osascript so the user
 //   sees a deadline on their phone/laptop. We fs.watch the file: as soon as the
@@ -56,9 +56,9 @@ export interface ResolvedDecision {
   conclusion: string;
 }
 
-/** Public root: ~/Documents/AhaMeet/decisions */
+/** Public root: ~/Documents/AhaStation/decisions */
 export function decisionsRoot(): string {
-  return join(homedir(), 'Documents', 'AhaMeet', 'decisions');
+  return join(homedir(), 'Documents', 'AhaStation', 'decisions');
 }
 
 function pad(n: number): string {
@@ -269,7 +269,7 @@ export async function createDecisionDoc(payload: CreateDecisionPayload): Promise
   const summary = ranked[0]
     ? `推荐方案：${ranked[0].option.title}`
     : '请尽快确认';
-  const calendarTitle = `AhaMeet 待确认：${payload.question}`.slice(0, 200);
+  const calendarTitle = `AhaStation 待确认：${payload.question}`.slice(0, 200);
   const reminderTitle = calendarTitle;
   const notes = `${summary}\n\n详情: ${path}\n${fileUrl}`;
 

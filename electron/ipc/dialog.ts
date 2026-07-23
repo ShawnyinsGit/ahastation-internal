@@ -25,7 +25,7 @@ export function registerDialogIpc(ctx: IpcContext): void {
       title: '确认工作目录',
       message: 'Worker 将获得文件和命令行访问权限',
       detail:
-        `AhaMeet 的 Worker 将可以在以下目录中读取、写入文件和执行命令：\n\n${picked}\n\n` +
+        `AhaStation 的 Worker 将可以在以下目录中读取、写入文件和执行命令：\n\n${picked}\n\n` +
         '包括所有子目录。除非你在设置中启用自动批准，否则每次工具调用仍需你确认。',
       buttons: ['取消', '确认'],
       defaultId: 0,

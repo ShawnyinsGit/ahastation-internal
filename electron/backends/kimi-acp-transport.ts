@@ -51,7 +51,7 @@ export class KimiAcpTransport {
     return this.request('initialize', {
       protocolVersion: 1,
       clientCapabilities: { fs: { readTextFile: true, writeTextFile: false } },
-      clientInfo: { name: 'ahameet', version: '0.16.3' },
+      clientInfo: { name: 'ahastation', version: '0.16.3' },
     });
   }
 

@@ -54,7 +54,7 @@ function requireAccessibility(): ActionErr | null {
   if (isAccessibilityGranted()) return null;
   return {
     ok: false,
-    error: 'Accessibility permission not granted. Open System Settings → Privacy & Security → Accessibility and enable AhaMeet.',
+    error: 'Accessibility permission not granted. Open System Settings → Privacy & Security → Accessibility and enable AhaStation.',
     needsPermission: 'accessibility',
   };
 }

@@ -27,7 +27,7 @@ const QODER_CAPABILITIES: BackendCapabilities = {
   interrupt: true,
   defaultModel: 'auto',
   npmPackage: undefined,
-  installHint: 'Bundled with AhaMeet',
+  installHint: 'Bundled with AhaStation',
 };
 
 interface QoderQuery extends AsyncIterable<unknown> {
@@ -138,7 +138,7 @@ class QoderSdkSession implements BackendSession {
     this.query = query;
     void this.consume(query);
 
-    const prefix = this.config.systemPrompt ? '' : 'You are a Qoder agent participating in AhaMeet.\n\n';
+    const prefix = this.config.systemPrompt ? '' : 'You are a Qoder agent participating in AhaStation.\n\n';
     this.input.push(userMessage(`${prefix}Ready. Awaiting instructions.`, 'normal'));
     try {
       await withTimeout(query.initializationResult(), 15_000, 'Qoder SDK readiness handshake timed out');
@@ -184,7 +184,7 @@ class QoderSdkSession implements BackendSession {
     if (this.closed) return Promise.resolve({
       behavior: 'deny', message: 'Session closed', toolUseID: options.toolUseID,
     });
-    // Existing AhaMeet auto-approve policy remains separate from orchestration.
+    // Existing AhaStation auto-approve policy remains separate from orchestration.
     // Only the explicit broad scopes skip the renderer prompt here.
     if (this.autoApproveScope === 'all') {
       return Promise.resolve({ behavior: 'allow', updatedInput: input, toolUseID: options.toolUseID });
@@ -312,7 +312,7 @@ export class QoderBackend {
   createSession(config: BackendSessionConfig, emit: (event: BackendSessionEvent) => void): BackendSession {
     const binary = this.resolveBinary();
     if (!binary) {
-      emit({ kind: 'error', error: 'Bundled Qoder CLI is unavailable. Reinstall AhaMeet or select a compatible system runtime.' });
+      emit({ kind: 'error', error: 'Bundled Qoder CLI is unavailable. Reinstall AhaStation or select a compatible system runtime.' });
       emit({ kind: 'ended' });
       return noopSession();
     }
@@ -359,7 +359,7 @@ export class QoderBackend {
 
   async loginOAuth(): Promise<{ ok: boolean; error?: string }> {
     const binary = this.resolveBinary();
-    if (!binary) return { ok: false, error: 'Bundled Qoder CLI is unavailable. Reinstall AhaMeet.' };
+    if (!binary) return { ok: false, error: 'Bundled Qoder CLI is unavailable. Reinstall AhaStation.' };
     return runTerminalLogin(
       binary, ['login'], () => this.checkAuthStatus(), isolatedSubprocessEnv(),
     );

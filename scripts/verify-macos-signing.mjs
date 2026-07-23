@@ -37,7 +37,7 @@ const isMain = process.argv[1]
   && pathToFileURL(resolve(process.argv[1])).href === import.meta.url;
 
 if (isMain) {
-  const appPath = resolve(process.argv[2] ?? 'release/mac-arm64/AhaMeet.app');
+  const appPath = resolve(process.argv[2] ?? 'release/mac-arm64/AhaStation.app');
   try {
     verifyMacApp(appPath);
   } catch (error) {

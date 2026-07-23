@@ -156,7 +156,7 @@ async function main() {
   if (!keyWired || !baseUrlWired || !modelHintWired) return;
 
   // Step 3: session start (spawn server, SSE subscribe-before-create).
-  workdir = await mkdtemp(join(tmpdir(), 'ahameet-e2e-'));
+  workdir = await mkdtemp(join(tmpdir(), 'ahastation-e2e-'));
   session = backend.createSession(
     {
       cwd: workdir,

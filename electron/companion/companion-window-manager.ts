@@ -48,7 +48,7 @@ function createCompanionWindow(): BrowserWindow {
     height: 320,
     minWidth: 360,
     minHeight: 240,
-    title: 'AhaMeet 陪伴屏',
+    title: 'AhaStation 陪伴屏',
     frame: false,
     alwaysOnTop: true,
     resizable: true,

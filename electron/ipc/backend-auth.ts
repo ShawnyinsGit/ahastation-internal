@@ -392,7 +392,7 @@ export function registerBackendAuthIpc(): void {
     if (npmPackage) {
       cmd = resolveNpmBinary();
       args = ['install', '-g', npmPackage];
-    } else if (hint && hint !== 'Bundled with AhaMeet') {
+    } else if (hint && hint !== 'Bundled with AhaStation') {
       // Use platform-appropriate shell
       if (process.platform === 'win32') {
         cmd = process.env.ComSpec ?? 'cmd.exe';

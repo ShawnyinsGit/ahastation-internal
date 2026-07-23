@@ -21,7 +21,7 @@ export async function runTerminalLogin(
     return (await verify()).loggedIn ? { ok: true } : { ok: false, error: '登录命令已结束，但未检测到有效凭据。' };
   }
 
-  const statusPath = join(tmpdir(), `ahameet-login-${randomUUID()}.status`);
+  const statusPath = join(tmpdir(), `ahastation-login-${randomUUID()}.status`);
   const envArgs = Object.entries(env)
     .filter(([key, value]) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(key) && typeof value === 'string')
     .map(([key, value]) => `${key}=${shellQuote(value!)}`);

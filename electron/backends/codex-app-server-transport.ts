@@ -67,7 +67,7 @@ export class CodexAppServerTransport {
     });
 
     const initialized = await this.request<Record<string, unknown>>('initialize', {
-      clientInfo: { name: 'ahameet', title: 'AhaMeet', version: '0.16.3' },
+      clientInfo: { name: 'ahastation', title: 'AhaStation', version: '0.17.0' },
       capabilities: { experimentalApi: false, requestAttestation: false },
     });
     const userAgent = String(initialized.userAgent ?? '');
@@ -75,7 +75,7 @@ export class CodexAppServerTransport {
     if (runtimeVersion !== SUPPORTED_CODEX_APP_SERVER_VERSION) {
       throw new Error(
         `Unsupported Codex app-server runtime ${runtimeVersion ?? 'unknown'}; `
-        + `AhaMeet requires ${SUPPORTED_CODEX_APP_SERVER_VERSION}`,
+        + `AhaStation requires ${SUPPORTED_CODEX_APP_SERVER_VERSION}`,
       );
     }
     this.notify('initialized');

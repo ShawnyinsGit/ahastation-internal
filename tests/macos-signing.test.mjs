@@ -5,7 +5,7 @@ import { validateMacSignature } from '../scripts/verify-macos-signing.mjs';
 
 test('release verifier accepts a Developer ID signature with audio-input access', () => {
   assert.doesNotThrow(() => validateMacSignature(
-    'Identifier=com.ahameet.app\nAuthority=Developer ID Application: AhaMeet Inc. (ABCDE12345)\nTeamIdentifier=ABCDE12345\nSignature size=9000',
+    'Identifier=com.ahastation.app\nAuthority=Developer ID Application: AhaStation Inc. (ABCDE12345)\nTeamIdentifier=ABCDE12345\nSignature size=9000',
     '<key>com.apple.security.device.audio-input</key><true/>',
   ));
 });
@@ -28,7 +28,7 @@ test('release verifier rejects ad-hoc signatures and missing microphone entitlem
   );
   assert.throws(
     () => validateMacSignature(
-      'Authority=Developer ID Application: AhaMeet Inc. (ABCDE12345)\nTeamIdentifier=ABCDE12345',
+      'Authority=Developer ID Application: AhaStation Inc. (ABCDE12345)\nTeamIdentifier=ABCDE12345',
       '<plist/>',
     ),
     /audio-input entitlement/,

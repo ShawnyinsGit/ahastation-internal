@@ -212,7 +212,7 @@ export function registerIdePtyIpc(ctx: IpcContext): void {
       const created = await restJson('POST', `${acquired.handle.url}/pty`, acquired.handle.password, {
         command: shell,
         args: [],
-        title: `AhaMeet ${hostId}`,
+        title: `AhaStation ${hostId}`,
       });
       if (!created.ok || !created.data || typeof (created.data as { id?: unknown }).id !== 'string') {
         await getOpencodeServerRegistry().release(acquired.key);

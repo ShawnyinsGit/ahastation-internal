@@ -243,7 +243,7 @@ export class Orchestrator implements OrchestratorBridge {
         systemPrompt = (so.systemPrompt as { append?: string }).append;
       }
       if (backendId === 'codex') {
-        systemPrompt = `${systemPrompt ?? ''}\n\n## AhaMeet command protocol\n`
+        systemPrompt = `${systemPrompt ?? ''}\n\n## AhaStation command protocol\n`
           + 'When you need to coordinate, emit exactly one fenced JSON block using ```meeting-command. '
           + 'Supported kinds are propose-plan, ask-host, broadcast-hosts, steer-worker, and speak. '
           + 'Do not claim a command succeeded until the application returns its result.';

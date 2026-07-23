@@ -131,7 +131,7 @@ class KimiAcpSession implements BackendSession {
       if (this.backendVersion !== SUPPORTED_KIMI_ACP_VERSION) {
         throw new Error(
           `Unsupported Kimi Code runtime ${this.backendVersion ?? 'unknown'}; `
-          + `AhaMeet requires ${SUPPORTED_KIMI_ACP_VERSION}`,
+          + `AhaStation requires ${SUPPORTED_KIMI_ACP_VERSION}`,
         );
       }
       await this.transport.authenticate();
