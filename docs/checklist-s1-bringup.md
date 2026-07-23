@@ -1,6 +1,7 @@
 # S1 Bring-up 检查表：CX10A / Firefly ROC-RK3588S-PC 验证机
 
-> 版本 v1　日期 2026-07-20　配套：`docs/plan-ahastation-rk3588-overall.md` §6（下称「方案」）
+> 版本 v1.1　日期 2026-07-22　配套：`docs/plan-ahastation-rk3588-overall.md`（v1.3）§6（下称「方案」）
+> v1.1 变更：新增 §9「定案参数验收」——同步方案 v1.2/v1.3 定案（前后双摄、10000mAh + 反向 PD 18W 起谈、WiFi 6 红线、eSIM SE 硬件、火山引擎云端语音）。
 > 适用范围：S1 阶段（辰想 CX10A + Firefly ROC-RK3588S-PC）。
 > **执行顺序强制：§4 散热/性能压测（P0）在 CX10A 到货第一周完成，先于一切功能适配；其结论必须先于 S2 ODM 谈判。**
 > 每项含：命令/步骤 + 通过标准 + 结果记录栏位。执行时在「结果」栏填写实测值与日期。
@@ -247,6 +248,72 @@
 
 ---
 
+## 9. 定案参数验收（方案 v1.2/v1.3 同步项）
+
+> 以下各项对应方案已关闭的 Q 项，验证「定案参数在验证机/工程样机上真实成立」。CX10A/Firefly 为开发验证机，部分项（双摄、eSIM）硬件不具备时记 N/A 并注明「待 S2 工程样机验证」。
+
+### 9.1 WiFi 6 红线确认（Q10，不可妥协：不退 WiFi 5 / AP6256）
+
+- **步骤**：
+  ```bash
+  # 模组型号
+  lspci | grep -i net ; lsusb | grep -i -E "wireless|802"
+  # 协商能力：是否支持 HE（WiFi 6 / 802.11ax）
+  iw dev wlan0 info ; iw phy | grep -i -A2 "HE " | head -20
+  # 关联到 WiFi 6 AP 后看链路
+  iw dev wlan0 link | grep -i -E "signal|tx bitrate"
+  ```
+- **通过标准**：模组为 WiFi 6（802.11ax / HE 能力存在），**不是** AP6256 等 WiFi 5（ac-only）模组；关联 WiFi 6 AP 协商出 HE 速率。
+- **结果**：模组型号：______；HE 能力（有/无）：______
+
+### 9.2 前后双摄（Q1，S2 工程样机项）
+
+- **步骤**：
+  ```bash
+  v4l2-ctl --list-devices
+  # 前摄/后摄各抓一帧
+  v4l2-ctl -d /dev/video0 --set-fmt-video=width=1280,height=720,pixelformat=MJPG --stream-mmap --stream-count=1 --stream-to=front.jpg
+  v4l2-ctl -d /dev/video1 --set-fmt-video=width=1280,height=720,pixelformat=MJPG --stream-mmap --stream-count=1 --stream-to=back.jpg
+  ```
+  另验证：摄像头工作时**物理指示灯点亮**、系统权限总开关关闭后设备节点不可访问（方案 §3.7-5）。
+- **通过标准**：前摄（视频通话/人脸登录）、后摄（扫码/AI 视觉）均可抓帧成像；指示灯硬件联动、总开关生效。CX10A/Firefly 无此硬件 → 记 N/A，S2 工程样机必测。
+- **结果**：______
+
+### 9.3 eSIM SE 硬件存在性（Q4 v1.3，S2 工程样机项）
+
+- **步骤**：确认主板上 eSIM SE 芯片已贴片（原理图位号 + 目检/X-ray）；软件侧：
+  ```bash
+  # LPA 栈（lpac 或 ModemManager 插件）能否枚举到 eSE
+  lpac info 2>/dev/null || echo "LPA 栈未部署"
+  ```
+- **通过标准**：SE 芯片在位、LPA/MEP 协议栈可通信（商用激活不在本项——v1 以实体卡槽为主通道，方案 §10 Q4）。验证机记 N/A，S2 工程样机必测。
+- **结果**：______
+
+### 9.4 电池与反向 PD（Q2）
+
+- **步骤**：
+  ```bash
+  # 电池容量确认
+  cat /sys/class/power_supply/*/charge_full_design 2>/dev/null
+  upower -i $(upower -e | grep battery) | grep -E "energy-full-design|capacity"
+  # 反向 PD（充电宝模式）：C 口接 PD 诱骗器/负载仪，触发 source 角色
+  # 量测 9V/12V 档位可持续输出电流
+  ```
+- **通过标准**：设计容量 10000mAh（工程样机）；反向 PD 输出 **≥18W 稳定 30 分钟**（记录是否达 22.5W 目标档）；source/sink 角色切换不导致系统掉电或重启。CX10A 无反向 PD → 记 N/A 并注明「公模限制，S2 验证」。
+- **结果**：容量：______mAh；反向输出稳定功率：______W
+
+### 9.5 云端 ASR/TTS（火山引擎，Q5）连通性冒烟
+
+- **步骤**：用火山引擎控制台签发的测试凭证，跑 provider 抽象层的最小冒烟：
+  1. 流式 ASR：推送 §8 同款 60s 预录中文语音，记录首字延迟与转写完成率；
+  2. 流式 TTS：合成一段 20 字中文，记录首包延迟并回放确认可懂；
+  3. BYOK 路径：填用户自有 key 重复 1/2 各一次；
+  4. 弱网重复一次（§6.3 的 `tc netem` 配置），确认降级提示出现。
+- **通过标准**：ASR 首字延迟 <500ms（5G/WiFi 正常链路）、TTS 首包 <1s（方案 §4.4 指标）；BYOK 可用；弱网降级不静默失败。
+- **结果**：ASR 首字延迟：______ms；TTS 首包：______ms；BYOK（过/不过）：______
+
+---
+
 ## 附：执行记录总表
 
 | # | 项目 | 通过标准摘要 | 结果 | 日期 | 执行人 |
@@ -267,3 +334,8 @@
 | 6.3 | 切换/弱网 | 会话不致命中断 | | | |
 | 7 | agent CLI 冒烟 | 各 CLI 最小任务通过 | | | |
 | 8 | whisper 实时率 | RTF ≥1× | | | |
+| 9.1 | WiFi 6 红线 | 模组为 WiFi 6（HE），非 WiFi 5 | | | |
+| 9.2 | 前后双摄 | 双摄抓帧 + 指示灯/总开关（S2 项，可 N/A） | | | |
+| 9.3 | eSIM SE | 芯片在位 + LPA 可通信（S2 项，可 N/A） | | | |
+| 9.4 | 电池/反向 PD | 10000mAh；反向 ≥18W 稳定 30min（S2 项，可 N/A） | | | |
+| 9.5 | 云端语音（火山） | ASR <500ms / TTS <1s / BYOK 可用 | | | |
