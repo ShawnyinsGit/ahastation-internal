@@ -36,6 +36,9 @@ function record(name, ok, detail = '') {
 // ── Step 0: provider key from env (graceful SKIP without it) ────────────────
 
 const apiKey = process.env.AHAMEET_E2E_API_KEY?.trim();
+// K3 是推理模型，单回合含 thinking + 工具 + 权限往返可达数分钟；超时给足
+// （这是验收工具不是性能门），可用 env 覆盖。
+const TURN_TIMEOUT_MS = Number(process.env.AHAMEET_E2E_TURN_TIMEOUT_MS ?? 300_000);
 const provider = (process.env.AHAMEET_E2E_PROVIDER?.trim() || 'anthropic').toLowerCase();
 // kimi = Kimi Code 的 OpenAI 兼容端点。注意模型必须以自定义 provider 形式
 // 声明（adapter 的 deriveCustomProviderConfig 经 AHAMEET_OPENCODE_MODEL +
@@ -184,7 +187,7 @@ async function main() {
   );
   const turn1 = await waitFor(
     () => events.some((e) => e.kind === 'message' && e.message?.type === 'result'),
-    120_000,
+    TURN_TIMEOUT_MS,
     'turn 1 (session.idle)',
   );
   // session.idle also fires after a failed turn — require zero adapter error
@@ -229,7 +232,7 @@ async function main() {
   const turn2 = await waitFor(
     () => events.filter((e) => e.kind === 'message' && e.message?.type === 'result').length
       > resultCountBefore,
-    120_000,
+    TURN_TIMEOUT_MS,
     'turn 2 after resync',
   );
   let byeOk = false;
