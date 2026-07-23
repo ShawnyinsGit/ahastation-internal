@@ -189,3 +189,63 @@ export function mergeResyncParts<T extends { messageID?: unknown; id?: unknown }
 
   return [...order.map((k) => merged.get(k)!), ...keyless];
 }
+
+// ── Permission wire-shape parsing (live-verified 2026-07-22) ────────────────
+//
+// The 1.18.4 server emits `permission.asked` (NOT the SDK-generated
+// `permission.updated`) with properties:
+//   { id, sessionID, permission: 'edit'|'bash'|..., patterns: [...],
+//     metadata: { filepath?, diff?, ... } }
+// `permission.replied` carries `requestID` (the SDK type's `permissionID`
+// is stale). Parse defensively: accept both event names and both id fields.
+
+export interface ParsedPermissionAsk {
+  id: string;
+  sessionID: string | undefined;
+  toolName: string;
+  input: Record<string, unknown>;
+  title: string;
+  metadata: Record<string, unknown> | undefined;
+}
+
+export function parsePermissionAsked(
+  properties: unknown,
+  fallbackSessionId: string | undefined,
+): ParsedPermissionAsk | null {
+  const perm = properties as {
+    id?: unknown;
+    permission?: unknown;
+    type?: unknown;
+    patterns?: unknown;
+    title?: unknown;
+    sessionID?: unknown;
+    metadata?: unknown;
+  } | null;
+  if (!perm || typeof perm.id !== 'string' || perm.id.length === 0) return null;
+  const toolName = typeof perm.permission === 'string' ? perm.permission
+    : typeof perm.type === 'string' ? perm.type
+      : 'unknown';
+  const metadata = perm.metadata && typeof perm.metadata === 'object'
+    ? perm.metadata as Record<string, unknown>
+    : undefined;
+  const filepath = typeof metadata?.filepath === 'string' ? metadata.filepath : undefined;
+  const firstPattern = Array.isArray(perm.patterns) && typeof perm.patterns[0] === 'string'
+    ? perm.patterns[0]
+    : undefined;
+  return {
+    id: perm.id,
+    sessionID: typeof perm.sessionID === 'string' ? perm.sessionID : fallbackSessionId,
+    toolName,
+    input: metadata ?? {},
+    title: typeof perm.title === 'string' ? perm.title : (filepath ? `${toolName} ${filepath}` : (firstPattern ?? toolName)),
+    metadata,
+  };
+}
+
+export function parsePermissionRepliedId(properties: unknown): string | null {
+  const props = properties as { requestID?: unknown; permissionID?: unknown } | null;
+  const id = typeof props?.requestID === 'string' ? props.requestID
+    : typeof props?.permissionID === 'string' ? props.permissionID
+      : null;
+  return id && id.length > 0 ? id : null;
+}

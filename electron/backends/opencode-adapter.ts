@@ -46,6 +46,8 @@ import {
   extractEventSessionId,
   mapPartToNormalizedMessage,
   mergeResyncParts,
+  parsePermissionAsked,
+  parsePermissionRepliedId,
   partKeyOf,
   planSessionResume,
 } from './opencode-events.js';
@@ -595,36 +597,28 @@ class OpenCodeSession implements BackendSession {
         }
         return;
       }
+      case 'permission.asked':
       case 'permission.updated': {
-        // Permission bridge: hand the request to the broker — it decides
-        // (auto-approve / native confirm / UI card / fail-closed timeout)
-        // and answers the server. Never dropped, never double-answered
-        // (broker dedupes on the permission id).
-        const perm = properties as {
-          id?: string;
-          type?: string;
-          title?: string;
-          sessionID?: string;
-          metadata?: Record<string, unknown>;
-        };
-        if (!perm?.id || !this.broker) return;
+        // Permission bridge: hand the request to the broker (parse handles
+        // the wire's 'permission.asked' shape and the SDK's stale
+        // 'permission.updated' name — see opencode-events.ts).
+        const parsed = parsePermissionAsked(properties, sid);
+        if (!parsed || !this.broker) return;
         void this.broker.submit({
-          id: perm.id,
+          id: parsed.id,
           backendId: 'opencode',
-          sessionID: perm.sessionID ?? sid,
-          // opencode Permission.type carries the tool/permission kind
-          // (bash/edit/...); title is the human description.
-          toolName: perm.type ?? perm.title ?? 'unknown',
-          input: perm.metadata ?? {},
-          title: perm.title,
-          metadata: perm.metadata,
+          sessionID: parsed.sessionID ?? sid,
+          toolName: parsed.toolName,
+          input: parsed.input,
+          title: parsed.title,
+          metadata: parsed.metadata,
         });
         return;
       }
       case 'permission.replied': {
         // Replied from ANY end (our own answers echo back too) — idempotent
-        // dequeue + meeting-UI card withdrawal.
-        const pid = (properties as { permissionID?: string }).permissionID;
+        // dequeue + meeting-UI card withdrawal. Wire carries `requestID`.
+        const pid = parsePermissionRepliedId(properties);
         if (pid) this.broker?.cancelExternal(pid);
         return;
       }

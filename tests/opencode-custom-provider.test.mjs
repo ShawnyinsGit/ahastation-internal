@@ -69,3 +69,49 @@ test('buildEnv passes the model hint through for non-built-in providers', () => 
   assert.equal(env.KIMI_BASE_URL, 'https://api.kimi.com/coding/v1');
   assert.equal(env.AHAMEET_OPENCODE_MODEL, 'kimi/k3');
 });
+
+// ---------------------------------------------------------------------------
+// Permission wire shapes (live-verified 2026-07-22 against the 1.18.4
+// binary): 'permission.asked' + requestID — SDK type names are stale.
+// ---------------------------------------------------------------------------
+
+import { parsePermissionAsked, parsePermissionRepliedId } from '../dist-electron/backends/opencode-events.js';
+
+test('parsePermissionAsked: wire shape (permission/patterns/metadata.filepath)', () => {
+  const out = parsePermissionAsked({
+    id: 'per_123',
+    sessionID: 'ses_abc',
+    permission: 'edit',
+    patterns: ['private/tmp/hello.txt'],
+    metadata: { filepath: '/private/tmp/hello.txt', diff: 'Index: ...' },
+  }, 'ses_fallback');
+  assert.deepEqual(out, {
+    id: 'per_123',
+    sessionID: 'ses_abc',
+    toolName: 'edit',
+    input: { filepath: '/private/tmp/hello.txt', diff: 'Index: ...' },
+    title: 'edit /private/tmp/hello.txt',
+    metadata: { filepath: '/private/tmp/hello.txt', diff: 'Index: ...' },
+  });
+});
+
+test('parsePermissionAsked: legacy SDK shape (type/title) + sessionID fallback', () => {
+  const out = parsePermissionAsked(
+    { id: 'per_9', type: 'bash', title: 'run ls' },
+    'ses_fallback',
+  );
+  assert.equal(out.toolName, 'bash');
+  assert.equal(out.sessionID, 'ses_fallback');
+  assert.equal(out.title, 'run ls');
+});
+
+test('parsePermissionAsked: missing id → null (never submits garbage)', () => {
+  assert.equal(parsePermissionAsked({ permission: 'edit' }, 'ses'), null);
+  assert.equal(parsePermissionAsked(null, 'ses'), null);
+});
+
+test('parsePermissionRepliedId: wire requestID wins, legacy permissionID accepted', () => {
+  assert.equal(parsePermissionRepliedId({ requestID: 'per_1', permissionID: 'per_2' }), 'per_1');
+  assert.equal(parsePermissionRepliedId({ permissionID: 'per_2' }), 'per_2');
+  assert.equal(parsePermissionRepliedId({}), null);
+});
