@@ -47,6 +47,7 @@ import {
 } from './codex-app-server-transport.js';
 import type { Input as CodexInput, Thread as CodexThread, ThreadEvent, ThreadItem } from '@openai/codex-sdk';
 import { getBackendAuth } from '../store.js';
+import { normalizeBackendBaseUrl } from '../normalize-base-url.js';
 
 const CODEX_CAPABILITIES: BackendCapabilities = {
   coordinate: true,
@@ -885,8 +886,9 @@ export class CodexBackend implements CliBackend {
     if (auth.apiKey) {
       env.OPENAI_API_KEY = auth.apiKey;
     }
-    if (auth.baseUrl) {
-      env.OPENAI_BASE_URL = auth.baseUrl;
+    const baseUrl = normalizeBackendBaseUrl(auth.baseUrl);
+    if (baseUrl) {
+      env.OPENAI_BASE_URL = baseUrl;
     }
     return env;
   }
