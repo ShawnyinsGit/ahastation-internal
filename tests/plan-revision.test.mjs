@@ -124,3 +124,36 @@ test('stale or invalid plan revisions leave the graph unchanged', async () => {
   assert.match(scheduler.describeWorkers(), /dependent/);
   assert.doesNotMatch(scheduler.describeWorkers(), /stale/);
 });
+
+test('plan revisions may change pending dependencies but not running execution boundaries', async () => {
+  const { scheduler } = createScheduler();
+  scheduler.installPlan([
+    { id: 'active', title: 'Active', prompt: 'work', deps: [] },
+    { id: 'pending', title: 'Pending', prompt: 'wait', deps: ['active'] },
+  ]);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(scheduler.revisePlan(1, [{
+    kind: 'update-task',
+    taskId: 'pending',
+    deps: [],
+  }]), { ok: true, planVersion: 2 });
+
+  const activeProfile = {
+    schemaVersion: 1,
+    backendId: 'codex',
+    workMode: 'deep',
+    contextMode: 'meeting-summary',
+    timeoutMs: 1_800_000,
+    maxTokenBudget: 200_000,
+  };
+  assert.deepEqual(scheduler.revisePlan(2, [{
+    kind: 'update-task',
+    taskId: 'active',
+    executionProfile: activeProfile,
+  }]), {
+    ok: false,
+    error: 'running task execution boundaries require a new attempt',
+  });
+  assert.equal(scheduler.getPlanVersion(), 2);
+});

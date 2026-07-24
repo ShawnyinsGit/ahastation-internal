@@ -23,8 +23,10 @@ import type { BackendSession, BackendSessionEvent } from './backends/cli-backend
 import { randomUUID } from 'node:crypto';
 import { resolve as pathResolve } from 'node:path';
 import {
+  normalizePlanMeetingTasks,
   validatePlan,
   type PlanMeetingTask,
+  type PlanMeetingTaskInput,
 } from './meeting-tools.js';
 import type { PlanRevisionOperation } from './meeting-command.js';
 import { CLAUDE_WORKER_PROMPT_SUFFIX, WORKER_PROMPT } from './orchestrator-prompts.js';
@@ -257,6 +259,10 @@ export class WorkerScheduler {
       deps: [...handle.deps],
       executorBackendId: handle.executorBackendId,
       writePaths: handle.writePaths ? [...handle.writePaths] : undefined,
+      executionProfile: handle.executionProfile ? structuredClone(handle.executionProfile) : undefined,
+      contextSelection: handle.contextSelection ? structuredClone(handle.contextSelection) : undefined,
+      workspaceMode: handle.workspaceMode,
+      authorityRequest: handle.authorityRequest ? structuredClone(handle.authorityRequest) : undefined,
       acceptanceCriteria: handle.acceptanceCriteria
         ? structuredClone(handle.acceptanceCriteria)
         : undefined,
@@ -285,19 +291,41 @@ export class WorkerScheduler {
       const id = typeof task.id === 'string' ? task.id : '';
       const prompt = typeof task.prompt === 'string' ? task.prompt : '';
       if (!id || !prompt || this.workers.has(id)) continue;
+      let normalized: PlanMeetingTask;
+      try {
+        normalized = normalizePlanMeetingTasks([{
+          id,
+          title: typeof task.title === 'string' ? task.title : id,
+          prompt,
+          deps: Array.isArray(task.deps) ? task.deps.map(String) : [],
+          executorBackendId: typeof task.executorBackendId === 'string'
+            ? task.executorBackendId
+            : undefined,
+          writePaths: Array.isArray(task.writePaths) ? task.writePaths.map(String) : undefined,
+          executionProfile: task.executionProfile,
+          contextSelection: task.contextSelection,
+          workspaceMode: task.workspaceMode,
+          authorityRequest: task.authorityRequest,
+          acceptanceCriteria: task.acceptanceCriteria,
+          requiresDecision: task.requiresDecision,
+        }], this.opts.defaultBackendId ?? 'claude-code').tasks[0];
+      } catch {
+        // Corrupt recovered execution boundaries are not made executable.
+        continue;
+      }
       this.registerHandle({
-        id,
-        title: typeof task.title === 'string' ? task.title : id,
-        prompt,
-        deps: Array.isArray(task.deps) ? task.deps.map(String) : [],
+        id: normalized.id,
+        title: normalized.title,
+        prompt: normalized.prompt,
+        deps: normalized.deps ?? [],
         specialty: inferSpecialty(`${String(task.title ?? id)} ${prompt}`),
-        executorBackendId: typeof task.executorBackendId === 'string'
-          ? task.executorBackendId
-          : undefined,
-        writePaths: Array.isArray(task.writePaths) ? task.writePaths.map(String) : undefined,
-        acceptanceCriteria: Array.isArray(task.acceptanceCriteria)
-          ? task.acceptanceCriteria as AcceptanceCriterion[]
-          : undefined,
+        executorBackendId: normalized.executorBackendId,
+        writePaths: normalized.writePaths,
+        executionProfile: normalized.executionProfile,
+        contextSelection: normalized.contextSelection,
+        workspaceMode: normalized.workspaceMode,
+        authorityRequest: normalized.authorityRequest,
+        acceptanceCriteria: normalized.acceptanceCriteria,
       });
       const handle = this.workers.get(id)!;
       const rawStatus = typeof task.status === 'string' ? task.status : 'interrupted';
@@ -487,7 +515,16 @@ export class WorkerScheduler {
     return { workerId: id, specialty, reused: false };
   }
 
-  installPlan(tasks: PlanMeetingTask[]): { ok: true } | { ok: false; error: string } {
+  installPlan(inputs: PlanMeetingTaskInput[]): { ok: true } | { ok: false; error: string } {
+    let tasks: PlanMeetingTask[];
+    try {
+      tasks = normalizePlanMeetingTasks(
+        inputs,
+        this.opts.defaultBackendId ?? 'claude-code',
+      ).tasks;
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
     const err = validatePlan(tasks);
     if (err) return { ok: false, error: err.message };
     for (const task of tasks) {
@@ -504,6 +541,10 @@ export class WorkerScheduler {
         specialty: inferSpecialty(`${task.title} ${task.prompt}`),
         executorBackendId: task.executorBackendId,
         writePaths: task.writePaths,
+        executionProfile: task.executionProfile,
+        contextSelection: task.contextSelection,
+        workspaceMode: task.workspaceMode,
+        authorityRequest: task.authorityRequest,
         acceptanceCriteria: task.acceptanceCriteria,
       });
     }
@@ -526,17 +567,22 @@ export class WorkerScheduler {
 
     const projected = new Map<string, PlanMeetingTask>();
     for (const handle of this.workers.values()) {
-      projected.set(handle.id, {
+      const normalized = normalizePlanMeetingTasks([{
         id: handle.id,
         title: handle.title,
         prompt: handle.prompt,
         deps: [...handle.deps],
         executorBackendId: handle.executorBackendId,
         writePaths: handle.writePaths ? [...handle.writePaths] : undefined,
+        executionProfile: handle.executionProfile ? structuredClone(handle.executionProfile) : undefined,
+        contextSelection: handle.contextSelection ? structuredClone(handle.contextSelection) : undefined,
+        workspaceMode: handle.workspaceMode,
+        authorityRequest: handle.authorityRequest ? structuredClone(handle.authorityRequest) : undefined,
         acceptanceCriteria: handle.acceptanceCriteria
           ? structuredClone(handle.acceptanceCriteria)
           : undefined,
-      });
+      }], this.opts.defaultBackendId ?? 'claude-code').tasks[0];
+      projected.set(handle.id, normalized);
     }
 
     for (const operation of operations) {
@@ -566,6 +612,37 @@ export class WorkerScheduler {
         projected.delete(operation.taskId);
         continue;
       }
+      if (operation.kind === 'update-task') {
+        const task = projected.get(operation.taskId);
+        if (!task) return { ok: false, error: `unknown task: ${operation.taskId}` };
+        if (handle.status !== 'pending' || handle.session) {
+          return {
+            ok: false,
+            error: 'running task execution boundaries require a new attempt',
+          };
+        }
+        projected.set(operation.taskId, {
+          ...task,
+          ...(operation.deps !== undefined ? { deps: [...operation.deps] } : {}),
+          ...(operation.executionProfile !== undefined
+            ? {
+                executionProfile: structuredClone(operation.executionProfile),
+                executorBackendId: operation.executionProfile.backendId,
+              }
+            : {}),
+          ...(operation.contextSelection !== undefined
+            ? { contextSelection: structuredClone(operation.contextSelection) }
+            : {}),
+          ...(operation.workspaceMode !== undefined ? { workspaceMode: operation.workspaceMode } : {}),
+          ...(operation.authorityRequest !== undefined
+            ? {
+                authorityRequest: structuredClone(operation.authorityRequest),
+                writePaths: [...operation.authorityRequest.writePaths],
+              }
+            : {}),
+        });
+        continue;
+      }
       if (handle.status !== 'running' || !handle.session) {
         return {
           ok: false,
@@ -587,16 +664,36 @@ export class WorkerScheduler {
           specialty: inferSpecialty(`${operation.task.title} ${operation.task.prompt}`),
           executorBackendId: operation.task.executorBackendId,
           writePaths: operation.task.writePaths,
+          executionProfile: operation.task.executionProfile,
+          contextSelection: operation.task.contextSelection,
+          workspaceMode: operation.task.workspaceMode,
+          authorityRequest: operation.task.authorityRequest,
           acceptanceCriteria: operation.task.acceptanceCriteria,
         });
       } else if (operation.kind === 'cancel-pending-task') {
         const handle = this.workers.get(operation.taskId)!;
         if (handle.flushTimer) clearTimeout(handle.flushTimer);
         this.workers.delete(operation.taskId);
-      } else {
+      } else if (operation.kind === 'steer-running-task') {
         const result = this.steerWorker(operation.taskId, operation.addendum);
         if (!result.ok) {
           throw new Error(`validated steer failed for ${operation.taskId}: ${result.reason}`);
+        }
+      } else {
+        const handle = this.workers.get(operation.taskId)!;
+        if (operation.deps !== undefined) handle.deps = [...operation.deps];
+        if (operation.executionProfile !== undefined) {
+          handle.executionProfile = structuredClone(operation.executionProfile);
+          handle.executorBackendId = operation.executionProfile.backendId;
+          handle.backendId = operation.executionProfile.backendId;
+        }
+        if (operation.contextSelection !== undefined) {
+          handle.contextSelection = structuredClone(operation.contextSelection);
+        }
+        if (operation.workspaceMode !== undefined) handle.workspaceMode = operation.workspaceMode;
+        if (operation.authorityRequest !== undefined) {
+          handle.authorityRequest = structuredClone(operation.authorityRequest);
+          handle.writePaths = [...operation.authorityRequest.writePaths];
         }
       }
     }
@@ -1189,6 +1286,10 @@ export class WorkerScheduler {
     specialty: WorkerSpecialtyKind;
     executorBackendId?: string;
     writePaths?: string[];
+    executionProfile?: PlanMeetingTask['executionProfile'];
+    contextSelection?: PlanMeetingTask['contextSelection'];
+    workspaceMode?: PlanMeetingTask['workspaceMode'];
+    authorityRequest?: PlanMeetingTask['authorityRequest'];
     acceptanceCriteria?: AcceptanceCriterion[];
   }): void {
     const handle: WorkerHandle = {
@@ -1198,6 +1299,10 @@ export class WorkerScheduler {
       deps: spec.deps,
       executorBackendId: spec.executorBackendId,
       writePaths: spec.writePaths,
+      executionProfile: spec.executionProfile,
+      contextSelection: spec.contextSelection,
+      workspaceMode: spec.workspaceMode,
+      authorityRequest: spec.authorityRequest,
       acceptanceCriteria: spec.acceptanceCriteria,
       status: 'pending',
       session: null,
@@ -1527,6 +1632,11 @@ export class WorkerScheduler {
       status: h.status,
       deps: h.deps,
       executorBackendId: h.executorBackendId,
+      writePaths: h.writePaths ? [...h.writePaths] : undefined,
+      executionProfile: h.executionProfile ? structuredClone(h.executionProfile) : undefined,
+      contextSelection: h.contextSelection ? structuredClone(h.contextSelection) : undefined,
+      workspaceMode: h.workspaceMode,
+      authorityRequest: h.authorityRequest ? structuredClone(h.authorityRequest) : undefined,
     }));
     const plan: MeetingPlan = { version: this.planVersion, nodes };
     this.opts.emit({ source: 'talker', event: { kind: 'plan-updated', plan } });

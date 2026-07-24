@@ -267,6 +267,11 @@ export interface MeetingPlanNode {
   status: WorkerStatus;
   deps: string[];
   executorBackendId?: string;
+  writePaths?: string[];
+  executionProfile?: TaskExecutionProfile;
+  contextSelection?: TaskContextSelection;
+  workspaceMode?: TaskWorkspaceMode;
+  authorityRequest?: TaskAuthorityRequest;
 }
 
 export interface MeetingPlan {
@@ -1060,6 +1065,10 @@ export interface PlanMeetingTaskInput {
   deps: string[];
   executorBackendId?: string;
   writePaths?: string[];
+  executionProfile?: TaskExecutionProfile;
+  contextSelection?: TaskContextSelection;
+  workspaceMode?: TaskWorkspaceMode;
+  authorityRequest?: TaskAuthorityRequest;
   requiresDecision?: boolean;
   acceptanceCriteria?: Array<{
     id: string;
@@ -1068,6 +1077,25 @@ export interface PlanMeetingTaskInput {
       | { kind: 'command'; argv: string[]; timeoutMs?: number }
       | { kind: 'manual' };
   }>;
+}
+
+export type TaskWorkspaceMode = 'read-only' | 'git-worktree' | 'shared-locked';
+
+export interface TaskContextSelection {
+  mode: TaskExecutionProfile['contextMode'];
+  messageIds: string[];
+  dependencyTaskIds: string[];
+  attachmentIds: string[];
+}
+
+export interface TaskAuthorityRequest {
+  writePaths: string[];
+  toolKinds: string[];
+  workingDirectories: string[];
+  commands: string[][];
+  environmentKeys: string[];
+  maxCommandTimeoutMs: number;
+  networkHosts: string[];
 }
 
 export interface PendingPermission {

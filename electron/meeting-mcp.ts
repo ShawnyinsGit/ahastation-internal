@@ -16,6 +16,7 @@ import {
   submitDeliveryArgsSchema,
   requestDecisionArgsSchema,
   askHostArgsSchema,
+  type PlanMeetingTaskInput,
   type PlanMeetingTask,
 } from './meeting-tools.js';
 import type { WorkReport } from './worker-protocol.js';
@@ -52,7 +53,7 @@ export interface OrchestratorBridge {
   // Talker tools
   delegateSingleTask(description: string): { workerId: string; specialty: WorkerSpecialtyKind; reused: boolean };
   installPlan(tasks: PlanMeetingTask[]): Promise<{ ok: true } | { ok: false; error: string }>;
-  proposePlan(tasks: PlanMeetingTask[]): Promise<{ ok: true } | { ok: false; error: string }>;
+  proposePlan(tasks: PlanMeetingTaskInput[]): Promise<{ ok: true } | { ok: false; error: string }>;
   steerWorker(workerId: string, addendum: string): SteerResult;
   hasWorker(workerId: string): boolean;
   activeWorkerIds(): string[];
@@ -122,7 +123,7 @@ export function buildTalkerMcp(
         planMeetingArgsSchema,
         async ({ tasks }) => {
           if (!canCoordinate()) return denied();
-          const result = await bridge.proposePlan(tasks as PlanMeetingTask[]);
+          const result = await bridge.proposePlan(tasks as PlanMeetingTaskInput[]);
           if (!result.ok) {
             return { content: [{ type: 'text', text: `error: ${result.error}` }] };
           }

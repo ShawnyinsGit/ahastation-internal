@@ -1,6 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { BackendInfo, PlanMeetingTaskInput } from '../types';
-import { isWorkerBackendReady, validatePlanDraft } from '../lib/plan-validation';
+import {
+  isWorkerBackendReady,
+  normalizePlanDraft,
+  normalizePlanDrafts,
+  validatePlanDraft,
+} from '../lib/plan-validation';
 
 interface PlanMeetingModalProps {
   open: boolean;
@@ -12,8 +17,8 @@ interface PlanMeetingModalProps {
 
 type Criterion = NonNullable<PlanMeetingTaskInput['acceptanceCriteria']>[number];
 
-function cloneTasks(tasks: PlanMeetingTaskInput[]): PlanMeetingTaskInput[] {
-  return tasks.map((task) => ({
+function cloneTasks(tasks: PlanMeetingTaskInput[], backends: BackendInfo[]): PlanMeetingTaskInput[] {
+  return normalizePlanDrafts(tasks, backends).map((task) => ({
     ...task,
     deps: [...task.deps],
     writePaths: task.writePaths ? [...task.writePaths] : undefined,
@@ -27,7 +32,27 @@ function cloneTasks(tasks: PlanMeetingTaskInput[]): PlanMeetingTaskInput[] {
       description: '人工检查交付内容并确认满足任务目标',
       verification: { kind: 'manual' },
     }],
+    executionProfile: task.executionProfile ? { ...task.executionProfile } : undefined,
+    contextSelection: task.contextSelection ? {
+      ...task.contextSelection,
+      messageIds: [...task.contextSelection.messageIds],
+      dependencyTaskIds: [...task.contextSelection.dependencyTaskIds],
+      attachmentIds: [...task.contextSelection.attachmentIds],
+    } : undefined,
+    authorityRequest: task.authorityRequest ? {
+      ...task.authorityRequest,
+      writePaths: [...task.authorityRequest.writePaths],
+      toolKinds: [...task.authorityRequest.toolKinds],
+      workingDirectories: [...task.authorityRequest.workingDirectories],
+      commands: task.authorityRequest.commands.map((argv) => [...argv]),
+      environmentKeys: [...task.authorityRequest.environmentKeys],
+      networkHosts: [...task.authorityRequest.networkHosts],
+    } : undefined,
   }));
+}
+
+function lines(value: string): string[] {
+  return value.split(/\r?\n/).map((entry) => entry.trim()).filter(Boolean);
 }
 
 export function PlanMeetingModal({
@@ -43,21 +68,21 @@ export function PlanMeetingModal({
 
   useEffect(() => {
     if (!open) return;
-    setDraft(cloneTasks(tasks));
+    setDraft(cloneTasks(tasks, backends));
     setError(null);
-  }, [open, tasks]);
+  }, [backends, open, tasks]);
 
   const validation = useMemo(() => {
     return validatePlanDraft(draft, backends);
   }, [backends, draft]);
 
   const changedCount = useMemo(() => {
-    const original = cloneTasks(tasks);
+    const original = cloneTasks(tasks, backends);
     return draft.reduce(
       (count, task, index) => count + (JSON.stringify(task) === JSON.stringify(original[index]) ? 0 : 1),
       Math.abs(draft.length - original.length),
     );
-  }, [draft, tasks]);
+  }, [backends, draft, tasks]);
 
   if (!open) return null;
 
@@ -122,6 +147,9 @@ export function PlanMeetingModal({
         <div className="plan-task-list">
           {draft.map((task, taskIndex) => {
             const selectedBackend = backends.find((backend) => backend.id === task.executorBackendId);
+            const profile = task.executionProfile!;
+            const contextSelection = task.contextSelection!;
+            const authority = task.authorityRequest!;
             return (
               <article className="plan-task-card" key={`${task.id}:${taskIndex}`}>
                 <div className="plan-task-card-head">
@@ -143,7 +171,10 @@ export function PlanMeetingModal({
                     <span>执行 Backend</span>
                     <select
                       value={selectedBackend?.id ?? ''}
-                      onChange={(event) => patchTask(taskIndex, { executorBackendId: event.target.value })}
+                      onChange={(event) => patchTask(taskIndex, {
+                        executorBackendId: event.target.value,
+                        executionProfile: { ...profile, backendId: event.target.value },
+                      })}
                     >
                       <option value="" disabled>请选择 Backend</option>
                       {backends.filter((backend) => backend.id !== 'qoder').map((backend) => (
@@ -158,6 +189,183 @@ export function PlanMeetingModal({
                   <span>标题</span>
                   <input value={task.title} onChange={(event) => patchTask(taskIndex, { title: event.target.value })} />
                 </label>
+
+                <fieldset>
+                  <legend>执行配置</legend>
+                  <div className="plan-field-grid">
+                    <label>
+                      <span>工作模式</span>
+                      <select
+                        value={profile.workMode}
+                        onChange={(event) => patchTask(taskIndex, {
+                          executionProfile: {
+                            ...profile,
+                            workMode: event.target.value as typeof profile.workMode,
+                          },
+                        })}
+                      >
+                        <option value="fast">快速</option>
+                        <option value="balanced">平衡</option>
+                        <option value="deep">深度</option>
+                      </select>
+                    </label>
+                    <label>
+                      <span>上下文范围</span>
+                      <select
+                        value={profile.contextMode}
+                        onChange={(event) => {
+                          const mode = event.target.value as typeof profile.contextMode;
+                          patchTask(taskIndex, {
+                            executionProfile: { ...profile, contextMode: mode },
+                            contextSelection: { ...contextSelection, mode },
+                          });
+                        }}
+                      >
+                        <option value="minimal">最小</option>
+                        <option value="meeting-summary">会议摘要</option>
+                        <option value="selected-history">选择的历史</option>
+                        <option value="full-visible-history">全部可见历史</option>
+                      </select>
+                    </label>
+                    <label>
+                      <span>任务超时（毫秒）</span>
+                      <input
+                        type="number"
+                        min={30_000}
+                        max={7_200_000}
+                        value={profile.timeoutMs}
+                        onChange={(event) => patchTask(taskIndex, {
+                          executionProfile: { ...profile, timeoutMs: Number(event.target.value) },
+                        })}
+                      />
+                    </label>
+                    <label>
+                      <span>Token 预算</span>
+                      <input
+                        type="number"
+                        min={1_000}
+                        max={10_000_000}
+                        value={profile.maxTokenBudget}
+                        onChange={(event) => patchTask(taskIndex, {
+                          executionProfile: { ...profile, maxTokenBudget: Number(event.target.value) },
+                        })}
+                      />
+                    </label>
+                  </div>
+                </fieldset>
+
+                <fieldset>
+                  <legend>Workspace 与授权范围</legend>
+                  <div className="plan-field-grid">
+                    <label>
+                      <span>Workspace 模式</span>
+                      <select
+                        value={task.workspaceMode}
+                        onChange={(event) => patchTask(taskIndex, {
+                          workspaceMode: event.target.value as NonNullable<PlanMeetingTaskInput['workspaceMode']>,
+                        })}
+                      >
+                        <option value="read-only">只读</option>
+                        <option value="git-worktree">Git Worktree</option>
+                        <option value="shared-locked">共享目录锁</option>
+                      </select>
+                    </label>
+                    <label>
+                      <span>命令超时上限（毫秒）</span>
+                      <input
+                        type="number"
+                        min={1_000}
+                        max={7_200_000}
+                        value={authority.maxCommandTimeoutMs}
+                        onChange={(event) => patchTask(taskIndex, {
+                          authorityRequest: {
+                            ...authority,
+                            maxCommandTimeoutMs: Number(event.target.value),
+                          },
+                        })}
+                      />
+                    </label>
+                  </div>
+                  <div className="plan-field-grid">
+                    <label>
+                      <span>可写路径（每行一项）</span>
+                      <textarea
+                        rows={3}
+                        value={authority.writePaths.join('\n')}
+                        onChange={(event) => {
+                          const writePaths = lines(event.target.value);
+                          patchTask(taskIndex, {
+                            writePaths,
+                            authorityRequest: {
+                              ...authority,
+                              writePaths,
+                              toolKinds: writePaths.length > 0
+                                ? Array.from(new Set([...authority.toolKinds, 'read', 'write']))
+                                : authority.toolKinds.filter((kind) => kind !== 'write'),
+                            },
+                          });
+                        }}
+                      />
+                    </label>
+                    <label>
+                      <span>允许工作目录（每行一项）</span>
+                      <textarea
+                        rows={3}
+                        value={authority.workingDirectories.join('\n')}
+                        onChange={(event) => patchTask(taskIndex, {
+                          authorityRequest: {
+                            ...authority,
+                            workingDirectories: lines(event.target.value),
+                          },
+                        })}
+                      />
+                    </label>
+                    <label>
+                      <span>允许命令（每行一条 argv）</span>
+                      <textarea
+                        rows={3}
+                        value={authority.commands.map((argv) => argv.join(' ')).join('\n')}
+                        onChange={(event) => patchTask(taskIndex, {
+                          authorityRequest: {
+                            ...authority,
+                            commands: lines(event.target.value)
+                              .map((command) => command.split(/\s+/).filter(Boolean)),
+                          },
+                        })}
+                      />
+                    </label>
+                    <label>
+                      <span>环境变量名（每行一项）</span>
+                      <textarea
+                        rows={3}
+                        value={authority.environmentKeys.join('\n')}
+                        onChange={(event) => patchTask(taskIndex, {
+                          authorityRequest: {
+                            ...authority,
+                            environmentKeys: lines(event.target.value),
+                          },
+                        })}
+                      />
+                    </label>
+                    <label>
+                      <span>网络主机（每行一项）</span>
+                      <textarea
+                        rows={3}
+                        value={authority.networkHosts.join('\n')}
+                        onChange={(event) => patchTask(taskIndex, {
+                          authorityRequest: {
+                            ...authority,
+                            networkHosts: lines(event.target.value),
+                          },
+                        })}
+                      />
+                    </label>
+                  </div>
+                  <div className="plan-diff-note">
+                    授权摘要：{authority.writePaths.length} 个写路径 · {authority.commands.length} 条命令 · {authority.networkHosts.length} 个网络主机。
+                    命令、网络、凭据与破坏性操作始终需要高风险确认。
+                  </div>
+                </fieldset>
                 <label>
                   <span>完整任务说明</span>
                   <textarea rows={4} value={task.prompt} onChange={(event) => patchTask(taskIndex, { prompt: event.target.value })} />
@@ -275,7 +483,7 @@ export function PlanMeetingModal({
               const sequence = draft.length + 1;
               const defaultBackend = backends.find((backend) => backend.isDefault && isWorkerBackendReady(backend))
                 ?? backends.find(isWorkerBackendReady);
-              setDraft((current) => [...current, {
+              setDraft((current) => [...current, normalizePlanDraft({
                 id: `task-${sequence}`,
                 title: '',
                 prompt: '',
@@ -286,7 +494,7 @@ export function PlanMeetingModal({
                   description: '人工检查交付内容并确认满足任务目标',
                   verification: { kind: 'manual' },
                 }],
-              }]);
+              }, defaultBackend?.id ?? '')]);
             }}
           >
             添加任务

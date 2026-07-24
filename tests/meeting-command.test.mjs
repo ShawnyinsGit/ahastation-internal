@@ -19,6 +19,21 @@ test('coordinator can propose a bounded validated plan', () => {
   }, { hostId: 'default', role: 'coordinator' });
   assert.equal(result.ok, true);
   assert.equal(result.command.tasks[0].executorBackendId, 'codex');
+  assert.equal(result.command.tasks[0].executionProfile.backendId, 'codex');
+  assert.deepEqual(result.command.tasks[0].authorityRequest.commands, []);
+});
+
+test('meeting command normalization uses the current Meeting default without adding authority', () => {
+  const result = authorizeMeetingCommand({
+    kind: 'propose-plan',
+    tasks: [{ id: 'a', title: 'A', prompt: 'Inspect A', deps: [] }],
+  }, { hostId: 'default', role: 'coordinator' }, { defaultBackendId: 'opencode' });
+  assert.equal(result.ok, true);
+  assert.equal(result.command.tasks[0].executionProfile.backendId, 'opencode');
+  assert.equal(result.command.tasks[0].workspaceMode, 'read-only');
+  assert.deepEqual(result.command.tasks[0].authorityRequest.toolKinds, ['read']);
+  assert.deepEqual(result.command.tasks[0].authorityRequest.commands, []);
+  assert.deepEqual(result.command.tasks[0].authorityRequest.networkHosts, []);
 });
 
 test('rejects malformed actor and oversized command input', () => {

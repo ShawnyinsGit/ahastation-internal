@@ -4,6 +4,7 @@
 // feed (src/hooks/useClaude.ts).
 import { z } from 'zod';
 import { acceptanceCriterionSchema, workReportSchema } from './worker-protocol.js';
+import { taskExecutionProfileSchema } from './task-collaboration.js';
 
 export const MEETING_TOOLS = {
   DELEGATE: 'delegate_task',
@@ -26,7 +27,24 @@ export const MEETING_TOOL_NAMES: ReadonlySet<string> = new Set<string>(
   Object.values(MEETING_TOOLS),
 );
 
-export const planMeetingTaskSchema = z.object({
+const taskContextSelectionSchema = z.object({
+  mode: taskExecutionProfileSchema.shape.contextMode,
+  messageIds: z.array(z.string().trim().min(1).max(500)).max(500).default([]),
+  dependencyTaskIds: z.array(z.string().trim().min(1).max(500)).max(100).default([]),
+  attachmentIds: z.array(z.string().trim().min(1).max(500)).max(100).default([]),
+}).strict();
+
+const taskAuthorityRequestSchema = z.object({
+  writePaths: z.array(z.string().trim().min(1).max(4_096)).max(100),
+  toolKinds: z.array(z.string().trim().min(1).max(200)).max(100),
+  workingDirectories: z.array(z.string().trim().min(1).max(4_096)).max(100),
+  commands: z.array(z.array(z.string().max(4_000)).min(1).max(100)).max(100),
+  environmentKeys: z.array(z.string().trim().min(1).max(200)).max(100),
+  maxCommandTimeoutMs: z.number().int().min(1_000).max(7_200_000),
+  networkHosts: z.array(z.string().trim().min(1).max(253)).max(100),
+}).strict();
+
+const planMeetingTaskBaseShape = {
   id: z.string().min(1).describe('Stable kebab-case identifier for the task.'),
   title: z.string().min(1).describe('Short label shown on the worker tile.'),
   prompt: z.string().min(1).describe('The full prompt the worker will receive as its first message.'),
@@ -37,12 +55,141 @@ export const planMeetingTaskSchema = z.object({
     .describe('User-approved verification criteria. Legacy tasks without criteria receive one explicit manual criterion.'),
   requiresDecision: z.boolean().optional()
     .describe('Whether the Coordinator expects this task may need a user decision before completion.'),
+};
+
+/** Boundary-only compatibility input. It remains permissive about fields that
+ * did not exist before collaboration schema v1, but still rejects unknown
+ * properties. Call normalizePlanMeetingTask before scheduling it. */
+export const planMeetingTaskInputSchema = z.object({
+  ...planMeetingTaskBaseShape,
+  executionProfile: taskExecutionProfileSchema.optional(),
+  contextSelection: taskContextSelectionSchema.optional(),
+  workspaceMode: z.enum(['read-only', 'git-worktree', 'shared-locked']).optional(),
+  authorityRequest: taskAuthorityRequestSchema.optional(),
+}).strict();
+
+export type PlanMeetingTaskInput = z.infer<typeof planMeetingTaskInputSchema>;
+
+export const planMeetingTaskSchema = z.object({
+  ...planMeetingTaskBaseShape,
+  executionProfile: taskExecutionProfileSchema,
+  contextSelection: taskContextSelectionSchema,
+  workspaceMode: z.enum(['read-only', 'git-worktree', 'shared-locked']),
+  authorityRequest: taskAuthorityRequestSchema,
+}).strict().superRefine((value, ctx) => {
+  if (
+    value.executorBackendId !== undefined
+    && value.executorBackendId !== value.executionProfile.backendId
+  ) {
+    ctx.addIssue({
+      code: 'custom',
+      message: 'executorBackendId must match executionProfile.backendId',
+      path: ['executorBackendId'],
+    });
+  }
+  if (value.contextSelection.mode !== value.executionProfile.contextMode) {
+    ctx.addIssue({
+      code: 'custom',
+      message: 'contextSelection.mode must match executionProfile.contextMode',
+      path: ['contextSelection', 'mode'],
+    });
+  }
+  if (
+    value.workspaceMode === 'read-only'
+    && (value.authorityRequest.writePaths.length > 0 || value.authorityRequest.toolKinds.includes('write'))
+  ) {
+    ctx.addIssue({
+      code: 'custom',
+      message: 'read-only tasks cannot request write authority',
+      path: ['workspaceMode'],
+    });
+  }
 });
 
 export type PlanMeetingTask = z.infer<typeof planMeetingTaskSchema>;
 
+export interface NormalizedPlanMeetingTask {
+  task: PlanMeetingTask;
+  diagnostic?: 'legacy-plan-task-normalized';
+}
+
+/** Compile one legacy/current plan input into the strict collaboration shape.
+ * Defaults are deliberately non-executable beyond scoped reads and declared
+ * workspace writes: no command, network, environment or external authority is
+ * inferred. */
+export function normalizePlanMeetingTask(
+  input: unknown,
+  defaultBackendId: string,
+): NormalizedPlanMeetingTask {
+  const legacy = planMeetingTaskInputSchema.parse(input);
+  if (
+    legacy.executionProfile
+    && legacy.executorBackendId
+    && legacy.executionProfile.backendId !== legacy.executorBackendId
+  ) {
+    throw new Error('executorBackendId must match executionProfile.backendId');
+  }
+  const backendId = legacy.executorBackendId
+    ?? legacy.executionProfile?.backendId
+    ?? defaultBackendId.trim();
+  if (!backendId) throw new Error('plan task requires a default execution Backend');
+  const writePaths = legacy.authorityRequest?.writePaths
+    ?? legacy.writePaths
+    ?? [];
+  const contextMode = legacy.executionProfile?.contextMode ?? 'meeting-summary';
+  const normalized = planMeetingTaskSchema.parse({
+    ...legacy,
+    deps: legacy.deps ?? [],
+    executorBackendId: backendId,
+    writePaths,
+    executionProfile: legacy.executionProfile ?? {
+      schemaVersion: 1,
+      backendId,
+      workMode: 'balanced',
+      contextMode,
+      timeoutMs: 1_800_000,
+      maxTokenBudget: 200_000,
+    },
+    contextSelection: legacy.contextSelection ?? {
+      mode: contextMode,
+      messageIds: [],
+      dependencyTaskIds: [],
+      attachmentIds: [],
+    },
+    workspaceMode: legacy.workspaceMode ?? (writePaths.length > 0 ? 'git-worktree' : 'read-only'),
+    authorityRequest: legacy.authorityRequest ?? {
+      writePaths,
+      toolKinds: writePaths.length > 0 ? ['read', 'write'] : ['read'],
+      workingDirectories: ['.'],
+      commands: [],
+      environmentKeys: [],
+      maxCommandTimeoutMs: 1_800_000,
+      networkHosts: [],
+    },
+  });
+  const wasLegacy = legacy.executionProfile === undefined
+    || legacy.contextSelection === undefined
+    || legacy.workspaceMode === undefined
+    || legacy.authorityRequest === undefined;
+  return {
+    task: normalized,
+    ...(wasLegacy ? { diagnostic: 'legacy-plan-task-normalized' as const } : {}),
+  };
+}
+
+export function normalizePlanMeetingTasks(
+  inputs: readonly unknown[],
+  defaultBackendId: string,
+): { tasks: PlanMeetingTask[]; diagnostics: string[] } {
+  const normalized = inputs.map((input) => normalizePlanMeetingTask(input, defaultBackendId));
+  return {
+    tasks: normalized.map((entry) => entry.task),
+    diagnostics: normalized.flatMap((entry) => entry.diagnostic ? [entry.diagnostic] : []),
+  };
+}
+
 export const planMeetingArgsSchema = {
-  tasks: z.array(planMeetingTaskSchema).min(1).describe('One task per independent piece of work.'),
+  tasks: z.array(planMeetingTaskInputSchema).min(1).describe('One task per independent piece of work.'),
 };
 
 export const delegateToArgsSchema = {

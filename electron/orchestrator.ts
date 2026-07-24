@@ -24,7 +24,11 @@ import { ClaudeSession, type SessionEvent } from './claude-session.js';
 import type { BackendSession, BackendSessionSnapshot } from './backends/cli-backend.js';
 import { getBackendRegistry } from './backends/registry.js';
 import type { AutoApproveScope } from './auto-approve-policy.js';
-import type { PlanMeetingTask } from './meeting-tools.js';
+import {
+  normalizePlanMeetingTasks,
+  type PlanMeetingTask,
+  type PlanMeetingTaskInput,
+} from './meeting-tools.js';
 import {
   DecisionWatcher,
   createDecisionDoc,
@@ -522,7 +526,7 @@ export class Orchestrator implements OrchestratorBridge {
     const authorized = authorizeMeetingCommand(raw, {
       hostId,
       role: hostId === this.coordinatorHostId ? 'coordinator' : 'expert',
-    });
+    }, { defaultBackendId: this.defaultHost().backendId });
     if (!authorized.ok) return authorized;
     const command = authorized.command;
     try {
@@ -731,7 +735,7 @@ export class Orchestrator implements OrchestratorBridge {
       return { ok: false, error: `task is already ${String(current.status)}` };
     }
 
-    const task: PlanMeetingTask = {
+    const recoveredTask: PlanMeetingTaskInput = {
       id: String(current.id ?? ''),
       title: String(current.title ?? current.id ?? 'Recovered task'),
       prompt: String(current.prompt ?? ''),
@@ -744,6 +748,12 @@ export class Orchestrator implements OrchestratorBridge {
         : undefined,
       writePaths: Array.isArray(current.writePaths) ? current.writePaths.map(String) : undefined,
     };
+    let task: PlanMeetingTask;
+    try {
+      task = normalizePlanMeetingTasks([recoveredTask], this.defaultHost().backendId).tasks[0];
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
     if (!task.id || !task.prompt) return { ok: false, error: 'recovered task is missing its id or prompt' };
     const backendError = await this.validateExecutionBackends([task]);
     if (backendError) return { ok: false, error: backendError };
@@ -956,22 +966,34 @@ export class Orchestrator implements OrchestratorBridge {
   }
 
   /** Manual entry point: renderer-side "Plan meeting" button. */
-  async installPlan(tasks: PlanMeetingTask[]): Promise<{ ok: true } | { ok: false; error: string }> {
-    const backendError = await this.validateExecutionBackends(tasks);
+  async installPlan(tasks: PlanMeetingTaskInput[]): Promise<{ ok: true } | { ok: false; error: string }> {
+    let normalized: PlanMeetingTask[];
+    try {
+      normalized = normalizePlanMeetingTasks(tasks, this.defaultHost().backendId).tasks;
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+    const backendError = await this.validateExecutionBackends(normalized);
     if (backendError) return { ok: false, error: backendError };
-    return this.meetingScheduler.installPlan(tasks);
+    return this.meetingScheduler.installPlan(normalized);
   }
 
-  async proposePlan(tasks: PlanMeetingTask[]): Promise<{ ok: true } | { ok: false; error: string }> {
-    const backendError = await this.validateExecutionBackends(tasks);
+  async proposePlan(tasks: PlanMeetingTaskInput[]): Promise<{ ok: true } | { ok: false; error: string }> {
+    let normalized: PlanMeetingTask[];
+    try {
+      normalized = normalizePlanMeetingTasks(tasks, this.defaultHost().backendId).tasks;
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+    const backendError = await this.validateExecutionBackends(normalized);
     if (backendError) return { ok: false, error: backendError };
     if (!this.autoOrchestration) {
-      this.pendingPlan = tasks.map((task) => ({ ...task, deps: [...(task.deps ?? [])] }));
+      this.pendingPlan = normalized.map((task) => ({ ...task, deps: [...(task.deps ?? [])] }));
       this.safeEmit({ source: 'system', event: { kind: 'plan-proposed', tasks: this.pendingPlan } });
       void this.repository.append('plan-proposed', { tasks: this.pendingPlan });
       return { ok: true };
     }
-    return this.meetingScheduler.installPlan(tasks);
+    return this.meetingScheduler.installPlan(normalized);
   }
 
   setAutoOrchestration(enabled: boolean): void {
@@ -981,11 +1003,16 @@ export class Orchestrator implements OrchestratorBridge {
 
   async approvePendingPlan(
     approved: boolean,
-    revisedTasks?: PlanMeetingTask[],
+    revisedTasks?: PlanMeetingTaskInput[],
   ): Promise<{ ok: true } | { ok: false; error: string }> {
-    const tasks = revisedTasks ?? this.pendingPlan;
+    let tasks: PlanMeetingTask[] | null = this.pendingPlan;
     if (revisedTasks) {
-      const backendError = await this.validateExecutionBackends(revisedTasks);
+      try {
+        tasks = normalizePlanMeetingTasks(revisedTasks, this.defaultHost().backendId).tasks;
+      } catch (error) {
+        return { ok: false, error: error instanceof Error ? error.message : String(error) };
+      }
+      const backendError = await this.validateExecutionBackends(tasks);
       if (backendError) return { ok: false, error: backendError };
     }
     this.pendingPlan = null;

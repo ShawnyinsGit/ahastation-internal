@@ -1,5 +1,10 @@
 import { z } from 'zod';
-import { decisionOptionSchema, planMeetingTaskSchema } from './meeting-tools.js';
+import {
+  decisionOptionSchema,
+  normalizePlanMeetingTask,
+  planMeetingTaskInputSchema,
+  planMeetingTaskSchema,
+} from './meeting-tools.js';
 
 const boundedText = z.string().trim().min(1).max(100_000);
 const actorId = z.string().min(1).max(64).regex(/^[a-zA-Z0-9._-]+$/);
@@ -18,6 +23,21 @@ export const planRevisionOperationSchema = z.discriminatedUnion('kind', [
     taskId: actorId,
     addendum: boundedText,
   }).strict(),
+  z.object({
+    kind: z.literal('update-task'),
+    taskId: actorId,
+    deps: z.array(actorId).max(100).optional(),
+    executionProfile: planMeetingTaskSchema.shape.executionProfile.optional(),
+    contextSelection: planMeetingTaskSchema.shape.contextSelection.optional(),
+    workspaceMode: planMeetingTaskSchema.shape.workspaceMode.optional(),
+    authorityRequest: planMeetingTaskSchema.shape.authorityRequest.optional(),
+  }).strict().refine((value) => (
+    value.deps !== undefined
+    || value.executionProfile !== undefined
+    || value.contextSelection !== undefined
+    || value.workspaceMode !== undefined
+    || value.authorityRequest !== undefined
+  ), 'update-task requires at least one field'),
 ]);
 
 export const meetingCommandSchema = z.discriminatedUnion('kind', [
@@ -47,6 +67,25 @@ export const meetingCommandSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('speak'), text: boundedText }).strict(),
 ]);
 
+const planRevisionOperationInputSchema = z.discriminatedUnion('kind', [
+  z.object({
+    kind: z.literal('add-task'),
+    task: planMeetingTaskInputSchema,
+  }).strict(),
+  ...planRevisionOperationSchema.options.slice(1),
+]);
+
+const meetingCommandInputSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('propose-plan'), tasks: z.array(planMeetingTaskInputSchema).min(1).max(100) }).strict(),
+  z.object({
+    kind: z.literal('revise-plan'),
+    expectedPlanVersion: z.number().int().nonnegative(),
+    operations: z.array(planRevisionOperationInputSchema).min(1).max(100),
+    reason: z.string().trim().min(1).max(20_000),
+  }).strict(),
+  ...meetingCommandSchema.options.slice(2),
+]);
+
 export type MeetingCommand = z.infer<typeof meetingCommandSchema>;
 export type PlanRevisionOperation = z.infer<typeof planRevisionOperationSchema>;
 
@@ -64,8 +103,36 @@ export type MeetingCommandResult =
 export function authorizeMeetingCommand(
   raw: unknown,
   actor: MeetingCommandActor,
+  options: { defaultBackendId?: string } = {},
 ): { ok: true; command: MeetingCommand } | { ok: false; code: 'invalid-command' | 'forbidden'; error: string } {
-  const parsed = meetingCommandSchema.safeParse(raw);
+  const input = meetingCommandInputSchema.safeParse(raw);
+  if (!input.success) {
+    return { ok: false, code: 'invalid-command', error: input.error.issues[0]?.message ?? 'invalid command' };
+  }
+  const defaultBackendId = options.defaultBackendId ?? 'claude-code';
+  let normalized: unknown = input.data;
+  try {
+    if (input.data.kind === 'propose-plan') {
+      normalized = {
+        ...input.data,
+        tasks: input.data.tasks.map((task) => normalizePlanMeetingTask(task, defaultBackendId).task),
+      };
+    } else if (input.data.kind === 'revise-plan') {
+      normalized = {
+        ...input.data,
+        operations: input.data.operations.map((operation) => operation.kind === 'add-task'
+          ? { ...operation, task: normalizePlanMeetingTask(operation.task, defaultBackendId).task }
+          : operation),
+      };
+    }
+  } catch (error) {
+    return {
+      ok: false,
+      code: 'invalid-command',
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+  const parsed = meetingCommandSchema.safeParse(normalized);
   if (!parsed.success) {
     return { ok: false, code: 'invalid-command', error: parsed.error.issues[0]?.message ?? 'invalid command' };
   }

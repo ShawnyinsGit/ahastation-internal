@@ -58,6 +58,10 @@ export interface MeetingPlanNode {
   deps: string[];
   executorBackendId?: string;
   writePaths?: string[];
+  executionProfile?: PlanMeetingTask['executionProfile'];
+  contextSelection?: PlanMeetingTask['contextSelection'];
+  workspaceMode?: PlanMeetingTask['workspaceMode'];
+  authorityRequest?: PlanMeetingTask['authorityRequest'];
 }
 
 export interface MeetingPlan {
@@ -159,6 +163,10 @@ export interface WorkerHandle {
   deps: string[];
   executorBackendId?: string;
   writePaths?: string[];
+  executionProfile?: PlanMeetingTask['executionProfile'];
+  contextSelection?: PlanMeetingTask['contextSelection'];
+  workspaceMode?: PlanMeetingTask['workspaceMode'];
+  authorityRequest?: PlanMeetingTask['authorityRequest'];
   acceptanceCriteria?: import('./worker-protocol.js').AcceptanceCriterion[];
   status: WorkerStatusKind;
   session: BackendSession | null;
