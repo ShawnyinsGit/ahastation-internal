@@ -50,7 +50,12 @@ import {
 } from './orchestrator-helpers.js';
 import type { SteerResult } from './meeting-mcp.js';
 import type { AutoApproveScope } from './auto-approve-policy.js';
-import type { TaskWorkspaceManager } from './task-workspace.js';
+import {
+  DirtyWorkspaceWriteBlockedError,
+  type PrepareTaskWorkspaceInput,
+  type TaskWorkspace,
+  type TaskWorkspaceManager,
+} from './task-workspace.js';
 import { snapshotDeliveryFiles } from './delivery-snapshot.js';
 import {
   compileContextPackage,
@@ -357,7 +362,8 @@ export class WorkerScheduler {
     approvalRecordedAt?: number;
     approvedPlanVersion?: number;
     acceptanceCriteria?: AcceptanceCriterion[];
-    workspace?: { kind: string; cwd: string; branch?: string };
+    workspace?: TaskWorkspace;
+    workspaceDiagnostic?: WorkerHandle['workspaceDiagnostic'];
     deliveryId?: string;
     delivery?: DeliveryView;
     attempt?: number;
@@ -387,7 +393,10 @@ export class WorkerScheduler {
         ? structuredClone(handle.acceptanceCriteria)
         : undefined,
       workspace: handle.workspace
-        ? { kind: handle.workspace.kind, cwd: handle.workspace.cwd, branch: handle.workspace.branch }
+        ? structuredClone(handle.workspace)
+        : undefined,
+      workspaceDiagnostic: handle.workspaceDiagnostic
+        ? structuredClone(handle.workspaceDiagnostic)
         : undefined,
       deliveryId: handle.deliveryId ?? undefined,
       delivery: handle.deliveryId
@@ -821,6 +830,16 @@ export class WorkerScheduler {
             error: 'changing task authority requires a new user-approved plan version',
           };
         }
+        if (
+          this.opts.taskAuthorityCompilerRequired
+          && operation.workspaceMode !== undefined
+          && operation.workspaceMode !== handle.workspaceMode
+        ) {
+          return {
+            ok: false,
+            error: 'changing workspace mode requires a new user-approved plan version',
+          };
+        }
         projected.set(operation.taskId, {
           ...task,
           ...(operation.deps !== undefined ? { deps: [...operation.deps] } : {}),
@@ -891,6 +910,7 @@ export class WorkerScheduler {
           handle.contextSelection = structuredClone(operation.contextSelection);
         }
         if (operation.workspaceMode !== undefined) handle.workspaceMode = operation.workspaceMode;
+        if (operation.workspaceMode !== undefined) handle.workspaceDiagnostic = undefined;
         if (operation.authorityRequest !== undefined) {
           handle.authorityRequest = structuredClone(operation.authorityRequest);
           handle.writePaths = [...operation.authorityRequest.writePaths];
@@ -1617,6 +1637,7 @@ export class WorkerScheduler {
       deliveries: new Set<string>(),
       explicitDeliveries: [],
       workspace: null,
+      workspaceDiagnostic: undefined,
       backendId: spec.executorBackendId ?? this.opts.defaultBackendId ?? 'claude-code',
       attempt: 1,
       eventSeq: 0,
@@ -1755,14 +1776,56 @@ export class WorkerScheduler {
     handle.authorityGrant = structuredClone(authorityGrant);
   }
 
+  private workspaceInputFor(handle: WorkerHandle): PrepareTaskWorkspaceInput {
+    let mode = handle.workspaceMode;
+    if (!mode) {
+      // Compatibility for pre-collaboration delegate_task calls. Strict plan
+      // tasks are normalized with an explicit workspaceMode before reaching
+      // the Scheduler.
+      mode = this.opts.workspaceManager?.inspectBaseline().kind === 'non-git'
+        ? 'shared-locked'
+        : 'git-worktree';
+    }
+    return {
+      mode,
+      writePaths: handle.writePaths ? [...handle.writePaths] : [],
+    };
+  }
+
   private spawnReadyWorkers(): void {
     for (const handle of this.workers.values()) {
       if (handle.status !== 'pending') continue;
       const allDepsDone = handle.deps.every((d) => this.workers.get(d)?.status === 'accepted');
       if (!allDepsDone) continue;
       if (this.countRunning() >= MAX_CONCURRENT_WORKERS) break;
-      if (this.opts.workspaceManager && !this.opts.workspaceManager.canPrepare(handle.id, handle.writePaths)) {
-        continue;
+      if (this.opts.workspaceManager) {
+        const input = this.workspaceInputFor(handle);
+        const block = typeof this.opts.workspaceManager.preparationBlock === 'function'
+          ? this.opts.workspaceManager.preparationBlock(input)
+          : null;
+        if (block) {
+          if (handle.workspaceDiagnostic?.code !== block.code) {
+            handle.workspaceDiagnostic = block;
+            handle.summary = block.message;
+            this.emitCoordinatorBriefing({
+              kind: 'workspace-blocked',
+              title: `任务「${handle.title}」被脏工作区阻止`,
+              summary: block.message,
+              recommendedAction: 'revise-plan',
+              workerId: handle.id,
+              taskId: handle.id,
+              blockers: [
+                '隔离 worktree 不会包含当前未提交改动。',
+                'AhaStation 不会自动 commit、stash 或复制这些改动。',
+                '共享锁定模式属于非受管兼容路径，不能自动集成或原子发布。',
+              ],
+            });
+            this.emitPlanUpdate();
+          }
+          continue;
+        }
+        if (!this.opts.workspaceManager.canPrepare(handle.id, input)) continue;
+        handle.workspaceDiagnostic = undefined;
       }
       void this.spawnWorker(handle);
     }
@@ -1874,7 +1937,10 @@ export class WorkerScheduler {
         mcpServers['browser'] = browserMcp as any;
       }
 
-      handle.workspace = this.opts.workspaceManager?.prepare(handle.id, handle.writePaths) ?? null;
+      handle.workspace = this.opts.workspaceManager?.prepare(
+        handle.id,
+        this.workspaceInputFor(handle),
+      ) ?? null;
       const workerCwd = handle.workspace?.cwd ?? this.opts.cwd;
       await this.ensureTaskAuthority(handle, workerCwd);
       if (this.opts.deliveryHarness && !handle.deliveryId) {
@@ -1962,6 +2028,26 @@ export class WorkerScheduler {
       });
       this.emitPlanUpdate();
     } catch (err) {
+      if (err instanceof DirtyWorkspaceWriteBlockedError) {
+        const block = this.opts.workspaceManager
+          && typeof this.opts.workspaceManager.preparationBlock === 'function'
+          ? this.opts.workspaceManager.preparationBlock(this.workspaceInputFor(handle))
+          : null;
+        if (block) handle.workspaceDiagnostic = block;
+        handle.summary = err.message;
+        handle.status = 'pending';
+        this.emitCoordinatorBriefing({
+          kind: 'workspace-blocked',
+          title: `任务「${handle.title}」被脏工作区阻止`,
+          summary: err.message,
+          recommendedAction: 'revise-plan',
+          workerId: handle.id,
+          taskId: handle.id,
+          blockers: ['工作区在预检后发生变化；未创建 Worker，也未执行副作用。'],
+        });
+        this.emitPlanUpdate();
+        return;
+      }
       if (err instanceof TaskProfileCompilationError) {
         console.error(`[scheduler] task profile blocked ${handle.id}:`, err);
         handle.summary = err.message;
@@ -2076,6 +2162,9 @@ export class WorkerScheduler {
       contextSelection: h.contextSelection ? structuredClone(h.contextSelection) : undefined,
       workspaceMode: h.workspaceMode,
       authorityRequest: h.authorityRequest ? structuredClone(h.authorityRequest) : undefined,
+      workspaceDiagnostic: h.workspaceDiagnostic
+        ? structuredClone(h.workspaceDiagnostic)
+        : undefined,
     }));
     const plan: MeetingPlan = { version: this.planVersion, nodes };
     this.opts.emit({ source: 'talker', event: { kind: 'plan-updated', plan } });

@@ -97,11 +97,17 @@ export const planMeetingTaskSchema = z.object({
   }
   if (
     value.workspaceMode === 'read-only'
-    && (value.authorityRequest.writePaths.length > 0 || value.authorityRequest.toolKinds.includes('write'))
+    && (
+      value.authorityRequest.writePaths.length > 0
+      || value.authorityRequest.commands.length > 0
+      || value.authorityRequest.environmentKeys.length > 0
+      || value.authorityRequest.networkHosts.length > 0
+      || value.authorityRequest.toolKinds.some((kind) => !['read', 'search', 'git-read'].includes(kind))
+    )
   ) {
     ctx.addIssue({
       code: 'custom',
-      message: 'read-only tasks cannot request write authority',
+      message: 'read-only tasks cannot request write, command, network, environment, or external authority',
       path: ['workspaceMode'],
     });
   }
@@ -184,8 +190,20 @@ export function normalizePlanMeetingTasks(
   defaultBackendId: string,
 ): { tasks: PlanMeetingTask[]; diagnostics: string[] } {
   const normalized = inputs.map((input) => normalizePlanMeetingTask(input, defaultBackendId));
+  const tasks = normalized.map((entry) => entry.task);
+  const hasManagedWriter = tasks.some((task) => (
+    task.workspaceMode === 'git-worktree' && task.authorityRequest.writePaths.length > 0
+  ));
+  const hasCompatibilityWriter = tasks.some((task) => (
+    task.workspaceMode === 'shared-locked' && task.authorityRequest.writePaths.length > 0
+  ));
+  if (hasManagedWriter && hasCompatibilityWriter) {
+    throw new Error(
+      'a Meeting plan cannot mix managed git-worktree writers with shared-locked compatibility writers',
+    );
+  }
   return {
-    tasks: normalized.map((entry) => entry.task),
+    tasks,
     diagnostics: normalized.flatMap((entry) => entry.diagnostic ? [entry.diagnostic] : []),
   };
 }
@@ -234,13 +252,25 @@ export const requestDecisionArgsSchema = {
 };
 
 export interface PlanValidationError {
-  code: 'duplicate_id' | 'unknown_dep' | 'cycle' | 'empty';
+  code: 'duplicate_id' | 'unknown_dep' | 'cycle' | 'empty' | 'workspace_mode_mix';
   message: string;
 }
 
 export function validatePlan(tasks: PlanMeetingTask[]): PlanValidationError | null {
   if (tasks.length === 0) {
     return { code: 'empty', message: 'Plan must contain at least one task.' };
+  }
+  const hasManagedWriter = tasks.some((task) => (
+    task.workspaceMode === 'git-worktree' && task.authorityRequest.writePaths.length > 0
+  ));
+  const hasCompatibilityWriter = tasks.some((task) => (
+    task.workspaceMode === 'shared-locked' && task.authorityRequest.writePaths.length > 0
+  ));
+  if (hasManagedWriter && hasCompatibilityWriter) {
+    return {
+      code: 'workspace_mode_mix',
+      message: 'a Meeting plan cannot mix managed git-worktree writers with shared-locked compatibility writers',
+    };
   }
   const ids = new Set<string>();
   for (const task of tasks) {

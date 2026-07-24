@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   normalizePlanMeetingTask,
+  normalizePlanMeetingTasks,
   planMeetingTaskSchema,
 } from '../dist-electron/meeting-tools.js';
 
@@ -103,4 +104,41 @@ test('read-only current tasks cannot request write authority', () => {
   assert.equal(planMeetingTaskSchema.safeParse(currentTask({
     workspaceMode: 'read-only',
   })).success, false);
+});
+
+test('read-only tasks cannot request command, network, environment, or external authority', () => {
+  for (const authorityRequest of [
+    { ...currentTask().authorityRequest, writePaths: [], toolKinds: ['read', 'execute'] },
+    { ...currentTask().authorityRequest, writePaths: [], toolKinds: ['read'], commands: [['npm', 'test']] },
+    { ...currentTask().authorityRequest, writePaths: [], toolKinds: ['read'], networkHosts: ['example.com'] },
+    { ...currentTask().authorityRequest, writePaths: [], toolKinds: ['read'], environmentKeys: ['TOKEN'] },
+  ]) {
+    assert.equal(planMeetingTaskSchema.safeParse(currentTask({
+      writePaths: [],
+      workspaceMode: 'read-only',
+      authorityRequest,
+    })).success, false);
+  }
+});
+
+test('managed writer plans cannot mix with shared-locked compatibility writers', () => {
+  const compatibility = currentTask({
+    id: 'compat',
+    workspaceMode: 'shared-locked',
+  });
+  assert.throws(
+    () => normalizePlanMeetingTasks([currentTask(), compatibility], 'codex'),
+    /cannot mix managed git-worktree writers with shared-locked compatibility writers/,
+  );
+  assert.equal(
+    normalizePlanMeetingTasks([
+      compatibility,
+      currentTask({ id: 'reader', writePaths: [], workspaceMode: 'read-only', authorityRequest: {
+        ...currentTask().authorityRequest,
+        writePaths: [],
+        toolKinds: ['read'],
+      } }),
+    ], 'codex').tasks.length,
+    2,
+  );
 });

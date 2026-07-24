@@ -3308,7 +3308,8 @@ html.popout-view #root {
   font-weight: 700;
 }
 .coordinator-briefing-card.is-failed,
-.coordinator-briefing-card.is-stalled {
+.coordinator-briefing-card.is-stalled,
+.coordinator-briefing-card.is-workspace-blocked {
   border-color: rgba(255, 112, 102, .42);
 }
 .coordinator-briefing-card.is-capacity {

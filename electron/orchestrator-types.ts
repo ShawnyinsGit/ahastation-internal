@@ -10,6 +10,7 @@ import type { SessionEvent } from './claude-session.js';
 import type { BackendSession } from './backends/cli-backend.js';
 import type { PlanMeetingTask } from './meeting-tools.js';
 import type { TaskWorkspace } from './task-workspace.js';
+import type { WorkspaceBlockedDiagnostic } from './task-workspace.js';
 import type { DeliveryView } from './delivery-harness.js';
 import type { WorkReport, WorkerEvent } from './worker-protocol.js';
 
@@ -62,6 +63,7 @@ export interface MeetingPlanNode {
   contextSelection?: PlanMeetingTask['contextSelection'];
   workspaceMode?: PlanMeetingTask['workspaceMode'];
   authorityRequest?: PlanMeetingTask['authorityRequest'];
+  workspaceDiagnostic?: WorkspaceBlockedDiagnostic;
 }
 
 export interface MeetingPlan {
@@ -72,7 +74,7 @@ export interface MeetingPlan {
 export interface CoordinatorBriefing {
   id: string;
   timestamp: number;
-  kind: 'delivery-ready' | 'accepted' | 'failed' | 'stalled' | 'capacity';
+  kind: 'delivery-ready' | 'accepted' | 'failed' | 'stalled' | 'capacity' | 'workspace-blocked';
   title: string;
   summary: string;
   completedTasks: number;
@@ -201,6 +203,7 @@ export interface WorkerHandle {
    *  intermediate scripts and temp files. */
   explicitDeliveries: string[];
   workspace: TaskWorkspace | null;
+  workspaceDiagnostic?: WorkspaceBlockedDiagnostic;
   backendId: string;
   attempt: number;
   eventSeq: number;

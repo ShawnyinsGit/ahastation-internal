@@ -181,11 +181,23 @@ export const taskMessageSchema = z.object({
 export type TaskMessage = z.infer<typeof taskMessageSchema>;
 
 export const taskWorkspaceSnapshotSchema = z.object({
-  kind: z.enum(['git-worktree', 'shared-locked']),
+  kind: z.enum(['read-only', 'git-worktree', 'shared-locked']),
   cwd: z.string().trim().min(1).max(4_096),
   branch: z.string().trim().min(1).max(500).optional(),
   sourceRevision: z.string().trim().min(1).max(500),
   lockKeys: z.array(z.string().trim().min(1).max(4_096)).max(1_000),
+  baseline: z.object({
+    kind: z.enum(['git-clean', 'git-dirty', 'non-git']),
+    revision: z.string().trim().min(1).max(500),
+    changedPaths: z.array(z.string().max(4_096)).max(500),
+    untrackedPaths: z.array(z.string().max(4_096)).max(500),
+    truncated: z.boolean(),
+  }).strict().optional(),
+  managed: z.boolean().optional(),
+  diagnostic: z.enum([
+    'dirty-base-visible-read-only',
+    'shared-locked-compatibility-only',
+  ]).optional(),
 }).strict();
 
 export type TaskWorkspaceSnapshot = z.infer<typeof taskWorkspaceSnapshotSchema>;

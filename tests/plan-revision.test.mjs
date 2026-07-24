@@ -3,7 +3,7 @@ import test from 'node:test';
 
 import { WorkerScheduler } from '../dist-electron/worker-scheduler.js';
 
-function createScheduler() {
+function createScheduler(overrides = {}) {
   const events = [];
   const sessions = [];
   const scheduler = new WorkerScheduler({
@@ -28,6 +28,7 @@ function createScheduler() {
     getTalker() { return null; },
     isClosed() { return false; },
     getSpeechFilterMode() { return 'strict'; },
+    ...overrides,
   });
   return { scheduler, events, sessions };
 }
@@ -156,4 +157,48 @@ test('plan revisions may change pending dependencies but not running execution b
     error: 'running task execution boundaries require a new attempt',
   });
   assert.equal(scheduler.getPlanVersion(), 2);
+});
+
+test('coordinator cannot switch a pending managed task into shared compatibility mode', async () => {
+  const { scheduler } = createScheduler({
+    taskAuthorityCompilerRequired: true,
+    workspaceManager: {
+      inspectBaseline() {
+        return {
+          kind: 'git-clean',
+          revision: 'abc123',
+          changedPaths: [],
+          untrackedPaths: [],
+          truncated: false,
+        };
+      },
+      preparationBlock() { return null; },
+      canPrepare() { return false; },
+      prepare() { throw new Error('must remain pending'); },
+      release() {},
+    },
+  });
+  scheduler.installPlan([
+    { id: 'active', title: 'Active', prompt: 'work', deps: [] },
+    {
+      id: 'pending',
+      title: 'Pending writer',
+      prompt: 'wait',
+      deps: ['active'],
+      writePaths: ['src'],
+      workspaceMode: 'git-worktree',
+    },
+  ]);
+  assert.deepEqual(scheduler.revisePlan(1, [{
+    kind: 'update-task',
+    taskId: 'pending',
+    workspaceMode: 'shared-locked',
+  }]), {
+    ok: false,
+    error: 'changing workspace mode requires a new user-approved plan version',
+  });
+  assert.equal(
+    scheduler.snapshot().find((task) => task.id === 'pending').workspaceMode,
+    'git-worktree',
+  );
 });

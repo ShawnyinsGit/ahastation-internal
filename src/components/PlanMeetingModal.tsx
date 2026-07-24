@@ -268,8 +268,14 @@ export function PlanMeetingModal({
                       >
                         <option value="read-only">只读</option>
                         <option value="git-worktree">Git Worktree</option>
-                        <option value="shared-locked">共享目录锁</option>
+                        <option value="shared-locked">共享目录锁（兼容模式）</option>
                       </select>
+                      {task.workspaceMode === 'shared-locked' && (
+                        <small role="alert">
+                          直接写入当前目录，仅提供进程内路径锁；不会防止用户或外部进程改动，
+                          并停用 Coordinator 自动验收、集成与最终原子发布。
+                        </small>
+                      )}
                     </label>
                     <label>
                       <span>命令超时上限（毫秒）</span>

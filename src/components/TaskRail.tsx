@@ -37,6 +37,8 @@ export function TaskRail({ plan, workers, selectedId, onSelect }: TaskRailProps)
             && node.deps.some((dep) => statuses.get(dep) !== 'accepted');
           const label = worker?.pendingPermission
             ? '等待权限'
+            : node.workspaceDiagnostic
+              ? '工作区待处理'
             : blockedByDependency
               ? '等待依赖'
               : node.status === 'pending'
@@ -50,6 +52,7 @@ export function TaskRail({ plan, workers, selectedId, onSelect }: TaskRailProps)
                 className={`task-rail-node is-${node.status}${selectedId === node.id ? ' is-selected' : ''}`}
                 onClick={() => onSelect(node.id)}
                 aria-label={`${node.title}，${label}`}
+                title={node.workspaceDiagnostic?.message}
               >
                 <span className="task-rail-dot" />
                 <span className="task-rail-copy">

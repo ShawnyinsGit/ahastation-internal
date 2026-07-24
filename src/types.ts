@@ -241,11 +241,20 @@ export interface TaskMessage {
 }
 
 export interface TaskWorkspaceSnapshot {
-  kind: 'git-worktree' | 'shared-locked';
+  kind: 'read-only' | 'git-worktree' | 'shared-locked';
   cwd: string;
   branch?: string;
   sourceRevision: string;
   lockKeys: string[];
+  baseline?: {
+    kind: 'git-clean' | 'git-dirty' | 'non-git';
+    revision: string;
+    changedPaths: string[];
+    untrackedPaths: string[];
+    truncated: boolean;
+  };
+  managed?: boolean;
+  diagnostic?: 'dirty-base-visible-read-only' | 'shared-locked-compatibility-only';
 }
 
 export type WorkerSpecialty =
@@ -279,6 +288,18 @@ export interface MeetingPlanNode {
   contextSelection?: TaskContextSelection;
   workspaceMode?: TaskWorkspaceMode;
   authorityRequest?: TaskAuthorityRequest;
+  workspaceDiagnostic?: {
+    code: 'dirty-workspace-write-blocked';
+    message: string;
+    baseline: {
+      kind: 'git-clean' | 'git-dirty' | 'non-git';
+      revision: string;
+      changedPaths: string[];
+      untrackedPaths: string[];
+      truncated: boolean;
+    };
+    actions: Array<'handle-outside-ahastation' | 'revise-to-shared-locked' | 'cancel-task'>;
+  };
 }
 
 export interface MeetingPlan {
@@ -289,7 +310,7 @@ export interface MeetingPlan {
 export interface CoordinatorBriefing {
   id: string;
   timestamp: number;
-  kind: 'delivery-ready' | 'accepted' | 'failed' | 'stalled' | 'capacity';
+  kind: 'delivery-ready' | 'accepted' | 'failed' | 'stalled' | 'capacity' | 'workspace-blocked';
   title: string;
   summary: string;
   completedTasks: number;
