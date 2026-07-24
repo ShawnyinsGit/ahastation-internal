@@ -30,6 +30,14 @@ import { runTerminalLogin } from './terminal-login.js';
 import { isolatedSubprocessEnv } from './backend-environment.js';
 import type { WorkerAdapterSignal } from '../worker-protocol.js';
 import { dirname, join } from 'node:path';
+import {
+  compileClaudeTaskProfile,
+  type BackendRuntime,
+} from './task-profile.js';
+import type {
+  BackendEffectiveProfile,
+  TaskExecutionProfile,
+} from '../task-collaboration.js';
 
 const require_ = createRequire(import.meta.url);
 
@@ -265,6 +273,26 @@ function buildClaudeSessionOptions(config: BackendSessionConfig): Record<string,
   if (config.mcpServers !== undefined) extra.mcpServers = config.mcpServers;
   if (config.skills !== undefined) extra.skills = config.skills;
   if (config.resumeSessionId !== undefined) extra.resume = config.resumeSessionId;
+  const native = config.taskProfile?.nativeReasoning;
+  const effort = native?.effort;
+  if (
+    effort === 'low'
+    || effort === 'medium'
+    || effort === 'high'
+    || effort === 'xhigh'
+    || effort === 'max'
+  ) {
+    extra.effort = effort;
+  }
+  const thinking = native?.thinking;
+  if (
+    thinking
+    && typeof thinking === 'object'
+    && !Array.isArray(thinking)
+    && (thinking as Record<string, unknown>).type === 'adaptive'
+  ) {
+    extra.thinking = { type: 'adaptive' };
+  }
   return extra;
 }
 
@@ -307,6 +335,18 @@ export class ClaudeCodeBackend implements CliBackend {
   } = {}) {
     this.confirmDestructive = opts?.confirmDestructive;
     this.deps = opts;
+  }
+
+  compileTaskProfile(
+    requested: TaskExecutionProfile,
+    runtime: BackendRuntime,
+  ): BackendEffectiveProfile {
+    return compileClaudeTaskProfile(
+      requested,
+      runtime,
+      this.capabilities.defaultModel!,
+      this.capabilities.models ?? [],
+    );
   }
 
   createSession(

@@ -13,7 +13,12 @@
 // `BackendSession` + `NormalizedMessage` instead of Claude-specific types.
 
 import type { AutoApproveScope } from '../auto-approve-policy.js';
+import type {
+  BackendEffectiveProfile,
+  TaskExecutionProfile,
+} from '../task-collaboration.js';
 import type { WorkerAdapterSignal } from '../worker-protocol.js';
+import type { BackendRuntime } from './task-profile.js';
 
 // ── Input priority ────────────────────────────────────────────────────────────
 // Re-exported from claude-session semantics: high = user, normal = system,
@@ -119,6 +124,9 @@ export interface BackendSessionConfig {
   systemPrompt?: string;
   /** Model identifier (backend-specific, e.g. 'claude-haiku-4-5', 'o3-pro'). */
   model?: string;
+  /** Immutable task-scoped Backend options compiled from provider-neutral
+   * execution intent. Adapters may consume only their documented native keys. */
+  taskProfile?: BackendEffectiveProfile;
   /** Process environment variables for the subprocess. */
   env?: NodeJS.ProcessEnv;
   /** MCP server configurations to mount into the session. */
@@ -232,6 +240,15 @@ export interface CliBackend {
   readonly id: string;
   /** Backend capabilities and metadata. */
   readonly capabilities: BackendCapabilities;
+
+  /**
+   * Purely compile provider-neutral task intent into this Backend's native
+   * settings. Worker-capable Backends must implement this method.
+   */
+  compileTaskProfile?(
+    requested: TaskExecutionProfile,
+    runtime: BackendRuntime,
+  ): BackendEffectiveProfile;
 
   /**
    * Create a new session. The backend spawns a subprocess (or connects to an

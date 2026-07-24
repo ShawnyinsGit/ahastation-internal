@@ -79,6 +79,15 @@ import {
   extractWorkReportFrame,
   type WorkerAdapterSignal,
 } from '../worker-protocol.js';
+import {
+  compileOpenCodeTaskProfile,
+  parseOpenCodeModel,
+  type BackendRuntime,
+} from './task-profile.js';
+import type {
+  BackendEffectiveProfile,
+  TaskExecutionProfile,
+} from '../task-collaboration.js';
 
 // ── SDK client (dynamic import so app startup isn't blocked) ────────────────
 
@@ -122,6 +131,24 @@ const OPENCODE_CAPABILITIES: BackendCapabilities = {
   npmPackage: 'opencode-ai',
   installHint: 'npm install opencode-ai',
 };
+
+export function openCodePromptModel(
+  config: BackendSessionConfig,
+): { providerID: string; modelID: string } | undefined {
+  const compiled = config.taskProfile?.nativeReasoning?.promptModel;
+  if (compiled && typeof compiled === 'object' && !Array.isArray(compiled)) {
+    const value = compiled as Record<string, unknown>;
+    if (typeof value.providerID === 'string' && typeof value.modelID === 'string') {
+      return { providerID: value.providerID, modelID: value.modelID };
+    }
+  }
+  if (!config.model) return undefined;
+  try {
+    return parseOpenCodeModel(config.model);
+  } catch {
+    return undefined;
+  }
+}
 
 function workerToolPhase(status: string): 'started' | 'completed' | 'failed' {
   if (status === 'completed') return 'completed';
@@ -777,9 +804,11 @@ class OpenCodeSession implements BackendSession {
       this.resumedReadOnly = false;
       this.emitInformational('已激活恢复的 OpenCode 会话，继续对话。');
     }
+    const model = openCodePromptModel(this.config);
     void this.client.session.prompt({
       path: { id: this.sessionId },
       body: {
+        ...(model ? { model } : {}),
         parts: [{ type: 'text', text }],
       },
     }).catch((err) => {
@@ -904,6 +933,18 @@ function providerEnvVars(model?: string): { keyVar: string; baseUrlVar: string }
 export class OpenCodeBackend implements CliBackend {
   readonly id = 'opencode';
   readonly capabilities = OPENCODE_CAPABILITIES;
+
+  compileTaskProfile(
+    requested: TaskExecutionProfile,
+    runtime: BackendRuntime,
+  ): BackendEffectiveProfile {
+    return compileOpenCodeTaskProfile(
+      requested,
+      runtime,
+      this.capabilities.defaultModel!,
+      this.capabilities.models ?? [],
+    );
+  }
 
   createSession(
     config: BackendSessionConfig,

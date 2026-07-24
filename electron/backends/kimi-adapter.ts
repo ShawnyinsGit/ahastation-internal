@@ -19,6 +19,14 @@ import {
   extractWorkReportFrame,
   type WorkerAdapterSignal,
 } from '../worker-protocol.js';
+import {
+  compileKimiTaskProfile,
+  type BackendRuntime,
+} from './task-profile.js';
+import type {
+  BackendEffectiveProfile,
+  TaskExecutionProfile,
+} from '../task-collaboration.js';
 
 const KIMI_CAPABILITIES: BackendCapabilities = {
   coordinate: false, executeTasks: true,
@@ -530,6 +538,17 @@ export class KimiBackend extends SubprocessBackend {
     ) => KimiAcpTransport;
   } = {}) {
     super();
+  }
+
+  compileTaskProfile(
+    requested: TaskExecutionProfile,
+    runtime: BackendRuntime,
+  ): BackendEffectiveProfile {
+    return compileKimiTaskProfile(
+      requested,
+      runtime,
+      this.capabilities.defaultModel!,
+    );
   }
 
   resolveBinary(): string | null {

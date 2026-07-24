@@ -52,6 +52,11 @@ import type {
   ContextSelection,
 } from './task-context.js';
 import type { ContextPackage } from './task-collaboration.js';
+import type {
+  BackendEffectiveProfile,
+  TaskExecutionProfile,
+} from './task-collaboration.js';
+import type { BackendRuntime } from './backends/task-profile.js';
 
 export interface HostGroupOpts {
   /** Unique identifier for this host group. Default = 'default'. */
@@ -89,6 +94,20 @@ export interface HostGroupOpts {
     selection: ContextSelection,
   ) => Promise<AuthorizedMeetingContextSource>;
   persistContextPackage: (contextPackage: ContextPackage) => Promise<void>;
+  compileTaskProfile?: (
+    requested: TaskExecutionProfile,
+  ) => Promise<{
+    runtime: BackendRuntime;
+    effectiveProfile: BackendEffectiveProfile;
+  }>;
+  persistTaskProfile?: (input: {
+    taskId: string;
+    attempt: number;
+    requestedProfile: TaskExecutionProfile;
+    runtime: BackendRuntime;
+    effectiveProfile: BackendEffectiveProfile;
+  }) => Promise<void>;
+  taskProfileCompilerRequired?: boolean;
 }
 
 export class HostGroup {
@@ -163,6 +182,9 @@ export class HostGroup {
       getAuthorizedTaskContextSource: opts.getAuthorizedTaskContextSource,
       persistContextPackage: opts.persistContextPackage,
       contextCompilerRequired: true,
+      compileTaskProfile: opts.compileTaskProfile,
+      persistTaskProfile: opts.persistTaskProfile,
+      taskProfileCompilerRequired: opts.taskProfileCompilerRequired,
       buildWorkerMcp: (workerId) => buildWorkerMcp(this.bridge, workerId, this.cwd),
       buildComputerUseMcp: process.platform === 'darwin'
         ? (workerId) => buildComputerUseMcp(cuBridge, workerId)

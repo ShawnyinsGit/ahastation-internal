@@ -55,9 +55,16 @@ import {
   type ContextSelection,
 } from './task-context.js';
 import {
+  backendEffectiveProfileSchema,
   contextPackageSchema,
+  type BackendEffectiveProfile,
   type ContextPackage,
+  type TaskExecutionProfile,
 } from './task-collaboration.js';
+import {
+  backendRuntimeSchema,
+  type BackendRuntime,
+} from './backends/task-profile.js';
 import type { DeliveryHarness, DeliveryView } from './delivery-harness.js';
 import {
   parseWorkerAdapterSignal,
@@ -147,6 +154,25 @@ export interface WorkerSchedulerOpts {
   /** Production HostGroups require context compilation; narrow unit tests may
    * omit the source seam to exercise legacy Scheduler behavior. */
   contextCompilerRequired?: boolean;
+  /** Compiles one requested profile from version facts without creating a
+   * Backend session or reading credentials. */
+  compileTaskProfile?: (
+    requested: TaskExecutionProfile,
+  ) => Promise<{
+    runtime: BackendRuntime;
+    effectiveProfile: BackendEffectiveProfile;
+  }>;
+  /** Appends and flushes backend-profile-compiled before workspace creation. */
+  persistTaskProfile?: (input: {
+    taskId: string;
+    attempt: number;
+    requestedProfile: TaskExecutionProfile;
+    runtime: BackendRuntime;
+    effectiveProfile: BackendEffectiveProfile;
+  }) => Promise<void>;
+  /** Production HostGroups require profile compilation; narrow tests may omit
+   * the seam to exercise pre-collaboration Scheduler behavior. */
+  taskProfileCompilerRequired?: boolean;
 }
 
 const COMPUTER_USE_WORKER_PROMPT = `
@@ -178,6 +204,13 @@ const QUEUED_UPDATE_MAX = 8;
 const STALL_THRESHOLD_MS = 45_000;
 const STALL_SWEEP_MS = 15_000;
 const TASK_HISTORY_MAX = 50;
+
+class TaskProfileCompilationError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = 'TaskProfileCompilationError';
+  }
+}
 const ASSISTANT_CONDENSE_CHARS = 140;
 const ASSISTANT_DESCRIBE_MAX = 200;
 
@@ -273,6 +306,8 @@ export class WorkerScheduler {
     authorityRequest?: PlanMeetingTask['authorityRequest'];
     contextPackage?: ContextPackage;
     contextPackageHash?: string;
+    backendRuntime?: BackendRuntime;
+    effectiveProfile?: BackendEffectiveProfile;
     acceptanceCriteria?: AcceptanceCriterion[];
     workspace?: { kind: string; cwd: string; branch?: string };
     deliveryId?: string;
@@ -294,6 +329,8 @@ export class WorkerScheduler {
       authorityRequest: handle.authorityRequest ? structuredClone(handle.authorityRequest) : undefined,
       contextPackage: handle.contextPackage ? structuredClone(handle.contextPackage) : undefined,
       contextPackageHash: handle.contextPackageHash,
+      backendRuntime: handle.backendRuntime ? structuredClone(handle.backendRuntime) : undefined,
+      effectiveProfile: handle.effectiveProfile ? structuredClone(handle.effectiveProfile) : undefined,
       acceptanceCriteria: handle.acceptanceCriteria
         ? structuredClone(handle.acceptanceCriteria)
         : undefined,
@@ -387,6 +424,18 @@ export class WorkerScheduler {
         handle.contextPackage = freezeContextPackage(recoveredContext.data);
         handle.contextPackageHash = recoveredContext.data.packageHash;
       }
+      const recoveredRuntime = backendRuntimeSchema.safeParse(task.backendRuntime);
+      const recoveredProfile = backendEffectiveProfileSchema.safeParse(task.effectiveProfile);
+      if (
+        recoveredRuntime.success
+        && recoveredProfile.success
+        && recoveredRuntime.data.backendId === handle.backendId
+        && recoveredProfile.data.backendId === handle.backendId
+        && recoveredRuntime.data.runtimeVersion === recoveredProfile.data.runtimeVersion
+      ) {
+        handle.backendRuntime = structuredClone(recoveredRuntime.data);
+        handle.effectiveProfile = structuredClone(recoveredProfile.data);
+      }
       const rawStatus = typeof task.status === 'string' ? task.status : 'interrupted';
       handle.status = (
         rawStatus === 'accepted' || rawStatus === 'failed' || rawStatus === 'done'
@@ -463,6 +512,8 @@ export class WorkerScheduler {
       handle.deliveryId = null;
     }
     handle.report = null;
+    handle.backendRuntime = undefined;
+    handle.effectiveProfile = undefined;
     handle.transportEnded = false;
     handle.summary = '';
     handle.prompt = action === 'continue'
@@ -1329,6 +1380,8 @@ export class WorkerScheduler {
       this.emitPlanUpdate();
     } else {
       handle.status = 'pending';
+      handle.backendRuntime = undefined;
+      handle.effectiveProfile = undefined;
       void this.spawnWorker(handle);
     }
     return view;
@@ -1364,6 +1417,8 @@ export class WorkerScheduler {
       authorityRequest: spec.authorityRequest,
       contextPackage: undefined,
       contextPackageHash: undefined,
+      backendRuntime: undefined,
+      effectiveProfile: undefined,
       acceptanceCriteria: spec.acceptanceCriteria,
       status: 'pending',
       session: null,
@@ -1449,6 +1504,8 @@ export class WorkerScheduler {
     handle.deliveries.clear();
     handle.explicitDeliveries = [];
     handle.report = null;
+    handle.backendRuntime = undefined;
+    handle.effectiveProfile = undefined;
     handle.transportEnded = false;
     handle.deliveryId = null;
     handle.attempt = 1;
@@ -1534,6 +1591,43 @@ export class WorkerScheduler {
         firstMessage = renderContextPackageForWorker(handle.prompt, handle.contextPackage);
       }
 
+      if (handle.executionProfile && !handle.effectiveProfile) {
+        const compile = this.opts.compileTaskProfile;
+        const persist = this.opts.persistTaskProfile;
+        if (!compile || !persist) {
+          if (this.opts.taskProfileCompilerRequired) {
+            throw new TaskProfileCompilationError('Backend task profile compiler is unavailable');
+          }
+        } else {
+          try {
+            const compiled = await compile(handle.executionProfile);
+            const runtime = backendRuntimeSchema.parse(compiled.runtime);
+            const effectiveProfile = backendEffectiveProfileSchema.parse(compiled.effectiveProfile);
+            if (
+              runtime.backendId !== handle.backendId
+              || effectiveProfile.backendId !== handle.backendId
+              || runtime.runtimeVersion !== effectiveProfile.runtimeVersion
+            ) {
+              throw new Error('compiled Backend task profile does not match the scheduled Backend');
+            }
+            await persist({
+              taskId: handle.id,
+              attempt: handle.attempt,
+              requestedProfile: structuredClone(handle.executionProfile),
+              runtime,
+              effectiveProfile,
+            });
+            handle.backendRuntime = structuredClone(runtime);
+            handle.effectiveProfile = structuredClone(effectiveProfile);
+          } catch (error) {
+            throw new TaskProfileCompilationError(
+              `Backend task profile compilation failed: ${String(error)}`,
+              { cause: error },
+            );
+          }
+        }
+      }
+
       const workerMcp = this.opts.buildWorkerMcp(handle.id);
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const mcpServers: Record<string, any> = { 'meeting-worker': workerMcp as any };
@@ -1590,6 +1684,12 @@ export class WorkerScheduler {
         sessionOptions: {
           systemPrompt: { type: 'preset', preset: 'claude_code', append: promptAppend },
           mcpServers,
+          ...(handle.effectiveProfile
+            ? {
+                model: handle.effectiveProfile.model,
+                taskProfile: structuredClone(handle.effectiveProfile),
+              }
+            : {}),
         },
       });
       handle.status = 'running';
@@ -1628,6 +1728,17 @@ export class WorkerScheduler {
       });
       this.emitPlanUpdate();
     } catch (err) {
+      if (err instanceof TaskProfileCompilationError) {
+        console.error(`[scheduler] task profile blocked ${handle.id}:`, err);
+        handle.summary = err.message;
+        this.opts.emit({
+          source: 'talker',
+          event: { kind: 'worker-ended', workerId: handle.id, status: 'interrupted', summary: err.message },
+        });
+        this.disposeWorker(handle, 'interrupted');
+        this.emitPlanUpdate();
+        return;
+      }
       // auth-required/ended may have already terminalized this worker while the
       // awaited readiness promise was rejecting. Do not emit/cascade twice.
       if (

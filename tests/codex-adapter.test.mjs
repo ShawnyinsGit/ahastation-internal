@@ -11,6 +11,52 @@ function makeSession(commands, events = []) {
   }, (event) => events.push(event));
 }
 
+test('Codex worker task profile reaches native SDK thread options', async () => {
+  let threadOptions;
+  const thread = {
+    id: 'thread-profile',
+    async runStreamed() {
+      return {
+        events: (async function* emptyEvents() {})(),
+      };
+    },
+  };
+  class FakeCodex {
+    startThread(options) {
+      threadOptions = options;
+      return thread;
+    }
+  }
+  const backend = new CodexBackend({
+    resolveBinary: () => '/fake/codex',
+    loadSdk: async () => FakeCodex,
+  });
+  const taskProfile = backend.compileTaskProfile({
+    schemaVersion: 1,
+    backendId: 'codex',
+    modelPreference: 'gpt-5.4',
+    workMode: 'deep',
+    contextMode: 'meeting-summary',
+    timeoutMs: 1_800_000,
+    maxTokenBudget: 200_000,
+  }, {
+    schemaVersion: 1,
+    backendId: 'codex',
+    runtimeVersion: '0.144.1',
+  });
+  const session = backend.createSession({
+    cwd: process.cwd(),
+    model: taskProfile.model,
+    taskProfile,
+    executionRole: 'worker',
+  }, () => {});
+
+  await session.start();
+  assert.equal(threadOptions.model, 'gpt-5.4');
+  assert.equal(threadOptions.modelReasoningEffort, 'high');
+  session.end();
+});
+
 test('Codex adapter hides speak protocol frames and dispatches commands', () => {
   const commands = [];
   const session = makeSession(commands);
@@ -352,6 +398,52 @@ test('Codex production app-server session becomes ready without a model turn', a
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(calls[2][0], 'turn/start');
   assert.equal(events[0].message.message.content[0].text, 'hello from app-server');
+  session.end();
+});
+
+test('Codex app-server receives the compiled task model and reasoning effort', async () => {
+  let openOptions;
+  const transport = {
+    async start() {
+      return { userAgent: 'Codex/0.144.1', account: { type: 'chatgpt' } };
+    },
+    async openThread(options) {
+      openOptions = options;
+      return 'app-thread-profile';
+    },
+    async resumeThread(id) { return id; },
+    async startTurn() { return 'turn-unused'; },
+    async interruptTurn() {},
+    close() {},
+  };
+  const backend = new CodexBackend({
+    resolveBinary: () => '/fake/codex',
+    createAppServerTransport: () => transport,
+  });
+  const taskProfile = backend.compileTaskProfile({
+    schemaVersion: 1,
+    backendId: 'codex',
+    modelPreference: 'gpt-5.4',
+    workMode: 'deep',
+    contextMode: 'meeting-summary',
+    timeoutMs: 1_800_000,
+    maxTokenBudget: 200_000,
+  }, {
+    schemaVersion: 1,
+    backendId: 'codex',
+    runtimeVersion: '0.144.1',
+  });
+  const session = backend.createSession({
+    cwd: '/workspace',
+    executionRole: 'worker',
+    model: taskProfile.model,
+    taskProfile,
+    extra: { codexTransport: 'app-server' },
+  }, () => {});
+
+  await session.start();
+  assert.equal(openOptions.model, 'gpt-5.4');
+  assert.equal(openOptions.modelReasoningEffort, 'high');
   session.end();
 });
 

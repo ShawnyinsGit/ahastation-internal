@@ -25,6 +25,19 @@ test('Claude adapter carries the universal session configuration into the offici
   const backend = new ClaudeCodeBackend({
     queryFactory: (input) => { queryInput = input; return fakeQuery; },
   });
+  const taskProfile = backend.compileTaskProfile({
+    schemaVersion: 1,
+    backendId: 'claude-code',
+    modelPreference: 'claude-test-model',
+    workMode: 'deep',
+    contextMode: 'meeting-summary',
+    timeoutMs: 1_800_000,
+    maxTokenBudget: 200_000,
+  }, {
+    schemaVersion: 1,
+    backendId: 'claude-code',
+    runtimeVersion: '2.1.150',
+  });
   const session = backend.createSession({
     cwd: '/workspace',
     systemPrompt: 'meeting host',
@@ -33,6 +46,7 @@ test('Claude adapter carries the universal session configuration into the offici
     skills: ['review'],
     extra: { settingSources: [], tools: [] },
     resumeSessionId: 'claude-session-old',
+    taskProfile,
   }, () => {});
 
   await session.start();
@@ -43,6 +57,8 @@ test('Claude adapter carries the universal session configuration into the offici
   assert.deepEqual(queryInput.options.settingSources, []);
   assert.deepEqual(queryInput.options.tools, []);
   assert.equal(queryInput.options.resume, 'claude-session-old');
+  assert.equal(queryInput.options.effort, 'high');
+  assert.deepEqual(queryInput.options.thinking, { type: 'adaptive' });
   assert.deepEqual(session.snapshot(), { protocol: 'claude-agent-sdk', sessionId: 'claude-session-1' });
   session.end();
 });

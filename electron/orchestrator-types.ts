@@ -171,6 +171,8 @@ export interface WorkerHandle {
   authorityRequest?: PlanMeetingTask['authorityRequest'];
   contextPackage?: import('./task-collaboration.js').ContextPackage;
   contextPackageHash?: string;
+  backendRuntime?: import('./backends/task-profile.js').BackendRuntime;
+  effectiveProfile?: import('./task-collaboration.js').BackendEffectiveProfile;
   acceptanceCriteria?: import('./worker-protocol.js').AcceptanceCriterion[];
   status: WorkerStatusKind;
   session: BackendSession | null;

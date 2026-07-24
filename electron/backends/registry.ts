@@ -12,6 +12,11 @@ import { QoderBackend } from './qoder-adapter.js';
 import { CustomBackend, type CustomBackendOptions } from './custom-adapter.js';
 import { OpenCodeBackend } from './opencode-adapter.js';
 import type { ConfirmDestructive } from '../claude-session.js';
+import type {
+  BackendEffectiveProfile,
+  TaskExecutionProfile,
+} from '../task-collaboration.js';
+import type { BackendRuntime } from './task-profile.js';
 
 export interface BackendStatus {
   backend: CliBackend;
@@ -42,6 +47,22 @@ export class BackendRegistry {
 
   get(id: string): CliBackend | undefined {
     return this.backends.get(id);
+  }
+
+  compileTaskProfile(
+    id: string,
+    requested: TaskExecutionProfile,
+    runtime: BackendRuntime,
+  ): BackendEffectiveProfile {
+    const backend = this.backends.get(id);
+    if (!backend) throw new Error(`backend '${id}' is not registered`);
+    if (!backend.capabilities.executeTasks) {
+      throw new Error(`backend '${id}' cannot execute delivery tasks`);
+    }
+    if (!backend.compileTaskProfile) {
+      throw new Error(`backend '${id}' does not compile task profiles`);
+    }
+    return backend.compileTaskProfile(requested, runtime);
   }
 
   list(): CliBackend[] {

@@ -53,6 +53,14 @@ import {
   extractWorkReportFrame,
   type WorkerAdapterSignal,
 } from '../worker-protocol.js';
+import {
+  compileCodexTaskProfile,
+  type BackendRuntime,
+} from './task-profile.js';
+import type {
+  BackendEffectiveProfile,
+  TaskExecutionProfile,
+} from '../task-collaboration.js';
 
 const CODEX_CAPABILITIES: BackendCapabilities = {
   coordinate: true,
@@ -66,9 +74,23 @@ const CODEX_CAPABILITIES: BackendCapabilities = {
   systemPrompt: true,
   skills: false,
   interrupt: true,
+  defaultModel: 'gpt-5.4',
   npmPackage: '@openai/codex',
   installHint: 'npm install -g @openai/codex',
 };
+
+function codexReasoningEffort(
+  config: BackendSessionConfig,
+): 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | undefined {
+  const effort = config.taskProfile?.nativeReasoning?.modelReasoningEffort;
+  return (
+    effort === 'minimal'
+    || effort === 'low'
+    || effort === 'medium'
+    || effort === 'high'
+    || effort === 'xhigh'
+  ) ? effort : undefined;
+}
 
 export function mapCodexItemToWorkerSignals(
   item: Record<string, unknown>,
@@ -348,6 +370,8 @@ class CodexAppServerSession implements BackendSession {
       };
       const model = codexModelOverride(this.config.model);
       if (model) options.model = model;
+      const reasoningEffort = codexReasoningEffort(this.config);
+      if (reasoningEffort) options.modelReasoningEffort = reasoningEffort;
       this.threadId = this.config.resumeSessionId
         ? await this.transport.resumeThread(this.config.resumeSessionId, options)
         : await this.transport.openThread(options);
@@ -684,9 +708,11 @@ class CodexSession implements BackendSession {
         env: Object.keys(envStrings).length > 0 ? envStrings : undefined,
       });
       const model = codexModelOverride(this.config.model);
+      const reasoningEffort = codexReasoningEffort(this.config);
       const threadOptions = {
         workingDirectory: this.config.cwd,
         ...(model ? { model } : {}),
+        ...(reasoningEffort ? { modelReasoningEffort: reasoningEffort } : {}),
         approvalPolicy: this.config.executionRole === 'worker' ? 'untrusted' : 'never',
         sandboxMode: this.config.executionRole === 'worker' ? 'workspace-write' : 'read-only',
         skipGitRepoCheck: true,
@@ -1148,6 +1174,13 @@ export class CodexBackend implements CliBackend {
     loadSdk?: () => Promise<CodexSdk | null>;
     createAppServerTransport?: (options: CodexAppServerTransportOptions) => CodexAppServerTransport;
   } = {}) {}
+
+  compileTaskProfile(
+    requested: TaskExecutionProfile,
+    runtime: BackendRuntime,
+  ): BackendEffectiveProfile {
+    return compileCodexTaskProfile(requested, runtime);
+  }
 
   createSession(
     config: BackendSessionConfig,

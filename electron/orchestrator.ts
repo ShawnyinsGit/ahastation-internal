@@ -74,6 +74,10 @@ import {
   assessWorkerRuntime,
   probeWorkerRuntimeVersion,
 } from './backends/worker-runtime-contract.js';
+import {
+  backendRuntimeSchema,
+  type BackendRuntime,
+} from './backends/task-profile.js';
 import type {
   MeetingPlan,
   MeetingPlanNode,
@@ -87,7 +91,12 @@ import type {
   AuthorizedMeetingContextSource,
   ContextSelection,
 } from './task-context.js';
-import type { ContextPackage } from './task-collaboration.js';
+import {
+  backendEffectiveProfileSchema,
+  type BackendEffectiveProfile,
+  type ContextPackage,
+  type TaskExecutionProfile,
+} from './task-collaboration.js';
 
 export const MAX_HOSTS = 3;
 
@@ -273,7 +282,7 @@ export class Orchestrator implements OrchestratorBridge {
     // Wrap the adapter's createSession to accept ClaudeSession-shaped opts,
     // translating the fields that differ between the two interfaces.
     return (opts) => {
-      const so = opts.sessionOptions ?? {};
+      const so = (opts.sessionOptions ?? {}) as Record<string, unknown>;
       let systemPrompt: string | undefined;
       if (typeof so.systemPrompt === 'string') {
         systemPrompt = so.systemPrompt;
@@ -301,19 +310,26 @@ export class Orchestrator implements OrchestratorBridge {
         backendBaseEnv.USERPROFILE = homedir();
       }
       const env = backend.buildEnv(auth, backendBaseEnv);
-      const requestedModel = typeof so.model === 'string' ? so.model : undefined;
-      const model = backendId === 'codex'
-        ? (auth.model ?? requestedModel)
-        : backendId === 'claude-code'
-          ? (auth.model ?? requestedModel ?? backend.capabilities.defaultModel)
-          : requestedModel?.startsWith('claude-')
-            ? (auth.model ?? backend.capabilities.defaultModel)
-            : (auth.model ?? requestedModel ?? backend.capabilities.defaultModel);
+      const parsedTaskProfile = backendEffectiveProfileSchema.safeParse(so.taskProfile);
+      const taskProfile = parsedTaskProfile.success ? parsedTaskProfile.data : undefined;
+      const { taskProfile: _taskProfile, ...backendExtra } = so;
+      const requestedModel = taskProfile?.model
+        ?? (typeof so.model === 'string' ? so.model : undefined);
+      const model = taskProfile
+        ? taskProfile.model
+        : backendId === 'codex'
+          ? (auth.model ?? requestedModel)
+          : backendId === 'claude-code'
+            ? (auth.model ?? requestedModel ?? backend.capabilities.defaultModel)
+            : requestedModel?.startsWith('claude-')
+              ? (auth.model ?? backend.capabilities.defaultModel)
+              : (auth.model ?? requestedModel ?? backend.capabilities.defaultModel);
       return backend.createSession(
         {
           cwd: opts.cwd,
           systemPrompt,
           model,
+          taskProfile,
           env,
           mcpServers: so.mcpServers as Record<string, unknown> | undefined,
           skills: Array.isArray(so.skills) ? so.skills : undefined,
@@ -326,7 +342,7 @@ export class Orchestrator implements OrchestratorBridge {
             : undefined,
           executionRole: purpose,
           extra: {
-            ...so,
+            ...backendExtra,
             ...(backendId === 'codex' ? { codexTransport: 'app-server' } : {}),
             ...(backendId === 'kimi' ? { kimiTransport: 'acp' } : {}),
             meetingCommandHandler: (raw: unknown) => this.executeMeetingCommand(actorHostId, raw),
@@ -378,6 +394,13 @@ export class Orchestrator implements OrchestratorBridge {
         this.getAuthorizedTaskContextSource(taskId, selection),
       persistContextPackage: (contextPackage) =>
         this.persistContextPackage(contextPackage),
+      compileTaskProfile: this.sessionFactory === Orchestrator.defaultClaudeFactory
+        ? (requestedProfile) => this.compileTaskProfile(requestedProfile)
+        : undefined,
+      persistTaskProfile: this.sessionFactory === Orchestrator.defaultClaudeFactory
+        ? (input) => this.persistTaskProfile(input)
+        : undefined,
+      taskProfileCompilerRequired: this.sessionFactory === Orchestrator.defaultClaudeFactory,
     });
     this.hostGroups.set(id, hg);
     if (id === DEFAULT_HOST_ID) {
@@ -1042,6 +1065,9 @@ export class Orchestrator implements OrchestratorBridge {
       if (!backend.capabilities.executeTasks) {
         return `backend '${backendId}' cannot execute delivery tasks`;
       }
+      if (!backend.compileTaskProfile) {
+        return `backend '${backendId}' does not compile task profiles`;
+      }
       if (checked.has(backendId)) continue;
       checked.add(backendId);
       // Unit/integration tests inject a controlled SessionFactory. Production
@@ -1181,6 +1207,70 @@ export class Orchestrator implements OrchestratorBridge {
       taskId: contextPackage.taskId,
       attempt: contextPackage.attempt,
       package: contextPackage,
+    });
+    await this.repository.flush();
+  }
+
+  private async compileTaskProfile(
+    requestedProfile: TaskExecutionProfile,
+  ): Promise<{
+    runtime: BackendRuntime;
+    effectiveProfile: BackendEffectiveProfile;
+  }> {
+    const registry = getBackendRegistry();
+    const backend = registry.get(requestedProfile.backendId);
+    if (!backend) {
+      throw new Error(`backend '${requestedProfile.backendId}' is not registered`);
+    }
+    if (!backend.capabilities.executeTasks || !backend.compileTaskProfile) {
+      throw new Error(`backend '${requestedProfile.backendId}' cannot compile Worker task profiles`);
+    }
+    const runtimePath = backend.resolveBinary();
+    if (!runtimePath) {
+      throw new Error(`backend '${requestedProfile.backendId}' runtime is unavailable`);
+    }
+    const version = probeWorkerRuntimeVersion(requestedProfile.backendId, runtimePath);
+    const assessment = assessWorkerRuntime({
+      backendId: requestedProfile.backendId,
+      installed: true,
+      implementationEnabled: true,
+      authenticated: true,
+      version,
+    });
+    if (assessment.state !== 'available' || !assessment.version) {
+      throw new Error(
+        `backend '${requestedProfile.backendId}' runtime profile is unavailable: ${assessment.reason}`,
+      );
+    }
+    const runtime = backendRuntimeSchema.parse({
+      schemaVersion: 1,
+      backendId: requestedProfile.backendId,
+      runtimeVersion: assessment.version,
+    });
+    return {
+      runtime,
+      effectiveProfile: registry.compileTaskProfile(
+        requestedProfile.backendId,
+        requestedProfile,
+        runtime,
+      ),
+    };
+  }
+
+  private async persistTaskProfile(input: {
+    taskId: string;
+    attempt: number;
+    requestedProfile: TaskExecutionProfile;
+    runtime: BackendRuntime;
+    effectiveProfile: BackendEffectiveProfile;
+  }): Promise<void> {
+    await this.repository.append('backend-profile-compiled', {
+      taskId: input.taskId,
+      attempt: input.attempt,
+      requestedProfile: input.requestedProfile,
+      runtime: input.runtime,
+      effectiveProfile: input.effectiveProfile,
+      capabilityHash: input.effectiveProfile.capabilityHash,
     });
     await this.repository.flush();
   }
