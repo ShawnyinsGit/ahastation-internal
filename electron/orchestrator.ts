@@ -62,6 +62,11 @@ import path from 'node:path';
 import { HostGroup } from './host-group.js';
 import { CrossHostBus } from './cross-host-bus.js';
 import { MeetingRepository } from './meeting-repository.js';
+import { TaskMailbox } from './task-mailbox.js';
+import {
+  projectMeetingTasks,
+  type TaskProjectionResult,
+} from './task-projection.js';
 import { DeliveryHarness } from './delivery-harness.js';
 import { CommandDeliveryVerifier } from './delivery-verifier.js';
 import { DeterministicDeliveryReviewer } from './delivery-reviewer.js';
@@ -166,6 +171,9 @@ export class Orchestrator implements OrchestratorBridge {
   private projectId: string;
   private meetingId: string;
   private repository: MeetingRepository;
+  private repositoryReady: Promise<void>;
+  private taskMailbox: TaskMailbox;
+  private taskProjection: TaskProjectionResult = { tasks: [], diagnostics: [] };
   private deliveryHarness: DeliveryHarness;
   private workspaceManager: TaskWorkspaceManager;
   private diagnostics: DiagnosticLogger;
@@ -239,6 +247,7 @@ export class Orchestrator implements OrchestratorBridge {
       ? opts.recoveredPlanVersion!
       : 0;
     this.repository = new MeetingRepository(this.meetingId, opts.recoverySeq);
+    this.taskMailbox = new TaskMailbox(this.repository);
     this.workspaceManager = new TaskWorkspaceManager(this.meetingId, this.cwd);
     this.deliveryHarness = new DeliveryHarness({
       executionMode: 'external',
@@ -247,7 +256,9 @@ export class Orchestrator implements OrchestratorBridge {
       integrator: new WorkspaceDeliveryIntegrator(this.cwd),
     });
     this.diagnostics = new DiagnosticLogger(this.meetingId);
-    void this.repository.append(opts.meetingId ? 'meeting-recovered' : 'meeting-created', { cwd: this.cwd });
+    this.repositoryReady = this.repository
+      .append(opts.meetingId ? 'meeting-recovered' : 'meeting-created', { cwd: this.cwd })
+      .then(() => undefined, () => undefined);
     this.sessionFactory = opts.sessionFactory ?? Orchestrator.defaultClaudeFactory;
 
     // Create the default HostGroup. Use the user's preferred backend if specified.
@@ -745,43 +756,47 @@ export class Orchestrator implements OrchestratorBridge {
   }
 
   private safeEmit(e: OrchestratorEvent) {
-    if (this.closed) return;
+    if (this.closed || this.repository.isWriteFaulted()) return;
     // Ensure hostId is always present; default to 'default' when absent.
     if (!e.hostId) e = { ...e, hostId: DEFAULT_HOST_ID };
     const append = this.repository.append(`event:${e.event.kind}`, e);
-    // WorkerEvent v2 and delivery state are authoritative only after their
-    // journal record is durable. Renderer success is therefore never ahead
-    // of crash recovery for the states that release dependencies or expose
-    // acceptance controls.
-    if (
-      e.event.kind === 'worker-event'
-      || e.event.kind === 'delivery-status'
-      || e.event.kind === 'worker-delivery'
-    ) {
-      void append.then(() => {
-        if (this.closed) return;
-        this.emit(e);
-        void this.snapshotActiveMeeting();
-      }).catch((error) => {
-        console.error('[orchestrator] canonical event journal write failed', {
-          kind: e.event.kind,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      });
-      return;
-    }
-    if (
+    const shouldSnapshot = (
       e.event.kind === 'plan-updated'
       || e.event.kind === 'worker-spawned'
       || e.event.kind === 'worker-ended'
       || e.event.kind === 'coordinator-failed'
-    ) {
-      void this.snapshotActiveMeeting();
-    }
-    this.emit(e);
+      || e.event.kind === 'worker-event'
+      || e.event.kind === 'delivery-status'
+      || e.event.kind === 'worker-delivery'
+    );
+    // Every renderer-visible orchestration event is emitted only after its
+    // journal line is durable. If one write fails, MeetingRepository faults
+    // permanently and later live notifications are suppressed.
+    void append.then(() => {
+      if (this.closed || this.repository.isWriteFaulted()) return;
+      this.emit(e);
+      if (shouldSnapshot) {
+        void this.snapshotActiveMeeting().catch((error) => {
+          console.error('[orchestrator] rebuildable Meeting snapshot write failed', {
+            kind: e.event.kind,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        });
+      }
+    }).catch((error) => {
+      console.error('[orchestrator] event journal write failed; Meeting is fail-stopped', {
+        kind: e.event.kind,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
   }
 
   async start(greeting?: string) {
+    await this.repositoryReady;
+    this.repository.assertWritable();
+    const journal = await MeetingRepository.replay(this.meetingId);
+    this.taskMailbox.restore(journal);
+    this.taskProjection = projectMeetingTasks(journal);
     await this.defaultHost().start(greeting);
     if (this.recoveredTasks.length > 0) {
       this.meetingScheduler.emitRecoveredState();
@@ -1045,6 +1060,19 @@ export class Orchestrator implements OrchestratorBridge {
     return this.installApprovedPlan(normalized, 'manual-install');
   }
 
+  /** Internal Task 9 seam; renderer and Backends never receive the repository
+   * or mutate mailbox state directly. */
+  getTaskMailbox(): TaskMailbox {
+    return this.taskMailbox;
+  }
+
+  getTaskProjection(): TaskProjectionResult {
+    return {
+      tasks: structuredClone(this.taskProjection.tasks),
+      diagnostics: structuredClone(this.taskProjection.diagnostics),
+    };
+  }
+
   async proposePlan(tasks: PlanMeetingTaskInput[]): Promise<{ ok: true } | { ok: false; error: string }> {
     let normalized: PlanMeetingTask[];
     try {
@@ -1259,10 +1287,11 @@ export class Orchestrator implements OrchestratorBridge {
   }
 
   private async persistContextPackage(contextPackage: ContextPackage): Promise<void> {
-    await this.repository.append('context-package-frozen', {
+    await this.repository.appendTaskEvent('context-package-frozen', {
+      schemaVersion: 1,
       taskId: contextPackage.taskId,
       attempt: contextPackage.attempt,
-      package: contextPackage,
+      data: { package: contextPackage },
     });
     await this.repository.flush();
   }
@@ -1320,13 +1349,16 @@ export class Orchestrator implements OrchestratorBridge {
     runtime: BackendRuntime;
     effectiveProfile: BackendEffectiveProfile;
   }): Promise<void> {
-    await this.repository.append('backend-profile-compiled', {
+    await this.repository.appendTaskEvent('backend-profile-compiled', {
+      schemaVersion: 1,
       taskId: input.taskId,
       attempt: input.attempt,
-      requestedProfile: input.requestedProfile,
-      runtime: input.runtime,
-      effectiveProfile: input.effectiveProfile,
-      capabilityHash: input.effectiveProfile.capabilityHash,
+      data: {
+        requestedProfile: input.requestedProfile,
+        runtime: input.runtime,
+        effectiveProfile: input.effectiveProfile,
+        capabilityHash: input.effectiveProfile.capabilityHash,
+      },
     });
     await this.repository.flush();
   }
@@ -1336,11 +1368,14 @@ export class Orchestrator implements OrchestratorBridge {
     attempt: number;
     authorityGrant: TaskAuthorityGrant;
   }): Promise<void> {
-    await this.repository.append('task-authority-compiled', {
+    await this.repository.appendTaskEvent('task-authority-compiled', {
+      schemaVersion: 1,
       taskId: input.taskId,
       attempt: input.attempt,
-      authorityGrant: input.authorityGrant,
-      grantHash: input.authorityGrant.grantHash,
+      data: {
+        authorityGrant: input.authorityGrant,
+        grantHash: input.authorityGrant.grantHash,
+      },
     });
     await this.repository.flush();
   }
@@ -1354,7 +1389,18 @@ export class Orchestrator implements OrchestratorBridge {
     safeInput: Record<string, unknown>;
     grantHash?: string;
   }): Promise<void> {
-    await this.repository.append('task-permission-decided', input);
+    await this.repository.appendTaskEvent('task-permission-decided', {
+      schemaVersion: 1,
+      taskId: input.taskId,
+      attempt: input.attempt,
+      data: {
+        nativeRequestId: input.nativeRequestId,
+        decision: input.decision,
+        reason: input.reason,
+        safeInput: input.safeInput,
+        ...(input.grantHash ? { grantHash: input.grantHash } : {}),
+      },
+    });
     await this.repository.flush();
   }
 

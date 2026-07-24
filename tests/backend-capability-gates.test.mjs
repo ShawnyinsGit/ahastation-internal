@@ -4,6 +4,16 @@ import test from 'node:test';
 import { Orchestrator } from '../dist-electron/orchestrator.js';
 import { getBackendRegistry } from '../dist-electron/backends/registry.js';
 
+async function waitFor(predicate, message, timeoutMs = 1_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) {
+      assert.fail(message);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
 function fakeSessionFactory() {
   return {
     start() {}, end() {}, sendUserText() {}, sendUserContent() {},
@@ -205,6 +215,10 @@ test('a backend mention routes the user turn to the ready expert instead of the 
         message: { role: 'assistant', content: [{ type: 'text', text: 'ASR 依赖没有加载成功。' }] },
       },
     });
+    await waitFor(
+      () => emitted.some((event) => event.hostId === 'codex-expert' && event.event.kind === 'message'),
+      'the expert response should emit after its journal entry is durable',
+    );
     assert.ok(emitted.some((event) => event.hostId === 'codex-expert' && event.event.kind === 'message'));
     assert.match(sessions[0].inputs[0], /expert response from codex-expert.*ASR 依赖没有加载成功/s);
   } finally {
@@ -239,6 +253,10 @@ test('narrating one assistant line does not feed a new turn back into the host',
   try {
     await orchestrator.start();
     orchestrator.narrateAssistantLine('one intended line');
+    await waitFor(
+      () => emittedLines.length === 1,
+      'the narration should emit after its journal entry is durable',
+    );
     assert.deepEqual(emittedLines, ['one intended line']);
     assert.deepEqual(hostInputs, []);
   } finally {

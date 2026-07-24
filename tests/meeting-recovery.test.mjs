@@ -90,7 +90,13 @@ test('the user can explicitly resolve or restart an interrupted task', async () 
     await orchestrator.start();
     assert.deepEqual(await orchestrator.resolveRecoveredTask('abandon-task', 'abandon'), { ok: true });
     assert.deepEqual(await orchestrator.resolveRecoveredTask('retry-task', 'retry'), { ok: true });
-    await new Promise((resolve) => setImmediate(resolve));
+    const deadline = Date.now() + 2_000;
+    while (!events.some((event) => (
+      event.event.kind === 'worker-spawned' && event.event.workerId === 'retry-task'
+    ))) {
+      if (Date.now() > deadline) assert.fail('recovered worker-spawned event did not become durable');
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
     assert.equal(events.some((event) => (
       event.event.kind === 'worker-spawned' && event.event.workerId === 'retry-task'
     )), true);
