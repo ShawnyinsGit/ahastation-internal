@@ -398,10 +398,12 @@ function buildWarmupTone(): Float32Array {
 // lands in page cache before the first user segment. Caller MUST await this:
 // `state.ready = true` is only flipped after the await returns, otherwise
 // `isWhisperServerReady()` could go true while the GPU is still compiling.
+// Timeout is 20s: a single encode on slow CPUs (4-core VM ≈4.2s, RK3588
+// class) already eats most of a 5s budget before decode even starts.
 async function warmupOrTimeout(port: number): Promise<boolean> {
   try {
     const tone = buildWarmupTone();
-    await postInference(port, tone, 'auto', 5_000);
+    await postInference(port, tone, 'auto', 20_000);
     return true;
   } catch (e) {
     console.warn('[whisper-server] warmup error:', (e as Error)?.message ?? e);
