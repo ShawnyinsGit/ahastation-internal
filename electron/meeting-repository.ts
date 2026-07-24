@@ -101,6 +101,7 @@ export class MeetingRepository {
   private tail: Promise<void> = Promise.resolve();
   private writeFault: Error | null = null;
   private pendingFault: Error | null = null;
+  private subscribers = new Set<(event: PersistedMeetingEvent) => void>();
 
   constructor(
     private readonly meetingId: string,
@@ -132,6 +133,19 @@ export class MeetingRepository {
   assertWritable(): void {
     if (this.writeFault) throw this.writeFault;
     if (this.pendingFault) throw this.pendingFault;
+  }
+
+  currentSequence(): number {
+    return this.seq;
+  }
+
+  /** Subscribe to events only after their JSONL append has been fsynced.
+   * Listener failures are isolated from the journal and from other readers. */
+  subscribe(listener: (event: PersistedMeetingEvent) => void): () => void {
+    this.subscribers.add(listener);
+    return () => {
+      this.subscribers.delete(listener);
+    };
   }
 
   append(type: string, payload: unknown): Promise<PersistedMeetingEvent> {
@@ -181,7 +195,16 @@ export class MeetingRepository {
         await handle.close();
       }
     });
-    const result = run.then(() => event).catch((error) => {
+    const result = run.then(() => {
+      for (const listener of this.subscribers) {
+        try {
+          listener(structuredClone(event));
+        } catch {
+          // A renderer observer cannot fault durable Meeting writes.
+        }
+      }
+      return event;
+    }).catch((error) => {
       if (!this.writeFault) {
         this.writeFault = error instanceof Error ? error : new Error(String(error));
       }
@@ -240,6 +263,11 @@ export class MeetingRepository {
   async flush(): Promise<void> {
     await this.tail;
     this.assertWritable();
+  }
+
+  async replayAll(): Promise<PersistedMeetingEvent[]> {
+    await this.flush();
+    return MeetingRepository.replay(this.meetingId, this.options.rootDir);
   }
 
   static async replay(

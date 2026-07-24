@@ -115,6 +115,48 @@ const api = {
     list: (sessionId, dirPath) => ipcRenderer.invoke('documents:list', { sessionId, dirPath }),
     openExternal: (sessionId, path) => ipcRenderer.invoke('documents:open-external', { sessionId, path }),
   },
+  tasks: {
+    getSnapshot: (sessionId, taskId) =>
+      ipcRenderer.invoke('tasks:get-snapshot', { sessionId, taskId }),
+    getEvents: (sessionId, taskId, afterSeq, limit) =>
+      ipcRenderer.invoke('tasks:get-events', { sessionId, taskId, afterSeq, limit }),
+    onEvent: (sessionId, taskId, afterSeq, cb) => {
+      const subscriptionId = `task-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const listener = (_event, payload) => {
+        if (payload?.subscriptionId !== subscriptionId || !payload.event) return;
+        cb(payload.event);
+      };
+      ipcRenderer.on('tasks:event', listener);
+      const subscribePromise = ipcRenderer.invoke('tasks:subscribe', {
+        sessionId,
+        taskId,
+        afterSeq,
+        subscriptionId,
+      }).then((result) => {
+        if (!result?.ok) console.warn('[tasks] subscription failed:', result?.error);
+      }).catch((error) => {
+        console.warn('[tasks] subscription failed:', String(error));
+      });
+      let disposed = false;
+      return () => {
+        if (disposed) return;
+        disposed = true;
+        ipcRenderer.removeListener('tasks:event', listener);
+        // Ordering matters: an immediate close can race the async main-process
+        // subscribe handler. Send the cancellation only after that handler
+        // settles so a late subscription cannot leak.
+        void subscribePromise.finally(() => {
+          ipcRenderer.send('tasks:unsubscribe', { subscriptionId });
+        });
+      };
+    },
+    followUp: (sessionId, taskId, text) =>
+      ipcRenderer.invoke('tasks:follow-up', { sessionId, taskId, text }),
+    steer: (sessionId, taskId, text) =>
+      ipcRenderer.invoke('tasks:steer', { sessionId, taskId, text }),
+    interrupt: (sessionId, taskId, reason) =>
+      ipcRenderer.invoke('tasks:interrupt', { sessionId, taskId, reason }),
+  },
   transcripts: {
     load: (cwd) => ipcRenderer.invoke('transcripts:load', { cwd }),
     // Fire-and-forget: the renderer's caller already ignores the result

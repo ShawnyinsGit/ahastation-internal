@@ -61,7 +61,10 @@ import { promises as fsp } from 'node:fs';
 import path from 'node:path';
 import { HostGroup } from './host-group.js';
 import { CrossHostBus } from './cross-host-bus.js';
-import { MeetingRepository } from './meeting-repository.js';
+import {
+  MeetingRepository,
+  type PersistedMeetingEvent,
+} from './meeting-repository.js';
 import { TaskMailbox } from './task-mailbox.js';
 import {
   projectMeetingTasks,
@@ -102,6 +105,7 @@ import {
   type ContextPackage,
   type TaskAuthorityGrant,
   type TaskExecutionProfile,
+  type TaskMessage,
 } from './task-collaboration.js';
 import {
   compileTaskAuthority,
@@ -1106,6 +1110,49 @@ export class Orchestrator implements OrchestratorBridge {
       tasks: structuredClone(this.taskProjection.tasks),
       diagnostics: structuredClone(this.taskProjection.diagnostics),
     };
+  }
+
+  /** Main-process Task IPC source. It intentionally returns internal records
+   * only to the privileged IPC projector; the renderer receives a redacted
+   * task view from electron/ipc/tasks.ts. */
+  async getTaskInspectorSource(taskId: string): Promise<{
+    meetingId: string;
+    task: ReturnType<WorkerScheduler['snapshot']>[number];
+    record: TaskProjectionResult['tasks'][number] | null;
+    diagnostics: TaskProjectionResult['diagnostics'];
+    mailbox: TaskMessage[];
+    events: PersistedMeetingEvent[];
+  } | null> {
+    await this.repositoryReady;
+    const task = this.meetingScheduler.snapshot().find((entry) => entry.id === taskId);
+    if (!task) return null;
+    const events = await this.repository.replayAll();
+    const durableProjection = projectMeetingTasks(events);
+    return {
+      meetingId: this.meetingId,
+      task: structuredClone(task),
+      record: structuredClone(
+        durableProjection.tasks.find((entry) => entry.id === taskId) ?? null,
+      ),
+      diagnostics: structuredClone(
+        durableProjection.diagnostics.filter(
+          (entry) => entry.taskId === undefined || entry.taskId === taskId,
+        ),
+      ),
+      mailbox: this.taskMailbox.list(taskId),
+      events,
+    };
+  }
+
+  async replayMeetingJournal(): Promise<PersistedMeetingEvent[]> {
+    await this.repositoryReady;
+    return this.repository.replayAll();
+  }
+
+  subscribeMeetingJournal(
+    listener: (event: PersistedMeetingEvent) => void,
+  ): () => void {
+    return this.repository.subscribe(listener);
   }
 
   async proposePlan(tasks: PlanMeetingTaskInput[]): Promise<{ ok: true } | { ok: false; error: string }> {

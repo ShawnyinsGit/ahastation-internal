@@ -240,6 +240,127 @@ export interface TaskMessage {
   timestamp: number;
 }
 
+export interface RendererTaskEvent {
+  schemaVersion: 1;
+  eventId: string;
+  seq: number;
+  previousSeq: number;
+  timestamp: number;
+  taskId: string;
+  attempt?: number;
+  type: string;
+  data: unknown;
+}
+
+export interface RendererTaskSnapshot {
+  schemaVersion: 1;
+  sessionId: string;
+  meetingId: string;
+  task: {
+    id: string;
+    title: string;
+    prompt: string;
+    deps: string[];
+    status: string;
+    backendId: string;
+    attempt: number;
+    summary?: string;
+    requestedProfile?: TaskExecutionProfile;
+    effectiveProfile?: BackendEffectiveProfile;
+    context?: {
+      mode?: string;
+      messageCount: number;
+      decisionCount: number;
+      dependencyReportCount: number;
+      attachmentCount: number;
+      byteLength?: number;
+      packageHash?: string;
+    };
+    authority?: {
+      allowedToolKinds: string[];
+      writePathCount: number;
+      commandCount: number;
+      networkHostCount: number;
+      hasEnvironmentAccess: boolean;
+      expiresAt?: number;
+    };
+    workspace?: {
+      kind?: string;
+      branch?: string;
+      sourceRevision?: string;
+      managed?: boolean;
+      diagnostic?: string;
+    };
+    acceptanceCriteria?: unknown[];
+  };
+  mailbox: TaskMessage[];
+  mailboxTruncated: boolean;
+  attempts: Array<{
+    attempt: number;
+    backendId: string;
+    status: string;
+    startedAt?: number;
+    finishedAt?: number;
+    durationMs?: number;
+    tokenCost?: number;
+    report?: WorkReport;
+    verification?: unknown;
+    reviewCoverage?: unknown;
+    candidateCommit?: string;
+    failureFingerprint?: string | null;
+    delivery?: DeliveryView;
+  }>;
+  diagnostics: Array<{ code: string; message: string }>;
+  lastSeq: number;
+}
+
+export interface TasksApi {
+  getSnapshot: (
+    sessionId: string,
+    taskId: string,
+  ) => Promise<
+    | { ok: true; value: RendererTaskSnapshot }
+    | { ok: false; error: string; code: string }
+  >;
+  getEvents: (
+    sessionId: string,
+    taskId: string,
+    afterSeq: number,
+    limit: number,
+  ) => Promise<
+    | {
+        ok: true;
+        value: {
+          events: RendererTaskEvent[];
+          nextAfterSeq: number;
+          hasMore: boolean;
+        };
+      }
+    | { ok: false; error: string; code: string }
+  >;
+  onEvent: (
+    sessionId: string,
+    taskId: string,
+    afterSeq: number,
+    listener: (event: RendererTaskEvent) => void,
+  ) => () => void;
+  followUp: (
+    sessionId: string,
+    taskId: string,
+    text: string,
+  ) => Promise<{ ok: boolean; error?: string; message?: TaskMessage }>;
+  steer: (
+    sessionId: string,
+    taskId: string,
+    text: string,
+  ) => Promise<{ ok: boolean; error?: string; queued?: boolean }>;
+  interrupt: (
+    sessionId: string,
+    taskId: string,
+    reason?: string,
+  ) => Promise<{ ok: boolean; error?: string }>;
+}
+
 export interface TaskWorkspaceSnapshot {
   kind: 'read-only' | 'git-worktree' | 'shared-locked';
   cwd: string;
@@ -886,6 +1007,7 @@ export interface VibeMeetApi {
     open: (path: string) => Promise<{ ok: boolean; error?: string }>;
   };
   documents: DocumentsApi;
+  tasks: TasksApi;
   transcripts: TranscriptsApi;
   accessibility: {
     check: () => Promise<{ granted: boolean }>;

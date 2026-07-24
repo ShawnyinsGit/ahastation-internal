@@ -6,6 +6,7 @@ import type {
   CoordinatorBriefing,
   MeetingPlan,
   PlanMeetingTaskInput,
+  RendererTaskSnapshot,
   OpenTabMeta,
   PendingPermission,
   RecentCwdMeta,
@@ -25,6 +26,11 @@ import { redactSecrets } from '../../electron/format-error';
 import { extractText, extractToolUses, uid } from './sdk-message';
 import { isSpeechActive, type SpeakHandle } from './speech-session';
 import { reduceWorkerEvent } from './worker-event-reducer';
+import {
+  hydrateTaskProjection,
+  reduceTaskEvent,
+  type TaskInspectorProjection,
+} from './task-event-reducer';
 
 const MAX_TRANSCRIPT = 500;
 const MAX_ACTIVITY = 500;
@@ -402,6 +408,10 @@ class MeetingStore {
   private speakCallback: SpeakHandle | null = null;
   private subscribed = false;
   private unsubscribeEvents: (() => void) | null = null;
+  private taskInspectorProjections = new Map<string, TaskInspectorProjection>();
+  private taskInspectorSubscriptions = new Map<string, () => void>();
+  private taskInspectorGenerations = new Map<string, number>();
+  private taskInspectorListeners = new Set<Listener>();
 
   // Proactive-announcement queue (see ANNOUNCE_* constants). Mirrors the
   // trust-mode scope pushed down from App so we can stay quiet about
@@ -446,6 +456,96 @@ class MeetingStore {
     this.ensureSubscribed();
     return () => { this.tabListeners.delete(listener); };
   };
+
+  subscribeTaskInspectors = (listener: Listener): (() => void) => {
+    this.taskInspectorListeners.add(listener);
+    return () => {
+      this.taskInspectorListeners.delete(listener);
+    };
+  };
+
+  getTaskInspectorProjection(
+    sessionId: string,
+    taskId: string,
+  ): TaskInspectorProjection | null {
+    return this.taskInspectorProjections.get(this.taskInspectorKey(sessionId, taskId)) ?? null;
+  }
+
+  /** Snapshot -> bounded replay -> atomic subscription hydration used by the
+   * docked Task Inspector. A detected task-event chain gap restarts from a
+   * fresh snapshot instead of speculatively reducing incomplete state. */
+  async openTaskInspector(sessionId: string, taskId: string): Promise<{
+    ok: true;
+    snapshot: RendererTaskSnapshot;
+  } | { ok: false; error: string }> {
+    const key = this.taskInspectorKey(sessionId, taskId);
+    const generation = (this.taskInspectorGenerations.get(key) ?? 0) + 1;
+    this.taskInspectorGenerations.set(key, generation);
+    this.taskInspectorSubscriptions.get(key)?.();
+    this.taskInspectorSubscriptions.delete(key);
+
+    const snapshotResult = await window.vibeMeet.tasks.getSnapshot(sessionId, taskId);
+    if (!snapshotResult.ok) return { ok: false, error: snapshotResult.error };
+    if (this.taskInspectorGenerations.get(key) !== generation) {
+      return { ok: false, error: 'Task Inspector hydration was superseded' };
+    }
+    let projection = hydrateTaskProjection(snapshotResult.value);
+    this.taskInspectorProjections.set(key, projection);
+    this.notifyTaskInspectorListeners();
+
+    let cursor = projection.lastSeq;
+    for (;;) {
+      const page = await window.vibeMeet.tasks.getEvents(sessionId, taskId, cursor, 500);
+      if (!page.ok) return { ok: false, error: page.error };
+      if (this.taskInspectorGenerations.get(key) !== generation) {
+        return { ok: false, error: 'Task Inspector hydration was superseded' };
+      }
+      for (const event of page.value.events) {
+        projection = reduceTaskEvent(projection, event);
+        if (projection.needsRefresh) {
+          return this.refreshTaskInspector(sessionId, taskId, key, generation);
+        }
+      }
+      cursor = page.value.nextAfterSeq;
+      this.taskInspectorProjections.set(key, projection);
+      if (!page.value.hasMore) break;
+    }
+
+    const unsubscribe = window.vibeMeet.tasks.onEvent(
+      sessionId,
+      taskId,
+      projection.lastSeq,
+      (event) => {
+        if (this.taskInspectorGenerations.get(key) !== generation) return;
+        const current = this.taskInspectorProjections.get(key);
+        if (!current) return;
+        const next = reduceTaskEvent(current, event);
+        this.taskInspectorProjections.set(key, next);
+        this.notifyTaskInspectorListeners();
+        if (next.needsRefresh) {
+          this.taskInspectorSubscriptions.get(key)?.();
+          this.taskInspectorSubscriptions.delete(key);
+          void this.openTaskInspector(sessionId, taskId);
+        }
+      },
+    );
+    if (this.taskInspectorGenerations.get(key) !== generation) {
+      unsubscribe();
+      return { ok: false, error: 'Task Inspector hydration was superseded' };
+    }
+    this.taskInspectorSubscriptions.set(key, unsubscribe);
+    this.notifyTaskInspectorListeners();
+    return { ok: true, snapshot: projection.snapshot };
+  }
+
+  closeTaskInspector(sessionId: string, taskId: string): void {
+    const key = this.taskInspectorKey(sessionId, taskId);
+    this.taskInspectorGenerations.set(key, (this.taskInspectorGenerations.get(key) ?? 0) + 1);
+    this.taskInspectorSubscriptions.get(key)?.();
+    this.taskInspectorSubscriptions.delete(key);
+    this.taskInspectorProjections.delete(key);
+    this.notifyTaskInspectorListeners();
+  }
 
   getTabs = (): TabMeta[] => {
     if (this.cachedTabs) return this.cachedTabs;
@@ -620,12 +720,43 @@ class MeetingStore {
       }
       this.unsubscribeEvents = null;
     }
+    for (const unsubscribe of this.taskInspectorSubscriptions.values()) {
+      try { unsubscribe(); } catch { /* one broken task subscription is isolated */ }
+    }
+    this.taskInspectorSubscriptions.clear();
+    this.taskInspectorProjections.clear();
+    this.taskInspectorGenerations.clear();
     // C2: the announce retry timer holds a window.setTimeout handle; without
     // this a dispose() mid-retry leaks the timer (and would fire into a
     // torn-down store).
     this.announceQueue = [];
     this.clearAnnounceTimer();
     this.subscribed = false;
+  }
+
+  private taskInspectorKey(sessionId: string, taskId: string): string {
+    return `${sessionId}\u0000${taskId}`;
+  }
+
+  private notifyTaskInspectorListeners(): void {
+    for (const listener of this.taskInspectorListeners) {
+      try { listener(); } catch { /* one bad inspector listener is isolated */ }
+    }
+  }
+
+  private refreshTaskInspector(
+    sessionId: string,
+    taskId: string,
+    key: string,
+    generation: number,
+  ): Promise<
+    { ok: true; snapshot: RendererTaskSnapshot }
+    | { ok: false; error: string }
+  > {
+    if (this.taskInspectorGenerations.get(key) !== generation) {
+      return Promise.resolve({ ok: false, error: 'Task Inspector hydration was superseded' });
+    }
+    return this.openTaskInspector(sessionId, taskId);
   }
 
   private notify(slotId: string) {

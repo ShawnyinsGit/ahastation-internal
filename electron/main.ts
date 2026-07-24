@@ -332,6 +332,7 @@ async function registerAllIpc(ctx: IpcContext): Promise<void> {
     { registerDialogIpc },
     { registerAttachmentsIpc },
     { registerDocumentsIpc },
+    { registerTasksIpc },
     { registerTranscriptsIpc },
     { registerAccessibilityIpc },
     { registerSkillsIpc },
@@ -357,6 +358,7 @@ async function registerAllIpc(ctx: IpcContext): Promise<void> {
     import('./ipc/dialog.js'),
     import('./ipc/attachments.js'),
     import('./ipc/documents.js'),
+    import('./ipc/tasks.js'),
     import('./ipc/transcripts.js'),
     import('./ipc/accessibility.js'),
     import('./ipc/skills.js'),
@@ -383,6 +385,7 @@ async function registerAllIpc(ctx: IpcContext): Promise<void> {
   registerDialogIpc(ctx);
   registerAttachmentsIpc(ctx);
   registerDocumentsIpc(ctx);
+  registerTasksIpc(ctx);
   registerTranscriptsIpc(ctx);
   registerAccessibilityIpc();
   registerSkillsIpc();

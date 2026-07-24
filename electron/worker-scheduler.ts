@@ -392,6 +392,8 @@ export class WorkerScheduler {
     delivery?: DeliveryView;
     attempt?: number;
     summary?: string;
+    report?: WorkReport;
+    startedAt?: number;
   }> {
     return Array.from(this.workers.values()).map((handle) => ({
       id: handle.id,
@@ -430,6 +432,8 @@ export class WorkerScheduler {
         : undefined,
       attempt: handle.attempt,
       summary: handle.summary || undefined,
+      report: handle.report ? structuredClone(handle.report) : undefined,
+      startedAt: handle.startedAt,
     }));
   }
 
