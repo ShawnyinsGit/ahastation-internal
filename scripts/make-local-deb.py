@@ -71,7 +71,9 @@ def add_bytes(tf, arcname, data, mode=0o644, uid=0, gid=0):
 
 
 def build_data_tar(gz):
-    with tarfile.open(fileobj=gz, mode="w") as tf:
+    # GNU_FORMAT, not the Python ≥3.8 default PAX_FORMAT: dpkg 1.20 (Debian 11)
+    # rejects PAX 'x' extended headers ("corrupted filesystem tarfile").
+    with tarfile.open(fileobj=gz, mode="w", format=tarfile.GNU_FORMAT) as tf:
         # App payload -> /opt/AhaStation/
         for dirpath, dirnames, filenames in os.walk(UNPACKED):
             rel = os.path.relpath(dirpath, UNPACKED)
@@ -107,7 +109,7 @@ def build_data_tar(gz):
 
 def build_control_tar(installed_kb):
     buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+    with tarfile.open(fileobj=buf, mode="w:gz", format=tarfile.GNU_FORMAT) as tf:
         add_bytes(tf, "control", CONTROL_TMPL.format(version=VERSION, installed_kb=installed_kb).encode())
         add_bytes(tf, "postinst", POSTINST, mode=0o755)
     return buf.getvalue()

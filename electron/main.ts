@@ -1,6 +1,7 @@
 import { app, BrowserWindow, dialog, shell, nativeTheme, net, protocol, screen as electronScreen } from 'electron';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
+import { existsSync, writeFileSync } from 'node:fs';
 import type { AutoApproveScope } from './auto-approve-policy.js';
 import { SessionRegistry } from './sessions.js';
 import { flushSettingsWrites } from './store.js';
@@ -397,6 +398,36 @@ async function registerAllIpc(ctx: IpcContext): Promise<void> {
 }
 
 // ---- App lifecycle ----------------------------------------------------------
+
+// GPU crash fallback for no-GL environments (RK3588 without a working Mali
+// driver, RDP/VM software rendering): Chromium FATAL-exits the whole app
+// after 6 GPU-process crashes. Escape hatch — count crashes, and at the 3rd
+// one persist a marker in userData and relaunch; on the next launch the
+// marker applies app.disableHardwareAcceleration() BEFORE ready so Chromium
+// never spawns a real GPU process. Manual override: AHASTATION_DISABLE_GPU=1.
+// To re-enable GPU after a driver fix, delete the marker file.
+const GPU_CRASH_MARKER = join(app.getPath('userData'), '.gpu-disabled');
+const GPU_CRASH_LIMIT = 3;
+let gpuCrashCount = 0;
+
+if (process.env.AHASTATION_DISABLE_GPU === '1' || existsSync(GPU_CRASH_MARKER)) {
+  app.disableHardwareAcceleration();
+}
+
+app.on('child-process-gone', (_event, details) => {
+  if (details.type !== 'GPU' || details.reason === 'killed') return;
+  gpuCrashCount += 1;
+  if (gpuCrashCount === GPU_CRASH_LIMIT) {
+    console.error('[gpu] GPU process crashed 3 times — relaunching with hardware acceleration disabled');
+    try {
+      writeFileSync(GPU_CRASH_MARKER, String(Date.now()));
+    } catch (err) {
+      console.error('[gpu] failed to persist crash marker:', err);
+    }
+    app.relaunch();
+    app.exit(0);
+  }
+});
 
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 if (!hasSingleInstanceLock) {
