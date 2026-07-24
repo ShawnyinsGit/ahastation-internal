@@ -2,6 +2,7 @@
 
 Status: Accepted
 Date: 2026-07-24
+Amended: 2026-07-24 — defer user-base publication until final Meeting acceptance
 
 ## Context
 
@@ -25,8 +26,8 @@ current Meeting.
 One Claude Code Host is the first-release Coordinator. It owns planning,
 context selection, message routing, complete diff review, rework decisions,
 and reviewed-candidate approval. It cannot edit files or directly update the
-main branch. Only verified Integration Queue publication produces task
-acceptance.
+main branch. Only verified Integration Queue staging on the Meeting branch
+produces task acceptance.
 
 The existing `WorkerScheduler` remains the only execution owner. Backend
 Adapters compile a provider-neutral execution intent and run isolated task
@@ -44,13 +45,14 @@ A valid WorkReport is followed by deterministic verification and complete,
 chunked Coordinator diff review. The review is a durable session that survives
 incomplete Coordinator turns and restart. Passing candidates enter a
 serialized Integration Queue. The queue cherry-picks the exact reviewed commit
-onto a Meeting-owned integration branch, verifies the integrated state, and
-only then fast-forwards a clean, unchanged user base. Durable task acceptance
-releases dependent tasks.
+onto a Meeting-owned integration branch and verifies the accumulated state.
+Durable task acceptance on that branch releases dependent tasks; it does not
+advance the user's base.
 
-The user accepts one final Meeting delivery rather than every task. Rejecting
-that delivery creates a versioned rework plan; it does not implicitly reset or
-revert already integrated user work.
+The user accepts one final Meeting delivery rather than every task. That
+decision is the only publication gate for fast-forwarding a clean, unchanged
+user base to the exact verified integration head. Rejecting the delivery
+creates a versioned rework plan while the user's base remains unchanged.
 
 Plan and event schema migration is additive. Legacy task statuses and plan
 records remain replayable until every producer and consumer has migrated.
@@ -85,7 +87,14 @@ Directly fast-forwarding each task worktree works for one task but fails when
 parallel branches share a base. Directly cherry-picking into the user branch
 also exposes failed post-integration checks. Replaced with serialized
 exact-commit cherry-picks on a Meeting integration branch followed by verified
-fast-forward publication.
+fast-forward publication after final Meeting acceptance.
+
+### Per-task publication
+
+Publishing each accepted task would let downstream work branch from the user
+base, but it makes final Meeting acceptance a non-authoritative acknowledgement
+and requires destructive rollback semantics on rejection. Rejected. Dependent
+tasks instead branch from the durably accepted Meeting integration head.
 
 ### SQLite event store
 
@@ -104,6 +113,7 @@ Positive:
 - Removes per-task user acceptance friction.
 - Provides explicit recovery and non-convergence behavior.
 - Keeps failed post-integration candidates off the user's base branch.
+- Makes the user's final Meeting decision the actual publication boundary.
 
 Negative:
 
@@ -113,6 +123,8 @@ Negative:
 - Cherry-pick integration needs conflict and rollback handling.
 - A Meeting-owned integration worktree consumes additional local disk space.
 - Backend capability compilation requires per-version contract testing.
+- Downstream worktrees must branch from the Meeting integration head rather
+  than assuming the user's base has already advanced.
 
 ## Safety invariants
 
@@ -123,11 +135,15 @@ Negative:
 5. Goal, context, and plan text never grant permissions.
 6. High-risk operations require the user.
 7. Incomplete review coverage cannot accept a task.
-8. Only the Integration Queue writes the base branch.
-9. Post-integration checks complete before the user's base branch advances.
-10. Only durable post-integration acceptance releases dependencies.
-11. Final Meeting rejection creates explicit rework and never auto-rolls back.
-12. Recovery never auto-replays side effects.
+8. Per-task integration never writes the user's base branch.
+9. Only explicit final Meeting acceptance may publish the exact verified head.
+10. Post-integration checks complete before task acceptance and dependency
+    release.
+11. Final Meeting rejection leaves the user's base unchanged.
+12. Shared-locked dirty Git execution is compatibility-only, uses the legacy
+    delivery path, and cannot be mixed with or claim managed collaboration
+    acceptance.
+13. Recovery never auto-replays side effects.
 
 ## Rollback
 
