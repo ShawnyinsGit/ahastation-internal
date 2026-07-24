@@ -43,6 +43,14 @@ test('requested and effective profiles and delivery states remain visible', () =
   }
 });
 
+test('bounded rework budget and explicit user extension stay visible', () => {
+  const inspector = read('src/components/TaskInspector.tsx');
+  assert.match(inspector, /Bounded rework budget/);
+  assert.match(inspector, /budget-paused/);
+  assert.match(inspector, /增加一次返工额度/);
+  assert.match(inspector, /tasks\.extendBudget/);
+});
+
 test('Follow-up, Steering and Interrupt are distinct task controls', () => {
   const mailbox = read('src/components/TaskMailboxPanel.tsx');
   assert.match(mailbox, /> Follow-up</);

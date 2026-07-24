@@ -169,6 +169,13 @@ const api = {
       ipcRenderer.invoke('tasks:steer', { sessionId, taskId, text }),
     interrupt: (sessionId, taskId, reason) =>
       ipcRenderer.invoke('tasks:interrupt', { sessionId, taskId, reason }),
+    extendBudget: (sessionId, taskId, expectedPlanVersion, budget) =>
+      ipcRenderer.invoke('tasks:extend-budget', {
+        sessionId,
+        taskId,
+        expectedPlanVersion,
+        budget,
+      }),
     confirmReviewEvidence: (sessionId, taskId, reviewId, chunkId, chunkHash) =>
       ipcRenderer.invoke('tasks:confirm-review-evidence', {
         sessionId,

@@ -17,6 +17,7 @@ import type { WorkspaceBlockedDiagnostic } from './task-workspace.js';
 import type { DeliveryView } from './delivery-harness.js';
 import type { MeetingDelivery, FinalMeetingDecision } from './meeting-delivery.js';
 import type { WorkReport, WorkerEvent } from './worker-protocol.js';
+import type { TaskBudgetAttempt } from './task-budget.js';
 
 export type {
   BackendEffectiveProfile,
@@ -43,6 +44,7 @@ export type WorkerStatusKind =
   | 'integrating'
   | 'integration-conflict'
   | 'reworking'
+  | 'budget-paused'
   | 'accepted'
   | 'interrupted'
   | 'done'
@@ -72,6 +74,14 @@ export interface MeetingPlanNode {
   contextSelection?: PlanMeetingTask['contextSelection'];
   workspaceMode?: PlanMeetingTask['workspaceMode'];
   authorityRequest?: PlanMeetingTask['authorityRequest'];
+  budget?: PlanMeetingTask['budget'];
+  budgetState?: {
+    attempts: number;
+    totalTokens: number;
+    totalDurationMs: number;
+    stagnantAttempts: number;
+    reason?: string;
+  };
   workspaceDiagnostic?: WorkspaceBlockedDiagnostic;
 }
 
@@ -182,6 +192,9 @@ export interface WorkerHandle {
   contextSelection?: PlanMeetingTask['contextSelection'];
   workspaceMode?: PlanMeetingTask['workspaceMode'];
   authorityRequest?: PlanMeetingTask['authorityRequest'];
+  budget: NonNullable<PlanMeetingTask['budget']>;
+  budgetAttempts: TaskBudgetAttempt[];
+  budgetPauseReason?: string;
   contextPackage?: import('./task-collaboration.js').ContextPackage;
   contextPackageHash?: string;
   backendRuntime?: import('./backends/task-profile.js').BackendRuntime;

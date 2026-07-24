@@ -129,6 +129,7 @@ import {
   compileTaskAuthority,
   hashTaskAuthorityRequest,
 } from './task-authority.js';
+import { taskBudgetSchema, type TaskBudget } from './task-budget.js';
 
 export const MAX_HOSTS = 3;
 
@@ -339,7 +340,7 @@ export class Orchestrator implements OrchestratorBridge {
         await this.deliveryHarness.completeCoordinatorReview(session.deliveryId, session);
       },
       onReworkRequested: async (session) => {
-        await this.deliveryHarness.requestCoordinatorRework(session.deliveryId, session);
+        await this.meetingScheduler.requestCoordinatorRework(session.deliveryId, session);
       },
     });
     this.deliveryHarness = new DeliveryHarness({
@@ -1426,6 +1427,74 @@ export class Orchestrator implements OrchestratorBridge {
   async queueTaskFollowUp(taskId: string, message: string): Promise<{ id: string; status: string }> {
     const queued = await this.meetingScheduler.queueFollowUp(taskId, message);
     return { id: queued.id, status: queued.status };
+  }
+
+  async extendTaskBudget(
+    taskId: string,
+    expectedPlanVersion: number,
+    rawBudget: TaskBudget,
+  ): Promise<{ planVersion: number; budget: TaskBudget }> {
+    const budget = taskBudgetSchema.parse(rawBudget);
+    if (expectedPlanVersion !== this.meetingScheduler.getPlanVersion()) {
+      throw new Error(
+        `stale plan version: expected ${expectedPlanVersion}, current ${this.meetingScheduler.getPlanVersion()}`,
+      );
+    }
+    const task = this.meetingScheduler.snapshot().find((entry) => entry.id === taskId);
+    if (!task) throw new Error(`unknown task: ${taskId}`);
+    if (task.status !== 'budget-paused' || !task.budget) {
+      throw new Error(`task ${taskId} is not paused by its budget`);
+    }
+    const keys = [
+      'maxAttempts',
+      'maxTotalTokens',
+      'maxTotalDurationMs',
+      'maxStagnantAttempts',
+    ] as const;
+    if (keys.some((key) => budget[key] < task.budget![key])) {
+      throw new Error('a budget extension cannot reduce an approved limit');
+    }
+    if (keys.every((key) => budget[key] === task.budget![key])) {
+      throw new Error('a budget extension must increase at least one limit');
+    }
+    const decisionId = `budget-${randomUUID()}`;
+    await this.repository.appendTaskEvent('task-budget-extension-approved', {
+      schemaVersion: 1,
+      taskId,
+      attempt: task.attempt,
+      data: {
+        schemaVersion: 1,
+        decisionId,
+        expectedPlanVersion,
+        previousBudget: structuredClone(task.budget),
+        budget: structuredClone(budget),
+        authorityRequestHash: task.authorityRequest
+          ? hashTaskAuthorityRequest(task.authorityRequest)
+          : null,
+        decidedAt: Date.now(),
+      },
+    });
+    await this.repository.flush();
+    const result = await this.meetingScheduler.extendTaskBudget(
+      taskId,
+      expectedPlanVersion,
+      budget,
+      decisionId,
+    );
+    await this.repository.appendTaskEvent('task-budget-extension-applied', {
+      schemaVersion: 1,
+      taskId,
+      attempt: (task.attempt ?? 1) + 1,
+      data: {
+        schemaVersion: 1,
+        decisionId,
+        planVersion: result.planVersion,
+        budget: structuredClone(result.budget),
+      },
+    });
+    await this.snapshotActiveMeeting();
+    await this.repository.flush();
+    return result;
   }
 
   interruptWorker(workerId: string, reason?: string): Promise<{ ok: true } | { ok: false; error: string }> {

@@ -96,6 +96,20 @@ function createFixture() {
       lockKeys: ['C:/private/worktree/src'],
       managed: true,
     },
+    budget: {
+      schemaVersion: 1,
+      maxAttempts: 6,
+      maxTotalTokens: 600_000,
+      maxTotalDurationMs: 14_400_000,
+      maxStagnantAttempts: 3,
+    },
+    budgetState: {
+      attempts: 3,
+      totalTokens: 300_000,
+      totalDurationMs: 30_000,
+      stagnantAttempts: 3,
+      reason: 'non-converging',
+    },
   };
   const orchestrator = {
     async getTaskInspectorSource(taskId) {
@@ -133,6 +147,10 @@ function createFixture() {
     async interruptWorker(taskId, reason) {
       calls.push(['interrupt', taskId, reason]);
       return { ok: true };
+    },
+    async extendTaskBudget(taskId, expectedPlanVersion, budget) {
+      calls.push(['extend-budget', taskId, expectedPlanVersion, budget]);
+      return { planVersion: expectedPlanVersion + 1, budget };
     },
     inspectDeliveryReview(reviewId) {
       calls.push(['inspect-review', reviewId]);
@@ -195,6 +213,7 @@ test('task snapshot is bounded and hides authority internals', async () => {
   assert.equal(result.value.mailbox.length, 1);
   assert.equal(result.value.attempts[0].attempt, 1);
   assert.equal(result.value.lastSeq, 8);
+  assert.equal(result.value.task.budgetState.reason, 'non-converging');
   assert.deepEqual(result.value.task.authority, {
     allowedToolKinds: ['read', 'execute'],
     writePathCount: 1,
@@ -468,15 +487,39 @@ test('task action IPC stays task-scoped and bounded', async () => {
     taskId: 'task-a',
     reason: 'pause',
   }), { ok: true });
+  const budget = {
+    schemaVersion: 1,
+    maxAttempts: 7,
+    maxTotalTokens: 800_000,
+    maxTotalDurationMs: 16_200_000,
+    maxStagnantAttempts: 4,
+  };
+  assert.deepEqual(await service.extendBudget({
+    sessionId: 'session-a',
+    taskId: 'task-a',
+    expectedPlanVersion: 4,
+    budget,
+  }), {
+    ok: true,
+    planVersion: 5,
+    budget,
+  });
   assert.deepEqual(calls, [
     ['follow-up', 'task-a', 'continue'],
     ['steer', 'task-a', 'change direction'],
     ['interrupt', 'task-a', 'pause'],
+    ['extend-budget', 'task-a', 4, budget],
   ]);
   assert.equal((await service.followUp({
     sessionId: 'session-a',
     taskId: 'task-a',
     text: 'x'.repeat(100_001),
+  })).ok, false);
+  assert.equal((await service.extendBudget({
+    sessionId: 'session-a',
+    taskId: 'task-a',
+    expectedPlanVersion: -1,
+    budget,
   })).ok, false);
 });
 

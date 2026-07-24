@@ -4,6 +4,7 @@ import { ipcMain, type WebContents } from 'electron';
 import { redactSecrets } from '../format-error.js';
 import type { PersistedMeetingEvent, PersistedTaskEventEnvelope } from '../meeting-repository.js';
 import { taskMessageSchema, type TaskMessage } from '../task-collaboration.js';
+import { taskBudgetSchema } from '../task-budget.js';
 import type { IpcContext } from './context.js';
 
 const ACTOR_ID_RE = /^[a-zA-Z0-9._-]{1,128}$/;
@@ -68,6 +69,20 @@ export interface RendererTaskSnapshot {
       diagnostic?: string;
     };
     acceptanceCriteria?: unknown[];
+    budget?: {
+      schemaVersion: 1;
+      maxAttempts: number;
+      maxTotalTokens: number;
+      maxTotalDurationMs: number;
+      maxStagnantAttempts: number;
+    };
+    budgetState?: {
+      attempts: number;
+      totalTokens: number;
+      totalDurationMs: number;
+      stagnantAttempts: number;
+      reason?: string;
+    };
   };
   mailbox: TaskMessage[];
   mailboxTruncated: boolean;
@@ -403,6 +418,8 @@ function safeTaskSnapshot(raw: Record<string, unknown>): RendererTaskSnapshot['t
   const context = objectValue(raw.contextPackage);
   const authority = objectValue(raw.authorityGrant);
   const workspace = objectValue(raw.workspace);
+  const parsedBudget = taskBudgetSchema.safeParse(raw.budget);
+  const budgetState = objectValue(raw.budgetState);
   return {
     id: String(raw.id ?? ''),
     title: safeText(raw.title, 1_000) ?? '',
@@ -456,6 +473,20 @@ function safeTaskSnapshot(raw: Record<string, unknown>): RendererTaskSnapshot['t
     ...(Array.isArray(raw.acceptanceCriteria)
       ? { acceptanceCriteria: redactRendererValue(raw.acceptanceCriteria) as unknown[] }
       : {}),
+    ...(parsedBudget.success ? { budget: parsedBudget.data } : {}),
+    ...(raw.budgetState ? {
+      budgetState: {
+        attempts: typeof budgetState.attempts === 'number' ? budgetState.attempts : 0,
+        totalTokens: typeof budgetState.totalTokens === 'number' ? budgetState.totalTokens : 0,
+        totalDurationMs: typeof budgetState.totalDurationMs === 'number'
+          ? budgetState.totalDurationMs
+          : 0,
+        stagnantAttempts: typeof budgetState.stagnantAttempts === 'number'
+          ? budgetState.stagnantAttempts
+          : 0,
+        ...(safeText(budgetState.reason, 200) ? { reason: safeText(budgetState.reason, 200) } : {}),
+      },
+    } : {}),
   };
 }
 
@@ -766,6 +797,37 @@ export class TaskIpcService {
     }
   }
 
+  async extendBudget(payload: unknown): Promise<unknown> {
+    const request = parseRequest(payload);
+    const value = objectValue(payload);
+    const budget = taskBudgetSchema.safeParse(value.budget);
+    if (
+      !request
+      || !Number.isSafeInteger(value.expectedPlanVersion)
+      || (value.expectedPlanVersion as number) < 0
+      || !budget.success
+    ) {
+      return { ok: false, error: 'Invalid task budget extension request' };
+    }
+    const slot = this.ctx.registry.get(request.sessionId);
+    if (!slot) return { ok: false, error: 'Session not found' };
+    try {
+      const result = await slot.orchestrator.extendTaskBudget(
+        request.taskId,
+        value.expectedPlanVersion as number,
+        budget.data,
+      );
+      return { ok: true, ...result };
+    } catch (error) {
+      return {
+        ok: false,
+        error: error instanceof Error
+          ? redactSecrets(error.message)
+          : 'Failed to extend task budget',
+      };
+    }
+  }
+
   async confirmReviewEvidence(payload: unknown): Promise<unknown> {
     const request = parseRequest(payload);
     const value = objectValue(payload);
@@ -826,6 +888,7 @@ export function registerTasksIpc(ctx: IpcContext): void {
   ipcMain.handle('tasks:follow-up', (_event, payload) => service.followUp(payload));
   ipcMain.handle('tasks:steer', (_event, payload) => service.steer(payload));
   ipcMain.handle('tasks:interrupt', (_event, payload) => service.interrupt(payload));
+  ipcMain.handle('tasks:extend-budget', (_event, payload) => service.extendBudget(payload));
   ipcMain.handle(
     'tasks:confirm-review-evidence',
     (_event, payload) => service.confirmReviewEvidence(payload),

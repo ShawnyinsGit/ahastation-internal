@@ -486,6 +486,22 @@ function installFixture(fixture: string): void {
       followUp: ok,
       steer: async () => ({ ok: true, queued: true }),
       interrupt: ok,
+      extendBudget: async (
+        _sessionId: string,
+        _taskId: string,
+        expectedPlanVersion: number,
+        budget: {
+          schemaVersion: 1;
+          maxAttempts: number;
+          maxTotalTokens: number;
+          maxTotalDurationMs: number;
+          maxStagnantAttempts: number;
+        },
+      ) => ({
+        ok: true,
+        planVersion: expectedPlanVersion + 1,
+        budget,
+      }),
       confirmReviewEvidence: ok,
     },
     auth: {

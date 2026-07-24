@@ -53,6 +53,13 @@ export function normalizePlanDraft(
       maxCommandTimeoutMs: 1_800_000,
       networkHosts: [],
     },
+    budget: task.budget ? { ...task.budget } : {
+      schemaVersion: 1,
+      maxAttempts: 6,
+      maxTotalTokens: 600_000,
+      maxTotalDurationMs: 14_400_000,
+      maxStagnantAttempts: 3,
+    },
   };
 }
 
@@ -98,6 +105,16 @@ export function validatePlanDraft(
       return `任务 ${task.id} 的上下文配置不一致。`;
     }
     if (!task.workspaceMode || !task.authorityRequest) return `任务 ${task.id} 缺少 Workspace 或授权配置。`;
+    if (
+      !task.budget
+      || task.budget.maxAttempts < 1
+      || task.budget.maxTotalTokens < task.executionProfile.maxTokenBudget
+      || task.budget.maxTotalDurationMs < task.executionProfile.timeoutMs
+      || task.budget.maxStagnantAttempts < 1
+      || task.budget.maxStagnantAttempts > task.budget.maxAttempts
+    ) {
+      return `任务 ${task.id} 的持续返工预算无效。`;
+    }
     if (
       task.workspaceMode === 'read-only'
       && (task.authorityRequest.writePaths.length > 0 || task.authorityRequest.toolKinds.includes('write'))

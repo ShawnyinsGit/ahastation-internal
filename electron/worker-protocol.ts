@@ -39,6 +39,20 @@ export const workReportSchema = z.object({
 
 export type WorkReport = z.infer<typeof workReportSchema>;
 
+export const reworkRequestSchema = z.object({
+  schemaVersion: z.literal(1),
+  findings: z.array(z.string().trim().min(1).max(4_000)).min(1).max(100),
+  affectedChunks: z.array(z.object({
+    chunkId: z.string().trim().min(1).max(500),
+    path: relativeWorkspacePathSchema,
+  }).strict()).max(1_000),
+  failedChecks: z.array(z.string().trim().min(1).max(4_000)).max(1_000),
+  expectedBehavior: z.array(z.string().trim().min(1).max(4_000)).min(1).max(1_000),
+  authorityGrantHash: z.string().regex(/^[0-9a-f]{64}$/u),
+}).strict();
+
+export type ReworkRequest = z.infer<typeof reworkRequestSchema>;
+
 export const workerAdapterSignalSchema = z.discriminatedUnion('kind', [
   z.object({
     kind: z.literal('progress'),

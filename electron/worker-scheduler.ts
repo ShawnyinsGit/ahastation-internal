@@ -85,7 +85,9 @@ import {
 import type { DeliveryHarness, DeliveryView } from './delivery-harness.js';
 import {
   parseWorkerAdapterSignal,
+  reworkRequestSchema,
   type AcceptanceCriterion,
+  type ReworkRequest,
   type WorkReport,
   type WorkerAdapterSignal,
   type WorkerEvent,
@@ -101,6 +103,15 @@ import type {
   WorkerStatusKind,
 } from './orchestrator-types.js';
 import { decideTaskPermission } from './permission-broker.js';
+import {
+  buildFailureFingerprint,
+  DEFAULT_TASK_BUDGET,
+  evaluateTaskBudget,
+  taskBudgetSchema,
+  type TaskBudget,
+  type TaskBudgetAttempt,
+} from './task-budget.js';
+import type { CoordinatorReviewSession } from './coordinator-review.js';
 
 export type SessionFactory = (
   opts: ConstructorParameters<typeof ClaudeSession>[0],
@@ -274,6 +285,77 @@ function boundedTaskText(
   return normalized;
 }
 
+function extractFailedVerificationChecks(checks: unknown[] | undefined): string[] {
+  if (!checks) return [];
+  return checks.flatMap((check) => {
+    if (typeof check === 'string') return [check];
+    if (!check || typeof check !== 'object') return [];
+    const record = check as Record<string, unknown>;
+    const passed = record.passed === true || record.status === 'passed';
+    if (passed) return [];
+    return [
+      String(
+        record.summary
+        ?? record.description
+        ?? record.command
+        ?? record.status
+        ?? 'verification failed',
+      ).slice(0, 4_000),
+    ];
+  });
+}
+
+function renderReworkRequest(request: ReworkRequest): string {
+  const chunks = request.affectedChunks.length > 0
+    ? request.affectedChunks.map((chunk) => `- ${chunk.path} (${chunk.chunkId})`).join('\n')
+    : '- No specific file chunk was identified; inspect the verified diff.';
+  const checks = request.failedChecks.length > 0
+    ? request.failedChecks.map((check) => `- ${check}`).join('\n')
+    : '- Re-run every approved acceptance check.';
+  return [
+    'Coordinator rework request (fresh immutable attempt).',
+    '',
+    'Findings:',
+    ...request.findings.map((finding) => `- ${finding}`),
+    '',
+    'Affected chunks:',
+    chunks,
+    '',
+    'Failed checks:',
+    checks,
+    '',
+    'Expected behavior:',
+    ...request.expectedBehavior.map((item) => `- ${item}`),
+    '',
+    `Authority request hash (unchanged): ${request.authorityGrantHash}`,
+    'Do not widen paths, commands, network access, environment access, or tool kinds.',
+  ].join('\n');
+}
+
+function budgetStateFor(handle: WorkerHandle): NonNullable<MeetingPlanNode['budgetState']> {
+  let totalTokens = 0;
+  let totalDurationMs = 0;
+  for (const attempt of handle.budgetAttempts) {
+    totalTokens += attempt.tokenCost ?? attempt.reservedTokenCost ?? 0;
+    totalDurationMs += attempt.durationMs;
+  }
+  let stagnantAttempts = 0;
+  let fingerprint: string | null = null;
+  for (const attempt of [...handle.budgetAttempts].reverse()) {
+    if (!attempt.failureFingerprint) break;
+    fingerprint ??= attempt.failureFingerprint;
+    if (attempt.failureFingerprint !== fingerprint) break;
+    stagnantAttempts += 1;
+  }
+  return {
+    attempts: handle.budgetAttempts.length,
+    totalTokens,
+    totalDurationMs,
+    stagnantAttempts,
+    ...(handle.budgetPauseReason ? { reason: handle.budgetPauseReason } : {}),
+  };
+}
+
 class TaskProfileCompilationError extends Error {
   constructor(message: string, options?: ErrorOptions) {
     super(message, options);
@@ -297,6 +379,7 @@ export class WorkerScheduler {
   private readonly steeringMessageByWorker = new Map<string, string>();
   private readonly pendingMailboxAckByWorker = new Map<string, string>();
   private readonly mailboxAckInFlightByWorker = new Map<string, Promise<void>>();
+  private readonly automaticReworkByAttempt = new Map<string, Promise<void>>();
 
   constructor(opts: WorkerSchedulerOpts) {
     this.opts = opts;
@@ -378,6 +461,10 @@ export class WorkerScheduler {
     contextSelection?: PlanMeetingTask['contextSelection'];
     workspaceMode?: PlanMeetingTask['workspaceMode'];
     authorityRequest?: PlanMeetingTask['authorityRequest'];
+    budget?: TaskBudget;
+    budgetAttempts?: TaskBudgetAttempt[];
+    budgetPauseReason?: string;
+    budgetState?: NonNullable<MeetingPlanNode['budgetState']>;
     contextPackage?: ContextPackage;
     contextPackageHash?: string;
     backendRuntime?: BackendRuntime;
@@ -410,6 +497,10 @@ export class WorkerScheduler {
       contextSelection: handle.contextSelection ? structuredClone(handle.contextSelection) : undefined,
       workspaceMode: handle.workspaceMode,
       authorityRequest: handle.authorityRequest ? structuredClone(handle.authorityRequest) : undefined,
+      budget: structuredClone(handle.budget),
+      budgetAttempts: structuredClone(handle.budgetAttempts),
+      budgetPauseReason: handle.budgetPauseReason,
+      budgetState: budgetStateFor(handle),
       contextPackage: handle.contextPackage ? structuredClone(handle.contextPackage) : undefined,
       contextPackageHash: handle.contextPackageHash,
       backendRuntime: handle.backendRuntime ? structuredClone(handle.backendRuntime) : undefined,
@@ -494,6 +585,7 @@ export class WorkerScheduler {
         authorityRequest: original.authorityRequest
           ? structuredClone(original.authorityRequest)
           : undefined,
+        budget: structuredClone(original.budget),
         approvalDecisionId: original.approvalDecisionId,
         approvalRecordedAt: original.approvalRecordedAt,
         approvedPlanVersion: nextPlanVersion,
@@ -551,6 +643,7 @@ export class WorkerScheduler {
           contextSelection: task.contextSelection,
           workspaceMode: task.workspaceMode,
           authorityRequest: task.authorityRequest,
+          budget: task.budget,
           acceptanceCriteria: task.acceptanceCriteria,
           requiresDecision: task.requiresDecision,
         }], this.opts.defaultBackendId ?? 'claude-code').tasks[0];
@@ -573,6 +666,7 @@ export class WorkerScheduler {
         contextSelection: normalized.contextSelection,
         workspaceMode: normalized.workspaceMode,
         authorityRequest: normalized.authorityRequest,
+        budget: normalized.budget,
         approvalDecisionId: typeof task.approvalDecisionId === 'string'
           ? task.approvalDecisionId
           : undefined,
@@ -626,9 +720,20 @@ export class WorkerScheduler {
       }
       const rawStatus = typeof task.status === 'string' ? task.status : 'interrupted';
       handle.status = (
-        rawStatus === 'accepted' || rawStatus === 'failed' || rawStatus === 'done'
+        rawStatus === 'accepted'
+        || rawStatus === 'failed'
+        || rawStatus === 'done'
+        || rawStatus === 'budget-paused'
       ) ? rawStatus : 'interrupted';
       handle.summary = typeof task.summary === 'string' ? task.summary : '';
+      if (Array.isArray(task.budgetAttempts)) {
+        handle.budgetAttempts = task.budgetAttempts
+          .filter((entry): entry is TaskBudgetAttempt => Boolean(entry && typeof entry === 'object'))
+          .map((entry) => structuredClone(entry));
+      }
+      handle.budgetPauseReason = typeof task.budgetPauseReason === 'string'
+        ? task.budgetPauseReason
+        : undefined;
       handle.attempt = typeof task.attempt === 'number' && Number.isSafeInteger(task.attempt)
         ? Math.max(1, task.attempt)
         : 1;
@@ -875,6 +980,7 @@ export class WorkerScheduler {
         contextSelection: task.contextSelection,
         workspaceMode: task.workspaceMode,
         authorityRequest: task.authorityRequest,
+        budget: task.budget,
         approvalDecisionId: approval?.decisionId,
         approvalRecordedAt: approval?.approvedAt,
         approvedPlanVersion: this.planVersion + 1,
@@ -911,6 +1017,7 @@ export class WorkerScheduler {
         contextSelection: handle.contextSelection ? structuredClone(handle.contextSelection) : undefined,
         workspaceMode: handle.workspaceMode,
         authorityRequest: handle.authorityRequest ? structuredClone(handle.authorityRequest) : undefined,
+        budget: structuredClone(handle.budget),
         acceptanceCriteria: handle.acceptanceCriteria
           ? structuredClone(handle.acceptanceCriteria)
           : undefined,
@@ -999,6 +1106,9 @@ export class WorkerScheduler {
                 writePaths: [...operation.authorityRequest.writePaths],
               }
             : {}),
+          ...(operation.budget !== undefined
+            ? { budget: structuredClone(operation.budget) }
+            : {}),
         });
         continue;
       }
@@ -1054,6 +1164,7 @@ export class WorkerScheduler {
           contextSelection: operation.task.contextSelection,
           workspaceMode: operation.task.workspaceMode,
           authorityRequest: operation.task.authorityRequest,
+          budget: operation.task.budget,
           acceptanceCriteria: operation.task.acceptanceCriteria,
         });
       } else if (operation.kind === 'cancel-pending-task') {
@@ -1077,6 +1188,9 @@ export class WorkerScheduler {
           handle.authorityRequest = structuredClone(operation.authorityRequest);
           handle.writePaths = [...operation.authorityRequest.writePaths];
         }
+        if (operation.budget !== undefined) {
+          handle.budget = structuredClone(operation.budget);
+        }
       }
     }
 
@@ -1089,6 +1203,9 @@ export class WorkerScheduler {
   async queueFollowUp(taskId: string, text: string): Promise<TaskMessage> {
     const handle = this.workers.get(taskId);
     if (!handle) throw new Error(`unknown task: ${taskId}`);
+    if (handle.status === 'budget-paused') {
+      throw new Error('task rework is budget-paused and requires an explicit user budget decision');
+    }
     const normalized = boundedTaskText(text, 'follow-up message');
     const freshAttempt = this.requiresFreshAttempt(handle.status);
     const message = await this.requireTaskMailbox().enqueue({
@@ -1108,6 +1225,9 @@ export class WorkerScheduler {
   async sendTaskMessage(taskId: string, text: string): Promise<TaskMessage> {
     const handle = this.workers.get(taskId);
     if (!handle) throw new Error(`unknown task: ${taskId}`);
+    if (handle.status === 'budget-paused') {
+      throw new Error('task rework is budget-paused and requires an explicit user budget decision');
+    }
     const normalized = boundedTaskText(text, 'task message');
     const freshAttempt = this.requiresFreshAttempt(handle.status);
     const message = await this.requireTaskMailbox().enqueue({
@@ -1227,6 +1347,9 @@ export class WorkerScheduler {
     }
     const target = this.workers.get(toTaskId);
     if (!target) throw new Error(`unknown task: ${toTaskId}`);
+    if (target.status === 'budget-paused') {
+      throw new Error('target task is budget-paused and requires an explicit user budget decision');
+    }
     const text = this.messageText(source);
     const freshAttempt = this.requiresFreshAttempt(target.status);
     const forwarded = await mailbox.enqueue({
@@ -1721,7 +1844,12 @@ export class WorkerScheduler {
     const view = await this.opts.deliveryHarness.submitExternalReport(handle.deliveryId, signal.report);
     handle.attempt = view.attempt;
     this.applyDeliveryView(handle, view);
+    if (view.status === 'reworking') {
+      await this.scheduleAutomaticRework(handle, view);
+      return;
+    }
     if (view.status === 'awaiting-delivery-acceptance') {
+      this.recordSuccessfulBudgetAttempt(handle, view.attempt);
       await this.emitDeliveryCandidate(handle, view);
       const report = view.candidate?.report;
       this.emitCoordinatorBriefing({
@@ -1756,7 +1884,9 @@ export class WorkerScheduler {
       cancelled: 'failed',
     };
     const next = mapped[view.status];
-    if (next) handle.status = next;
+    if (next && !(handle.status === 'budget-paused' && view.status === 'reworking')) {
+      handle.status = next;
+    }
     this.opts.emit({
       source: 'talker',
       event: {
@@ -1885,24 +2015,250 @@ export class WorkerScheduler {
     handle.report = null;
     handle.transportEnded = false;
     this.applyDeliveryView(handle, view);
-    handle.authorityGrant = undefined;
-    // Rework is also journal-first: do not send a new side-effecting turn
-    // until recovery can observe the new attempt state.
+    await this.scheduleAutomaticRework(handle, view, {
+      findings: [feedback],
+    });
+    return view;
+  }
+
+  async extendTaskBudget(
+    taskId: string,
+    expectedPlanVersion: number,
+    rawBudget: TaskBudget,
+    decisionId: string,
+  ): Promise<{ planVersion: number; budget: TaskBudget }> {
+    if (expectedPlanVersion !== this.planVersion) {
+      throw new Error(
+        `stale plan version: expected ${expectedPlanVersion}, current ${this.planVersion}`,
+      );
+    }
+    if (!decisionId.trim()) throw new Error('budget extension decision id is required');
+    const handle = this.workers.get(taskId);
+    if (!handle) throw new Error(`unknown task: ${taskId}`);
+    if (handle.status !== 'budget-paused') {
+      throw new Error(`task ${taskId} is not paused by its budget`);
+    }
+    const budget = taskBudgetSchema.parse(rawBudget);
+    const previous = handle.budget;
+    const keys = [
+      'maxAttempts',
+      'maxTotalTokens',
+      'maxTotalDurationMs',
+      'maxStagnantAttempts',
+    ] as const;
+    if (keys.some((key) => budget[key] < previous[key])) {
+      throw new Error('a budget extension cannot reduce an approved limit');
+    }
+    if (keys.every((key) => budget[key] === previous[key])) {
+      throw new Error('a budget extension must increase at least one limit');
+    }
+    const view = handle.deliveryId
+      ? this.opts.deliveryHarness?.snapshot(handle.deliveryId)
+      : undefined;
+    if (!view || view.status !== 'reworking') {
+      throw new Error('paused task has no recoverable rework delivery');
+    }
+    handle.budget = structuredClone(budget);
+    handle.budgetPauseReason = undefined;
+    this.planVersion += 1;
+    this.emitPlanUpdate();
     await this.opts.flushEvents?.();
-    // An authority grant is attempt-bound. Rework therefore starts a fresh
-    // Backend session instead of reusing a tool-capable session that was
-    // created under the previous attempt's grant.
-    handle.session?.end();
+    await this.scheduleAutomaticRework(handle, view, {
+      findings: [
+        `User decision ${decisionId} extended the bounded rework budget; continue addressing the existing findings.`,
+      ],
+    });
+    return {
+      planVersion: this.planVersion,
+      budget: structuredClone(handle.budget),
+    };
+  }
+
+  /** Coordinator review failures use the same durable budget gate as
+   * deterministic verification failures. */
+  async requestCoordinatorRework(
+    deliveryId: string,
+    session: CoordinatorReviewSession,
+  ): Promise<DeliveryView> {
+    if (!this.opts.deliveryHarness) throw new Error('DeliveryHarness is unavailable');
+    const handle = Array.from(this.workers.values()).find((item) => item.deliveryId === deliveryId);
+    if (!handle) throw new Error(`delivery worker not found: ${deliveryId}`);
+    const view = await this.opts.deliveryHarness.requestCoordinatorRework(deliveryId, session);
+    this.applyDeliveryView(handle, view);
+    await this.scheduleAutomaticRework(handle, view, {
+      findings: session.rework?.findings.map((finding) => finding.message),
+      affectedChunks: session.rework?.findings
+        .filter((finding) => finding.path)
+        .map((finding, index) => ({
+          chunkId: `review-finding-${index + 1}`,
+          path: finding.path!,
+        })),
+    });
+    return view;
+  }
+
+  private async scheduleAutomaticRework(
+    handle: WorkerHandle,
+    view: DeliveryView,
+    overrides: {
+      findings?: string[];
+      affectedChunks?: ReworkRequest['affectedChunks'];
+    } = {},
+  ): Promise<void> {
+    if (view.status !== 'reworking') return;
+    const key = `${view.id}:${view.attempt}`;
+    const existing = this.automaticReworkByAttempt.get(key);
+    if (existing) return existing;
+    const run = this.runAutomaticRework(handle, view, overrides)
+      .finally(() => this.automaticReworkByAttempt.delete(key));
+    this.automaticReworkByAttempt.set(key, run);
+    return run;
+  }
+
+  private async runAutomaticRework(
+    handle: WorkerHandle,
+    view: DeliveryView,
+    overrides: {
+      findings?: string[];
+      affectedChunks?: ReworkRequest['affectedChunks'];
+    },
+  ): Promise<void> {
+    const deliveryAttempt = view.attempts.find((attempt) => attempt.attempt === view.attempt);
+    if (!deliveryAttempt) throw new Error(`delivery attempt ${view.attempt} is missing`);
+    const failedChecks = [
+      ...deliveryAttempt.report.tests
+        .filter((test) => test.status !== 'passed')
+        .map((test) => `${test.command}: ${test.summary ?? test.status}`),
+      ...extractFailedVerificationChecks(deliveryAttempt.verification?.checks),
+    ];
+    const findings = overrides.findings?.filter(Boolean)
+      ?? [
+        view.error,
+        deliveryAttempt.feedback,
+        ...deliveryAttempt.report.unresolved
+          .filter((item) => item.blocking)
+          .map((item) => item.message),
+      ].filter((item): item is string => Boolean(item));
+    const effectiveFindings = findings.length > 0
+      ? findings
+      : ['Delivery did not satisfy the approved acceptance criteria.'];
+    const relevantFiles = deliveryAttempt.report.files.map((file) => file.path);
+    const evidenceHash = hashVisibleContextValue({
+      report: deliveryAttempt.report,
+      verification: deliveryAttempt.verification ?? null,
+      review: deliveryAttempt.review ?? null,
+    });
+    if (!handle.budgetAttempts.some((attempt) => attempt.attempt === view.attempt)) {
+      handle.budgetAttempts.push({
+        attempt: view.attempt,
+        tokenCost: null,
+        reservedTokenCost: Math.max(
+          1,
+          handle.executionProfile?.maxTokenBudget
+            ?? Math.min(DEFAULT_TASK_BUDGET.maxTotalTokens, 200_000),
+        ),
+        durationMs: Math.max(0, Date.now() - handle.startedAt),
+        failureFingerprint: buildFailureFingerprint({
+          error: effectiveFindings.join('\n'),
+          failingChecks: failedChecks,
+          relevantFiles,
+          evidenceHash,
+        }),
+      });
+    }
+    const evaluation = evaluateTaskBudget(handle.budget, handle.budgetAttempts);
+    if (evaluation !== 'continue') {
+      handle.backendSession = handle.session?.snapshot?.() ?? handle.backendSession;
+      const previousSession = handle.session;
+      handle.session = null;
+      handle.status = 'budget-paused';
+      previousSession?.end();
+      handle.budgetPauseReason = evaluation;
+      handle.summary = evaluation === 'non-converging'
+        ? 'Equivalent failures repeated without meaningful progress.'
+        : 'The approved task rework budget is exhausted.';
+      this.applyDeliveryView(handle, view);
+      handle.status = 'budget-paused';
+      this.emitPlanUpdate();
+      this.emitCoordinatorBriefing({
+        kind: 'failed',
+        title: `${handle.title} 已暂停返工`,
+        summary: handle.summary,
+        blockers: [evaluation],
+        recommendedAction: 'request-user-decision',
+        workerId: handle.id,
+        taskId: handle.currentTaskId,
+      });
+      await this.opts.flushEvents?.();
+      return;
+    }
+
+    const authorityGrantHash = hashVisibleContextValue(handle.authorityRequest ?? {});
+    const request = reworkRequestSchema.parse({
+      schemaVersion: 1,
+      findings: effectiveFindings,
+      affectedChunks: overrides.affectedChunks ?? relevantFiles.map((path, index) => ({
+        chunkId: `reported-file-${index + 1}`,
+        path,
+      })),
+      failedChecks,
+      expectedBehavior: handle.acceptanceCriteria?.length
+        ? handle.acceptanceCriteria.map((criterion) => criterion.description)
+        : ['The delivered result satisfies the approved task objective and verification checks.'],
+      authorityGrantHash,
+    });
+    const nextAttempt = view.attempt + 1;
+    const text = renderReworkRequest(request);
+    await this.requireTaskMailbox().enqueue({
+      taskId: handle.id,
+      attempt: nextAttempt,
+      sender: 'coordinator',
+      kind: 'instruction',
+      payload: {
+        text,
+        rework: request,
+      },
+    });
+    // The mailbox event and current reworking projection are durable before
+    // the next side-effecting Backend attempt begins.
+    await this.opts.flushEvents?.();
+    handle.backendSession = undefined;
+    const previousSession = handle.session;
     handle.session = null;
+    handle.attempt = nextAttempt;
     handle.status = 'pending';
+    previousSession?.end();
+    handle.summary = '';
+    handle.report = null;
+    handle.transportEnded = false;
+    handle.emittedCandidateId = undefined;
+    handle.acceptedFinalized = false;
     handle.contextPackage = undefined;
     handle.contextPackageHash = undefined;
     handle.backendRuntime = undefined;
     handle.effectiveProfile = undefined;
     handle.authorityGrant = undefined;
+    handle.budgetPauseReason = undefined;
+    handle.startedAt = Date.now();
     this.emitPlanUpdate();
-    void this.spawnWorker(handle);
-    return view;
+    this.spawnReadyWorkers();
+  }
+
+  private recordSuccessfulBudgetAttempt(handle: WorkerHandle, attempt: number): void {
+    if (handle.budgetAttempts.some((entry) => entry.attempt === attempt)) return;
+    handle.budgetAttempts.push({
+      attempt,
+      tokenCost: null,
+      reservedTokenCost: Math.max(
+        1,
+        handle.executionProfile?.maxTokenBudget
+          ?? Math.min(DEFAULT_TASK_BUDGET.maxTotalTokens, 200_000),
+      ),
+      durationMs: Math.max(0, Date.now() - handle.startedAt),
+      failureFingerprint: null,
+      succeeded: true,
+    });
+    this.emitPlanUpdate();
   }
 
   // ===========================================================================
@@ -2071,6 +2427,7 @@ export class WorkerScheduler {
     contextSelection?: PlanMeetingTask['contextSelection'];
     workspaceMode?: PlanMeetingTask['workspaceMode'];
     authorityRequest?: PlanMeetingTask['authorityRequest'];
+    budget?: TaskBudget;
     approvalDecisionId?: string;
     approvalRecordedAt?: number;
     approvedPlanVersion?: number;
@@ -2088,6 +2445,9 @@ export class WorkerScheduler {
       contextSelection: spec.contextSelection,
       workspaceMode: spec.workspaceMode,
       authorityRequest: spec.authorityRequest,
+      budget: structuredClone(spec.budget ?? DEFAULT_TASK_BUDGET),
+      budgetAttempts: [],
+      budgetPauseReason: undefined,
       authorityGrant: undefined,
       approvalDecisionId: spec.approvalDecisionId,
       approvalRecordedAt: spec.approvalRecordedAt,
@@ -2677,6 +3037,8 @@ export class WorkerScheduler {
       contextSelection: h.contextSelection ? structuredClone(h.contextSelection) : undefined,
       workspaceMode: h.workspaceMode,
       authorityRequest: h.authorityRequest ? structuredClone(h.authorityRequest) : undefined,
+      budget: structuredClone(h.budget),
+      budgetState: budgetStateFor(h),
       workspaceDiagnostic: h.workspaceDiagnostic
         ? structuredClone(h.workspaceDiagnostic)
         : undefined,

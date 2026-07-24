@@ -28,6 +28,7 @@ const LABEL: Record<WorkerStatus, string> = {
   integrating: '集成中',
   'integration-conflict': '集成冲突',
   reworking: '需要返工',
+  'budget-paused': '预算暂停',
   accepted: '已接受',
   interrupted: '已中断',
   done: '已完成',
@@ -44,6 +45,7 @@ const PROGRESS: Record<WorkerStatus, number> = {
   integrating: 94,
   'integration-conflict': 94,
   reworking: 48,
+  'budget-paused': 48,
   accepted: 100,
   interrupted: 45,
   done: 100,
@@ -55,6 +57,7 @@ function StatusIcon({ status, attention }: { status: WorkerStatus; attention: bo
   if (status === 'accepted' || status === 'done') return <CheckCircle2 size={14} />;
   if (status === 'failed' || status === 'integration-conflict') return <AlertTriangle size={14} />;
   if (status === 'reworking') return <RotateCcw size={14} />;
+  if (status === 'budget-paused') return <Clock3 size={14} />;
   if (
     status === 'reviewing'
     || status === 'awaiting-acceptance'

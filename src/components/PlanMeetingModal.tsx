@@ -33,6 +33,7 @@ function cloneTasks(tasks: PlanMeetingTaskInput[], backends: BackendInfo[]): Pla
       verification: { kind: 'manual' },
     }],
     executionProfile: task.executionProfile ? { ...task.executionProfile } : undefined,
+    budget: task.budget ? { ...task.budget } : undefined,
     contextSelection: task.contextSelection ? {
       ...task.contextSelection,
       messageIds: [...task.contextSelection.messageIds],
@@ -151,6 +152,7 @@ export function PlanMeetingModal({
             const profile = task.executionProfile!;
             const contextSelection = task.contextSelection!;
             const authority = task.authorityRequest!;
+            const budget = task.budget!;
             return (
               <article className="plan-task-card" key={`${task.id}:${taskIndex}`}>
                 <div className="plan-task-card-head">
@@ -253,6 +255,59 @@ export function PlanMeetingModal({
                       />
                     </label>
                   </div>
+                </fieldset>
+
+                <fieldset>
+                  <legend>持续返工预算</legend>
+                  <div className="plan-field-grid">
+                    <label>
+                      <span>最大尝试次数</span>
+                      <input
+                        type="number"
+                        min={1}
+                        max={100}
+                        value={budget.maxAttempts}
+                        onChange={(event) => patchTask(taskIndex, {
+                          budget: { ...budget, maxAttempts: Number(event.target.value) },
+                        })}
+                      />
+                    </label>
+                    <label>
+                      <span>总 Token 上限</span>
+                      <input
+                        type="number"
+                        min={profile.maxTokenBudget}
+                        value={budget.maxTotalTokens}
+                        onChange={(event) => patchTask(taskIndex, {
+                          budget: { ...budget, maxTotalTokens: Number(event.target.value) },
+                        })}
+                      />
+                    </label>
+                    <label>
+                      <span>总时长上限（毫秒）</span>
+                      <input
+                        type="number"
+                        min={profile.timeoutMs}
+                        value={budget.maxTotalDurationMs}
+                        onChange={(event) => patchTask(taskIndex, {
+                          budget: { ...budget, maxTotalDurationMs: Number(event.target.value) },
+                        })}
+                      />
+                    </label>
+                    <label>
+                      <span>停滞尝试上限</span>
+                      <input
+                        type="number"
+                        min={1}
+                        max={budget.maxAttempts}
+                        value={budget.maxStagnantAttempts}
+                        onChange={(event) => patchTask(taskIndex, {
+                          budget: { ...budget, maxStagnantAttempts: Number(event.target.value) },
+                        })}
+                      />
+                    </label>
+                  </div>
+                  <small>达到任一上限会暂停任务；只有用户批准新版本预算后才会继续。</small>
                 </fieldset>
 
                 <fieldset>

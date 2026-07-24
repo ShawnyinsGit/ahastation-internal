@@ -5,6 +5,7 @@
 import { z } from 'zod';
 import { acceptanceCriterionSchema, workReportSchema } from './worker-protocol.js';
 import { taskExecutionProfileSchema } from './task-collaboration.js';
+import { DEFAULT_TASK_BUDGET, taskBudgetSchema } from './task-budget.js';
 
 export const MEETING_TOOLS = {
   DELEGATE: 'delegate_task',
@@ -67,6 +68,8 @@ const planMeetingTaskBaseShape = {
     .describe('User-approved verification criteria. Legacy tasks without criteria receive one explicit manual criterion.'),
   requiresDecision: z.boolean().optional()
     .describe('Whether the Coordinator expects this task may need a user decision before completion.'),
+  budget: taskBudgetSchema.optional()
+    .describe('User-visible aggregate attempt, token, duration and stagnation limits.'),
 };
 
 /** Boundary-only compatibility input. It remains permissive about fields that
@@ -84,6 +87,7 @@ export type PlanMeetingTaskInput = z.infer<typeof planMeetingTaskInputSchema>;
 
 export const planMeetingTaskSchema = z.object({
   ...planMeetingTaskBaseShape,
+  budget: taskBudgetSchema,
   executionProfile: taskExecutionProfileSchema,
   contextSelection: taskContextSelectionSchema,
   workspaceMode: z.enum(['read-only', 'git-worktree', 'shared-locked']),
@@ -185,11 +189,13 @@ export function normalizePlanMeetingTask(
       maxCommandTimeoutMs: 1_800_000,
       networkHosts: [],
     },
+    budget: legacy.budget ?? DEFAULT_TASK_BUDGET,
   });
   const wasLegacy = legacy.executionProfile === undefined
     || legacy.contextSelection === undefined
     || legacy.workspaceMode === undefined
-    || legacy.authorityRequest === undefined;
+    || legacy.authorityRequest === undefined
+    || legacy.budget === undefined;
   return {
     task: normalized,
     ...(wasLegacy ? { diagnostic: 'legacy-plan-task-normalized' as const } : {}),

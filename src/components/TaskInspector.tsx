@@ -127,6 +127,8 @@ export function TaskInspector({
   const [loading, setLoading] = useState(true);
   const [reviewConfirmationError, setReviewConfirmationError] = useState('');
   const [confirmingChunkId, setConfirmingChunkId] = useState('');
+  const [budgetExtensionError, setBudgetExtensionError] = useState('');
+  const [extendingBudget, setExtendingBudget] = useState(false);
   const getProjection = useCallback(
     () => meetingStore.getTaskInspectorProjection(sessionId, taskId),
     [sessionId, taskId],
@@ -186,6 +188,58 @@ export function TaskInspector({
       setConfirmingChunkId('');
     }
   }, [sessionId, taskId]);
+
+  const extendBudget = useCallback(async () => {
+    if (!snapshot?.task.budget) return;
+    const planVersion = meetingStore.getSnapshot().plan?.version;
+    if (planVersion === undefined) {
+      setBudgetExtensionError('当前计划版本不可用，请刷新后重试。');
+      return;
+    }
+    const current = snapshot.task.budget;
+    const nextMaxAttempts = Math.min(100, current.maxAttempts + 1);
+    const next = {
+      ...current,
+      maxAttempts: nextMaxAttempts,
+      maxTotalTokens: Math.min(
+        100_000_000,
+        current.maxTotalTokens + (snapshot.task.requestedProfile?.maxTokenBudget ?? 200_000),
+      ),
+      maxTotalDurationMs: Math.min(
+        7 * 24 * 60 * 60 * 1_000,
+        current.maxTotalDurationMs + (snapshot.task.requestedProfile?.timeoutMs ?? 1_800_000),
+      ),
+      maxStagnantAttempts: Math.min(
+        20,
+        nextMaxAttempts,
+        current.maxStagnantAttempts + 1,
+      ),
+    };
+    if (JSON.stringify(next) === JSON.stringify(current)) {
+      setBudgetExtensionError('该任务的预算已达到首版安全上限。');
+      return;
+    }
+    setBudgetExtensionError('');
+    setExtendingBudget(true);
+    try {
+      const result = await window.vibeMeet.tasks.extendBudget(
+        sessionId,
+        taskId,
+        planVersion,
+        next,
+      );
+      if (!result.ok) {
+        setBudgetExtensionError(result.error ?? '预算扩展失败');
+        return;
+      }
+      const refreshed = await meetingStore.openTaskInspector(sessionId, taskId);
+      if (!refreshed.ok) setBudgetExtensionError(refreshed.error);
+    } catch (error) {
+      setBudgetExtensionError(error instanceof Error ? error.message : '预算扩展失败');
+    } finally {
+      setExtendingBudget(false);
+    }
+  }, [sessionId, snapshot, taskId]);
 
   return (
     <aside className="task-inspector" aria-label="Task Inspector">
@@ -254,6 +308,47 @@ export function TaskInspector({
               <article><span>Dependencies</span><strong>{snapshot.task.deps.length}</strong></article>
             </div>
             <TaskProfilePanel snapshot={snapshot} />
+            {snapshot.task.budget && (
+              <section className="task-diagnostic-list">
+                <header>Bounded rework budget</header>
+                <p>
+                  <strong>Attempts</strong>{' '}
+                  {snapshot.task.budgetState?.attempts ?? 0}/{snapshot.task.budget.maxAttempts}
+                  {' · '}
+                  <strong>Tokens</strong>{' '}
+                  {(snapshot.task.budgetState?.totalTokens ?? 0).toLocaleString()}/
+                  {snapshot.task.budget.maxTotalTokens.toLocaleString()}
+                </p>
+                <p>
+                  <strong>Duration</strong>{' '}
+                  {Math.round((snapshot.task.budgetState?.totalDurationMs ?? 0) / 60_000)} min/
+                  {Math.round(snapshot.task.budget.maxTotalDurationMs / 60_000)} min
+                  {' · '}
+                  <strong>Stagnation</strong>{' '}
+                  {snapshot.task.budgetState?.stagnantAttempts ?? 0}/
+                  {snapshot.task.budget.maxStagnantAttempts}
+                </p>
+                {snapshot.task.status === 'budget-paused' && (
+                  <>
+                    <p>
+                      {snapshot.task.budgetState?.reason === 'non-converging'
+                        ? '连续返工未产生实质进展，需要用户明确增加预算。'
+                        : '已达到批准预算，需要用户明确增加预算。'}
+                    </p>
+                    <button
+                      type="button"
+                      disabled={extendingBudget}
+                      onClick={() => void extendBudget()}
+                    >
+                      {extendingBudget ? '正在记录决定…' : '增加一次返工额度'}
+                    </button>
+                  </>
+                )}
+                {budgetExtensionError && (
+                  <p className="task-inspector-error" role="alert">{budgetExtensionError}</p>
+                )}
+              </section>
+            )}
             {snapshot.diagnostics.length > 0 && (
               <section className="task-diagnostic-list">
                 <header>Recovery diagnostics</header>

@@ -32,12 +32,14 @@ export const planRevisionOperationSchema = z.discriminatedUnion('kind', [
     contextSelection: planMeetingTaskSchema.shape.contextSelection.optional(),
     workspaceMode: planMeetingTaskSchema.shape.workspaceMode.optional(),
     authorityRequest: planMeetingTaskSchema.shape.authorityRequest.optional(),
+    budget: planMeetingTaskSchema.shape.budget.optional(),
   }).strict().refine((value) => (
     value.deps !== undefined
     || value.executionProfile !== undefined
     || value.contextSelection !== undefined
     || value.workspaceMode !== undefined
     || value.authorityRequest !== undefined
+    || value.budget !== undefined
   ), 'update-task requires at least one field'),
 ]);
 

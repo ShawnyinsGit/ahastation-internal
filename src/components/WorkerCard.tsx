@@ -30,6 +30,7 @@ const statusTone: Record<WorkerState['status'], 'idle' | 'waiting' | 'working' |
   integrating: 'working',
   'integration-conflict': 'failed',
   reworking: 'working',
+  'budget-paused': 'waiting',
   accepted: 'done',
   done: 'done',
   failed: 'failed',

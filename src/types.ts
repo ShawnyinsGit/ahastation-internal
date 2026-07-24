@@ -160,6 +160,7 @@ export type WorkerStatus =
   | 'integrating'
   | 'integration-conflict'
   | 'reworking'
+  | 'budget-paused'
   | 'accepted'
   | 'interrupted'
   | 'done'
@@ -173,6 +174,14 @@ export interface TaskExecutionProfile {
   contextMode: 'minimal' | 'meeting-summary' | 'selected-history' | 'full-visible-history';
   timeoutMs: number;
   maxTokenBudget: number;
+}
+
+export interface TaskBudget {
+  schemaVersion: 1;
+  maxAttempts: number;
+  maxTotalTokens: number;
+  maxTotalDurationMs: number;
+  maxStagnantAttempts: number;
 }
 
 export interface BackendEffectiveProfile {
@@ -295,6 +304,14 @@ export interface RendererTaskSnapshot {
       diagnostic?: string;
     };
     acceptanceCriteria?: unknown[];
+    budget?: TaskBudget;
+    budgetState?: {
+      attempts: number;
+      totalTokens: number;
+      totalDurationMs: number;
+      stagnantAttempts: number;
+      reason?: string;
+    };
   };
   mailbox: TaskMessage[];
   mailboxTruncated: boolean;
@@ -374,6 +391,17 @@ export interface TasksApi {
     taskId: string,
     reason?: string,
   ) => Promise<{ ok: boolean; error?: string }>;
+  extendBudget: (
+    sessionId: string,
+    taskId: string,
+    expectedPlanVersion: number,
+    budget: TaskBudget,
+  ) => Promise<{
+    ok: boolean;
+    error?: string;
+    planVersion?: number;
+    budget?: TaskBudget;
+  }>;
   confirmReviewEvidence: (
     sessionId: string,
     taskId: string,
@@ -432,6 +460,14 @@ export interface MeetingPlanNode {
   contextSelection?: TaskContextSelection;
   workspaceMode?: TaskWorkspaceMode;
   authorityRequest?: TaskAuthorityRequest;
+  budget?: TaskBudget;
+  budgetState?: {
+    attempts: number;
+    totalTokens: number;
+    totalDurationMs: number;
+    stagnantAttempts: number;
+    reason?: string;
+  };
   workspaceDiagnostic?: {
     code: 'dirty-workspace-write-blocked';
     message: string;
@@ -1324,6 +1360,7 @@ export interface PlanMeetingTaskInput {
   workspaceMode?: TaskWorkspaceMode;
   authorityRequest?: TaskAuthorityRequest;
   requiresDecision?: boolean;
+  budget?: TaskBudget;
   acceptanceCriteria?: Array<{
     id: string;
     description: string;
