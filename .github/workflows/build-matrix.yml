@@ -115,12 +115,22 @@ jobs:
           retention-days: 30
 
   linux-arm64:
-    name: ubuntu-24.04-arm (manual)
-    # Private repo: arm runners consume paid minutes — manual trigger only.
-    if: github.event_name == 'workflow_dispatch'
+    name: debian-11-arm64
+    # Private repo: arm runners consume paid minutes. Run manually during
+    # development and make it mandatory for release tags.
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04-arm
+    container:
+      image: debian:11
     timeout-minutes: 90
     steps:
+      - name: Bootstrap Debian 11 build environment
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential ca-certificates cmake curl file git libarchive-tools \
+            python3 rpm xz-utils
+
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
@@ -128,30 +138,11 @@ jobs:
           node-version: 22
           cache: npm
 
-      - name: Build whisper.cpp v1.9.1 from source (NEON self-build)
-        # Official prebuilts are x64-only; arm64 must compile. Produces
-        # build/whisper/{whisper-cli,whisper-server,libggml*.so}.
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends build-essential cmake git ca-certificates
-          mkdir -p build
-          if [ ! -d build/whisper.cpp-src ]; then
-            git clone --depth 1 --branch v1.9.1 https://github.com/ggerganov/whisper.cpp.git build/whisper.cpp-src
-          fi
-          cmake -S build/whisper.cpp-src -B build/whisper.cpp-src/build \
-            -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=ON -DBUILD_SHARED_LIBS=ON
-          cmake --build build/whisper.cpp-src/build --config Release -j --target whisper-cli whisper-server
-          mkdir -p build/whisper
-          cp build/whisper.cpp-src/build/bin/whisper-* build/whisper/ || true
-          find build/whisper.cpp-src/build -name 'libggml*.so' -exec cp {} build/whisper/ \;
-          chmod +x build/whisper/whisper-* || true
-
       - name: npm install
         run: npm ci
 
-      - name: Prebuild — whisper model only (binaries self-built above)
-        run: node scripts/fetch-whisper.mjs
+      - name: Prebuild — static whisper.cpp ARM64 + model
+        run: npm run prebuild:whisper:linux-arm64
 
       - name: Prebuild — speaker model
         run: node scripts/fetch-speaker-model.mjs
@@ -171,11 +162,14 @@ jobs:
       - name: Test suite
         run: npm test
 
-      - name: Package (Linux arm64 AppImage + deb — UNVERIFIED target)
-        # arm64 AppImage/deb targets exist in electron-builder.json but are
-        # unverified on real hardware (docs §3.5-1); this job is the
-        # verification path.
+      - name: Package (Linux arm64 AppImage + deb)
         run: npx electron-builder --linux --arm64 --publish never
+
+      - name: Verify Debian 11 / arm64 package closure
+        run: node scripts/verify-linux-arm64-package.mjs
+
+      - name: Generate SHA-256 manifest
+        run: node scripts/generate-release-manifest.mjs
 
       - uses: actions/upload-artifact@v4
         with:
@@ -183,13 +177,14 @@ jobs:
           path: |
             release/*.AppImage
             release/*.deb
+            release/SHA256SUMS
           if-no-files-found: error
           retention-days: 30
 
   release:
     name: GitHub Release
     runs-on: ubuntu-latest
-    needs: [build]
+    needs: [build, linux-arm64]
     if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-test')
     permissions:
       contents: write
@@ -200,6 +195,18 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts
+
+      - name: Import release signing key
+        env:
+          AHASTATION_RELEASE_GPG_PRIVATE_KEY: ${{ secrets.AHASTATION_RELEASE_GPG_PRIVATE_KEY }}
+        run: |
+          test -n "$AHASTATION_RELEASE_GPG_PRIVATE_KEY"
+          printf '%s' "$AHASTATION_RELEASE_GPG_PRIVATE_KEY" | gpg --batch --import
+
+      - name: Generate and sign release manifest
+        env:
+          AHASTATION_RELEASE_GPG_KEY_ID: ${{ secrets.AHASTATION_RELEASE_GPG_KEY_ID }}
+        run: node scripts/generate-release-manifest.mjs --dir artifacts --require-signature
 
       - name: Create / update release
         uses: softprops/action-gh-release@v2
@@ -217,5 +224,9 @@ jobs:
             artifacts/pkg-ubuntu-latest/*.AppImage
             artifacts/pkg-ubuntu-latest/*.deb
             artifacts/pkg-ubuntu-latest/latest*.yml
+            artifacts/pkg-linux-arm64/*.AppImage
+            artifacts/pkg-linux-arm64/*.deb
+            artifacts/SHA256SUMS
+            artifacts/SHA256SUMS.asc
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

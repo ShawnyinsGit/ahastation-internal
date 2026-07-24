@@ -16,17 +16,19 @@
     "dev": "vite",
     "dev:electron": "VITE_DEV_SERVER_URL=http://localhost:5173 tsc -p tsconfig.electron.json && electron .",
     "build:renderer": "vite build",
-    "build:electron": "tsc -p tsconfig.electron.json && cp electron/preload.cjs dist-electron/preload.cjs && cp electron/preload-editor.cjs dist-electron/preload-editor.cjs && cp electron/preload-companion.cjs dist-electron/preload-companion.cjs",
+    "build:electron": "tsc -p tsconfig.electron.json && node scripts/copy-preloads.mjs",
     "build": "npm run build:renderer && npm run build:electron",
     "start": "npm run build && electron .",
-    "test": "npm run build:electron && node --import \"data:text/javascript,import { register } from 'node:module'; import { pathToFileURL } from 'node:url'; register('./tests/electron-stub.mjs', pathToFileURL('./'));\" --test tests/*.test.mjs",
+    "test": "npm run build:electron && node --test --test-timeout=60000 --import \"data:text/javascript,import { register } from 'node:module'; import { pathToFileURL } from 'node:url'; register('./tests/electron-stub.mjs', pathToFileURL('./'));\" tests/*.test.mjs",
     "prebuild:whisper": "node scripts/fetch-whisper.mjs",
+    "prebuild:whisper:linux-arm64": "node scripts/build-whisper-linux-arm64.mjs && node scripts/fetch-whisper.mjs",
     "prebuild:claude-defaults": "node scripts/bundle-claude-defaults.mjs",
     "prebuild:speaker": "node scripts/fetch-speaker-model.mjs",
     "dist": "npm run prebuild:whisper && npm run prebuild:speaker && npm run prebuild:claude-defaults && npm run build && electron-builder --mac --arm64 && node scripts/verify-macos-signing.mjs",
     "dist:dmg": "npm run prebuild:whisper && npm run prebuild:speaker && npm run prebuild:claude-defaults && npm run build && electron-builder --mac --arm64 --publish never && node scripts/verify-macos-signing.mjs",
     "dist:win": "npm run prebuild:whisper && npm run prebuild:speaker && npm run prebuild:claude-defaults && npm run build && electron-builder --win --publish never",
     "dist:linux": "npm run prebuild:whisper && npm run prebuild:speaker && npm run prebuild:claude-defaults && npm run build && electron-builder --linux --publish never",
+    "dist:linux:arm64": "npm run prebuild:whisper:linux-arm64 && npm run prebuild:speaker && npm run prebuild:claude-defaults && node scripts/assert-whisper-assets.mjs && npm run build && electron-builder --linux --arm64 --publish never && node scripts/verify-linux-arm64-package.mjs && node scripts/generate-release-manifest.mjs",
     "dist:all": "npm run dist:dmg && npm run dist:win && npm run dist:linux"
   },
   "dependencies": {
@@ -52,7 +54,12 @@
     "zod": "^4.4.3"
   },
   "optionalDependencies": {
-    "opencode-darwin-arm64": "^1.18.3"
+    "opencode-darwin-arm64": "1.18.3",
+    "opencode-linux-arm64": "1.18.3"
+  },
+  "overrides": {
+    "@hono/node-server": "2.0.10",
+    "sharp": "0.35.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
