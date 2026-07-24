@@ -51,6 +51,12 @@ const contextPackage = {
 
 const authorityGrant = {
   schemaVersion: 1,
+  taskId: 'task-login',
+  attempt: 1,
+  planVersion: 2,
+  approvalDecisionId: 'decision-1',
+  authorityRequestHash: HASH,
+  workspaceIdentityHash: SECOND_HASH,
   workspaceRoot: 'C:\\work\\project',
   writePaths: ['src/auth'],
   allowedToolKinds: ['read', 'write', 'command'],
@@ -59,6 +65,7 @@ const authorityGrant = {
   allowedEnvironmentKeys: ['CI'],
   maxCommandTimeoutMs: 120_000,
   allowedNetworkHosts: [],
+  approvedAt: 1_700_000_000_000,
   expiresAt: 1_800_000_000_000,
   grantHash: SECOND_HASH,
 };
@@ -163,6 +170,10 @@ test('strict schemas reject unknown keys and invalid bounds', () => {
   assert.equal(taskAuthorityGrantSchema.safeParse({ ...authorityGrant, allowedCommands: [[]] }).success, false);
   assert.equal(taskAttemptRecordSchema.safeParse({ ...attempt, attempt: 0 }).success, false);
   assert.equal(meetingTaskRecordSchema.safeParse({ ...record, mailboxCursor: -1 }).success, false);
+  assert.equal(meetingTaskRecordSchema.safeParse({
+    ...record,
+    authorityGrant: { ...authorityGrant, attempt: 2 },
+  }).success, false);
 });
 
 test('recursive forbidden-key validation rejects secret and hidden-reasoning keys only', () => {

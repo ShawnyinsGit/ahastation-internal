@@ -21,6 +21,7 @@ const workers = [
 function native(backendId, toolName, input, id = 'native-1') {
   return {
     taskId: 'task-login',
+    attempt: 1,
     backendId,
     workspaceRoot: '/workspace',
     nativeRequestId: id,
@@ -36,6 +37,7 @@ for (const [backendId, backend] of workers) {
     );
     assert.equal(read.ok, true);
     assert.equal(read.request.kind, 'read');
+    assert.deepEqual(read.request.readPaths, ['src/login.ts']);
     assert.deepEqual(read.request.writePaths, []);
 
     const write = backend.normalizePermissionRequest(
@@ -43,6 +45,7 @@ for (const [backendId, backend] of workers) {
     );
     assert.equal(write.ok, true);
     assert.equal(write.request.kind, 'write');
+    assert.deepEqual(write.request.readPaths, []);
     assert.deepEqual(write.request.writePaths, ['src/login.ts']);
     assert.deepEqual(write.request.sideEffects, ['workspace-write']);
   });

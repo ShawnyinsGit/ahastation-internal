@@ -19,7 +19,14 @@
 // SDK 'ended' event arrives after end() already disposed the same handle.
 
 import type { ClaudeSession } from './claude-session.js';
-import type { BackendSession, BackendSessionEvent } from './backends/cli-backend.js';
+import type {
+  BackendSession,
+  BackendSessionEvent,
+} from './backends/cli-backend.js';
+import type {
+  NativePermissionRequest,
+  PermissionNormalizationResult,
+} from './backends/canonical-execution.js';
 import { randomUUID } from 'node:crypto';
 import { resolve as pathResolve } from 'node:path';
 import {
@@ -57,8 +64,10 @@ import {
 import {
   backendEffectiveProfileSchema,
   contextPackageSchema,
+  taskAuthorityGrantSchema,
   type BackendEffectiveProfile,
   type ContextPackage,
+  type TaskAuthorityGrant,
   type TaskExecutionProfile,
 } from './task-collaboration.js';
 import {
@@ -83,6 +92,7 @@ import type {
   WorkerSpecialtyKind,
   WorkerStatusKind,
 } from './orchestrator-types.js';
+import { decideTaskPermission } from './permission-broker.js';
 
 export type SessionFactory = (
   opts: ConstructorParameters<typeof ClaudeSession>[0],
@@ -173,6 +183,39 @@ export interface WorkerSchedulerOpts {
   /** Production HostGroups require profile compilation; narrow tests may omit
    * the seam to exercise pre-collaboration Scheduler behavior. */
   taskProfileCompilerRequired?: boolean;
+  /** Compiles an attempt-bound authority only after workspace allocation. */
+  compileTaskAuthority?: (input: {
+    taskId: string;
+    attempt: number;
+    planVersion: number;
+    approvalDecisionId: string;
+    workspaceRoot: string;
+    authorityRequest: PlanMeetingTask['authorityRequest'];
+    approvedAt: number;
+  }) => TaskAuthorityGrant;
+  /** Appends and flushes task-authority-compiled before session creation. */
+  persistTaskAuthority?: (input: {
+    taskId: string;
+    attempt: number;
+    authorityGrant: TaskAuthorityGrant;
+  }) => Promise<void>;
+  /** Converts a provider-native request without executing or reading secrets. */
+  normalizePermissionRequest?: (
+    backendId: string,
+    native: NativePermissionRequest,
+  ) => PermissionNormalizationResult;
+  /** Canonical permission decisions are durable before any allow/deny reply. */
+  persistPermissionDecision?: (input: {
+    taskId: string;
+    attempt: number;
+    nativeRequestId: string;
+    decision: 'allow' | 'ask-user' | 'deny';
+    reason: string;
+    safeInput: Record<string, unknown>;
+    grantHash?: string;
+  }) => Promise<void>;
+  /** Production Meeting plans require an approved grant before tool sessions. */
+  taskAuthorityCompilerRequired?: boolean;
 }
 
 const COMPUTER_USE_WORKER_PROMPT = `
@@ -221,6 +264,7 @@ export class WorkerScheduler {
   private autoApproveScope: AutoApproveScope;
   private stallTimer: NodeJS.Timeout | null = null;
   private capacityNotified = false;
+  private launching = new Set<string>();
   private planVersion: number;
   private readonly opts: WorkerSchedulerOpts;
   private talkerProvider: () => BackendSession | null;
@@ -308,6 +352,10 @@ export class WorkerScheduler {
     contextPackageHash?: string;
     backendRuntime?: BackendRuntime;
     effectiveProfile?: BackendEffectiveProfile;
+    authorityGrant?: TaskAuthorityGrant;
+    approvalDecisionId?: string;
+    approvalRecordedAt?: number;
+    approvedPlanVersion?: number;
     acceptanceCriteria?: AcceptanceCriterion[];
     workspace?: { kind: string; cwd: string; branch?: string };
     deliveryId?: string;
@@ -331,6 +379,10 @@ export class WorkerScheduler {
       contextPackageHash: handle.contextPackageHash,
       backendRuntime: handle.backendRuntime ? structuredClone(handle.backendRuntime) : undefined,
       effectiveProfile: handle.effectiveProfile ? structuredClone(handle.effectiveProfile) : undefined,
+      authorityGrant: handle.authorityGrant ? structuredClone(handle.authorityGrant) : undefined,
+      approvalDecisionId: handle.approvalDecisionId,
+      approvalRecordedAt: handle.approvalRecordedAt,
+      approvedPlanVersion: handle.approvedPlanVersion,
       acceptanceCriteria: handle.acceptanceCriteria
         ? structuredClone(handle.acceptanceCriteria)
         : undefined,
@@ -411,6 +463,15 @@ export class WorkerScheduler {
         contextSelection: normalized.contextSelection,
         workspaceMode: normalized.workspaceMode,
         authorityRequest: normalized.authorityRequest,
+        approvalDecisionId: typeof task.approvalDecisionId === 'string'
+          ? task.approvalDecisionId
+          : undefined,
+        approvalRecordedAt: typeof task.approvalRecordedAt === 'number'
+          ? task.approvalRecordedAt
+          : undefined,
+        approvedPlanVersion: typeof task.approvedPlanVersion === 'number'
+          ? task.approvedPlanVersion
+          : undefined,
         acceptanceCriteria: normalized.acceptanceCriteria,
       });
       const handle = this.workers.get(id)!;
@@ -426,6 +487,7 @@ export class WorkerScheduler {
       }
       const recoveredRuntime = backendRuntimeSchema.safeParse(task.backendRuntime);
       const recoveredProfile = backendEffectiveProfileSchema.safeParse(task.effectiveProfile);
+      const recoveredAuthority = taskAuthorityGrantSchema.safeParse(task.authorityGrant);
       if (
         recoveredRuntime.success
         && recoveredProfile.success
@@ -435,6 +497,11 @@ export class WorkerScheduler {
       ) {
         handle.backendRuntime = structuredClone(recoveredRuntime.data);
         handle.effectiveProfile = structuredClone(recoveredProfile.data);
+      }
+      if (recoveredAuthority.success && recoveredAuthority.data.taskId === id) {
+        handle.authorityGrant = structuredClone(recoveredAuthority.data);
+        handle.approvalDecisionId = recoveredAuthority.data.approvalDecisionId;
+        handle.approvalRecordedAt = recoveredAuthority.data.approvedAt;
       }
       const rawStatus = typeof task.status === 'string' ? task.status : 'interrupted';
       handle.status = (
@@ -514,6 +581,7 @@ export class WorkerScheduler {
     handle.report = null;
     handle.backendRuntime = undefined;
     handle.effectiveProfile = undefined;
+    handle.authorityGrant = undefined;
     handle.transportEnded = false;
     handle.summary = '';
     handle.prompt = action === 'continue'
@@ -625,7 +693,10 @@ export class WorkerScheduler {
     return { workerId: id, specialty, reused: false };
   }
 
-  installPlan(inputs: PlanMeetingTaskInput[]): { ok: true } | { ok: false; error: string } {
+  installPlan(
+    inputs: PlanMeetingTaskInput[],
+    approval?: { decisionId: string; approvedAt: number },
+  ): { ok: true } | { ok: false; error: string } {
     let tasks: PlanMeetingTask[];
     try {
       tasks = normalizePlanMeetingTasks(
@@ -655,6 +726,9 @@ export class WorkerScheduler {
         contextSelection: task.contextSelection,
         workspaceMode: task.workspaceMode,
         authorityRequest: task.authorityRequest,
+        approvalDecisionId: approval?.decisionId,
+        approvalRecordedAt: approval?.approvedAt,
+        approvedPlanVersion: this.planVersion + 1,
         acceptanceCriteria: task.acceptanceCriteria,
       });
     }
@@ -697,6 +771,12 @@ export class WorkerScheduler {
 
     for (const operation of operations) {
       if (operation.kind === 'add-task') {
+        if (this.opts.taskAuthorityCompilerRequired) {
+          return {
+            ok: false,
+            error: 'adding a task requires a new user-approved plan version',
+          };
+        }
         if (projected.has(operation.task.id)) {
           return { ok: false, error: `Worker id already in use: ${operation.task.id}` };
         }
@@ -729,6 +809,16 @@ export class WorkerScheduler {
           return {
             ok: false,
             error: 'running task execution boundaries require a new attempt',
+          };
+        }
+        if (
+          this.opts.taskAuthorityCompilerRequired
+          && operation.authorityRequest !== undefined
+          && JSON.stringify(operation.authorityRequest) !== JSON.stringify(handle.authorityRequest)
+        ) {
+          return {
+            ok: false,
+            error: 'changing task authority requires a new user-approved plan version',
           };
         }
         projected.set(operation.taskId, {
@@ -989,7 +1079,11 @@ export class WorkerScheduler {
   // ---------------------------------------------------------------------------
   // Session event handler — wired into every spawnWorker emit callback.
 
-  onWorkerEvent(workerId: string, e: BackendSessionEvent): void {
+  onWorkerEvent(
+    workerId: string,
+    e: BackendSessionEvent,
+    sourceAttempt?: number,
+  ): void {
     const handle = this.workers.get(workerId);
     if (!handle) return;
 
@@ -1072,7 +1166,13 @@ export class WorkerScheduler {
           message: e.error,
           retryable: false,
         });
-      } else if (e.kind === 'permission-request' || e.kind === 'permission-cancelled') {
+      } else if (e.kind === 'permission-request') {
+        if (sourceAttempt !== undefined && sourceAttempt !== handle.attempt) {
+          handle.session?.resolvePermission(e.id, 'deny', 'stale task attempt');
+          return;
+        }
+        void this.handlePermissionRequest(handle, e);
+      } else if (e.kind === 'permission-cancelled') {
         this.opts.emit({ source: workerId, event: e });
       } else if (e.kind === 'error') {
         void this.handleWorkerSignal(handle, {
@@ -1106,6 +1206,70 @@ export class WorkerScheduler {
         }
       }
     }
+  }
+
+  private async handlePermissionRequest(
+    handle: WorkerHandle,
+    event: Extract<BackendSessionEvent, { kind: 'permission-request' }>,
+  ): Promise<void> {
+    const fallback: PermissionNormalizationResult = {
+      ok: false,
+      diagnostic: 'unsupported-native-tool',
+      requiresUser: true,
+    };
+    let normalized: PermissionNormalizationResult = fallback;
+    try {
+      normalized = this.opts.normalizePermissionRequest?.(handle.backendId, {
+        taskId: handle.id,
+        attempt: handle.attempt,
+        backendId: handle.backendId,
+        workspaceRoot: handle.workspace?.cwd ?? this.opts.cwd,
+        nativeRequestId: event.id,
+        toolName: event.toolName,
+        input: event.input,
+      }) ?? fallback;
+    } catch {
+      normalized = {
+        ok: false,
+        diagnostic: 'invalid-native-request',
+        requiresUser: true,
+      };
+    }
+    const canonical = decideTaskPermission(normalized, handle.authorityGrant);
+    const persist = this.opts.persistPermissionDecision;
+    if (!persist && this.opts.taskAuthorityCompilerRequired) {
+      handle.session?.resolvePermission(event.id, 'deny', 'permission journal unavailable');
+      return;
+    }
+    try {
+      await persist?.({
+        taskId: handle.id,
+        attempt: handle.attempt,
+        nativeRequestId: event.id,
+        decision: canonical.decision.kind,
+        reason: canonical.decision.reason,
+        safeInput: canonical.safeInput,
+        grantHash: handle.authorityGrant?.grantHash,
+      });
+    } catch {
+      handle.session?.resolvePermission(event.id, 'deny', 'permission journal write failed');
+      return;
+    }
+    if (canonical.decision.kind === 'allow') {
+      handle.session?.resolvePermission(event.id, 'allow', canonical.decision.reason);
+      return;
+    }
+    if (canonical.decision.kind === 'deny') {
+      handle.session?.resolvePermission(event.id, 'deny', canonical.decision.reason);
+      return;
+    }
+    this.opts.emit({
+      source: handle.id,
+      event: {
+        ...event,
+        input: canonical.safeInput,
+      },
+    });
   }
 
   private createWorkerEvent(handle: WorkerHandle, signal: WorkerAdapterSignal): WorkerEvent {
@@ -1371,19 +1535,23 @@ export class WorkerScheduler {
     handle.report = null;
     handle.transportEnded = false;
     this.applyDeliveryView(handle, view);
+    handle.authorityGrant = undefined;
     // Rework is also journal-first: do not send a new side-effecting turn
     // until recovery can observe the new attempt state.
     await this.opts.flushEvents?.();
-    if (handle.session) {
-      handle.session.sendUserText(`(rework attempt) ${feedback}`, 'high');
-      handle.status = 'running';
-      this.emitPlanUpdate();
-    } else {
-      handle.status = 'pending';
-      handle.backendRuntime = undefined;
-      handle.effectiveProfile = undefined;
-      void this.spawnWorker(handle);
-    }
+    // An authority grant is attempt-bound. Rework therefore starts a fresh
+    // Backend session instead of reusing a tool-capable session that was
+    // created under the previous attempt's grant.
+    handle.session?.end();
+    handle.session = null;
+    handle.status = 'pending';
+    handle.contextPackage = undefined;
+    handle.contextPackageHash = undefined;
+    handle.backendRuntime = undefined;
+    handle.effectiveProfile = undefined;
+    handle.authorityGrant = undefined;
+    this.emitPlanUpdate();
+    void this.spawnWorker(handle);
     return view;
   }
 
@@ -1402,6 +1570,9 @@ export class WorkerScheduler {
     contextSelection?: PlanMeetingTask['contextSelection'];
     workspaceMode?: PlanMeetingTask['workspaceMode'];
     authorityRequest?: PlanMeetingTask['authorityRequest'];
+    approvalDecisionId?: string;
+    approvalRecordedAt?: number;
+    approvedPlanVersion?: number;
     acceptanceCriteria?: AcceptanceCriterion[];
   }): void {
     const handle: WorkerHandle = {
@@ -1415,6 +1586,10 @@ export class WorkerScheduler {
       contextSelection: spec.contextSelection,
       workspaceMode: spec.workspaceMode,
       authorityRequest: spec.authorityRequest,
+      authorityGrant: undefined,
+      approvalDecisionId: spec.approvalDecisionId,
+      approvalRecordedAt: spec.approvalRecordedAt,
+      approvedPlanVersion: spec.approvedPlanVersion,
       contextPackage: undefined,
       contextPackageHash: undefined,
       backendRuntime: undefined,
@@ -1506,6 +1681,10 @@ export class WorkerScheduler {
     handle.report = null;
     handle.backendRuntime = undefined;
     handle.effectiveProfile = undefined;
+    handle.authorityGrant = undefined;
+    handle.approvalDecisionId = undefined;
+    handle.approvalRecordedAt = undefined;
+    handle.approvedPlanVersion = undefined;
     handle.transportEnded = false;
     handle.deliveryId = null;
     handle.attempt = 1;
@@ -1521,11 +1700,59 @@ export class WorkerScheduler {
   }
 
   private countRunning(): number {
-    let n = 0;
-    for (const h of this.workers.values()) {
-      if (h.session && !['accepted', 'failed', 'interrupted', 'done'].includes(h.status)) n++;
+    const active = new Set(this.launching);
+    for (const handle of this.workers.values()) {
+      if (
+        handle.session
+        && !['accepted', 'failed', 'interrupted', 'done'].includes(handle.status)
+      ) {
+        active.add(handle.id);
+      }
     }
-    return n;
+    return active.size;
+  }
+
+  private async ensureTaskAuthority(
+    handle: WorkerHandle,
+    workspaceRoot: string,
+  ): Promise<void> {
+    if (
+      handle.authorityGrant
+      && handle.authorityGrant.attempt === handle.attempt
+      && handle.authorityGrant.taskId === handle.id
+    ) {
+      return;
+    }
+    const compile = this.opts.compileTaskAuthority;
+    const persist = this.opts.persistTaskAuthority;
+    if (
+      !compile
+      || !persist
+      || !handle.authorityRequest
+      || !handle.approvalDecisionId
+      || handle.approvalRecordedAt === undefined
+      || handle.approvedPlanVersion === undefined
+    ) {
+      if (this.opts.taskAuthorityCompilerRequired) {
+        throw new Error('approved task authority compiler is unavailable');
+      }
+      return;
+    }
+    const authorityGrant = taskAuthorityGrantSchema.parse(compile({
+      taskId: handle.id,
+      attempt: handle.attempt,
+      planVersion: handle.approvedPlanVersion,
+      approvalDecisionId: handle.approvalDecisionId,
+      workspaceRoot,
+      authorityRequest: structuredClone(handle.authorityRequest),
+      approvedAt: handle.approvalRecordedAt,
+    }));
+    await persist({
+      taskId: handle.id,
+      attempt: handle.attempt,
+      authorityGrant,
+    });
+    handle.authorityGrant = structuredClone(authorityGrant);
   }
 
   private spawnReadyWorkers(): void {
@@ -1542,6 +1769,7 @@ export class WorkerScheduler {
     const running = this.countRunning();
     const waiting = Array.from(this.workers.values()).filter((handle) => (
       handle.status === 'pending'
+      && !this.launching.has(handle.id)
       && handle.deps.every((dep) => this.workers.get(dep)?.status === 'accepted')
     )).length;
     if (running >= MAX_CONCURRENT_WORKERS && waiting > 0) {
@@ -1561,6 +1789,7 @@ export class WorkerScheduler {
   }
 
   private async spawnWorker(handle: WorkerHandle): Promise<void> {
+    this.launching.add(handle.id);
     try {
       let firstMessage = handle.prompt;
       if (handle.contextSelection && !handle.contextPackage) {
@@ -1647,6 +1876,7 @@ export class WorkerScheduler {
 
       handle.workspace = this.opts.workspaceManager?.prepare(handle.id, handle.writePaths) ?? null;
       const workerCwd = handle.workspace?.cwd ?? this.opts.cwd;
+      await this.ensureTaskAuthority(handle, workerCwd);
       if (this.opts.deliveryHarness && !handle.deliveryId) {
         const acceptanceCriteria = handle.acceptanceCriteria?.length
           ? handle.acceptanceCriteria
@@ -1672,14 +1902,18 @@ export class WorkerScheduler {
       }
       const sessionFactory = this.opts.resolveSessionFactory?.(handle.backendId)
         ?? this.opts.sessionFactory;
+      const sessionAttempt = handle.attempt;
       handle.session = sessionFactory({
         cwd: workerCwd,
-        autoApproveScope: this.autoApproveScope,
+        autoApproveScope: handle.authorityGrant ? 'off' : this.autoApproveScope,
         envOverride: this.opts.workerEnv,
-        confirmDestructive: this.opts.confirmDestructive,
+        confirmDestructive: handle.authorityGrant
+          ? undefined
+          : this.opts.confirmDestructive,
         emit: (e) => this.onWorkerEvent(
           handle.id,
           e as unknown as BackendSessionEvent,
+          sessionAttempt,
         ),
         sessionOptions: {
           systemPrompt: { type: 'preset', preset: 'claude_code', append: promptAppend },
@@ -1760,6 +1994,8 @@ export class WorkerScheduler {
       this.disposeWorker(handle, 'failed');
       this.emitPlanUpdate();
       this.cascadeFailure(handle.id);
+    } finally {
+      this.launching.delete(handle.id);
     }
   }
 

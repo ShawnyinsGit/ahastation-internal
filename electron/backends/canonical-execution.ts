@@ -5,12 +5,14 @@ const boundedString = z.string().trim().min(1).max(4_096);
 export const canonicalExecutionRequestSchema = z.object({
   schemaVersion: z.literal(1),
   taskId: boundedString,
+  attempt: z.number().int().positive(),
   backendId: z.string().trim().min(1).max(100),
   kind: z.enum(['read', 'write', 'command', 'network', 'external']),
   workspaceRoot: boundedString,
   cwd: boundedString.optional(),
   executable: boundedString.optional(),
   argv: z.array(z.string().max(4_000)).max(1_000).optional(),
+  readPaths: z.array(boundedString).max(1_000),
   writePaths: z.array(boundedString).max(1_000),
   networkHosts: z.array(z.string().trim().min(1).max(253)).max(1_000),
   environmentKeys: z.array(z.string().trim().min(1).max(500)).max(1_000),
@@ -34,6 +36,7 @@ export type CanonicalExecutionRequest = z.infer<typeof canonicalExecutionRequest
 
 export interface NativePermissionRequest {
   taskId: string;
+  attempt: number;
   backendId: string;
   workspaceRoot: string;
   nativeRequestId: string;
@@ -287,6 +290,8 @@ export function normalizeBackendPermissionRequest(
   if (
     typeof native.taskId !== 'string'
     || !native.taskId.trim()
+    || !Number.isSafeInteger(native.attempt)
+    || native.attempt < 1
     || typeof native.workspaceRoot !== 'string'
     || !native.workspaceRoot.trim()
     || typeof native.nativeRequestId !== 'string'
@@ -307,14 +312,17 @@ export function normalizeBackendPermissionRequest(
 
   const input = native.input;
   const envKeys = environmentKeys(input);
+  const reads = kind === 'read' ? writePaths(input) : [];
   const paths = kind === 'write' ? writePaths(input) : [];
   const hosts = kind === 'network' ? networkHosts(input) : [];
   const base = {
     schemaVersion: 1 as const,
     taskId: native.taskId.trim(),
+    attempt: native.attempt,
     backendId: expectedBackendId,
     kind,
     workspaceRoot: native.workspaceRoot.trim(),
+    readPaths: reads,
     writePaths: paths,
     networkHosts: hosts,
     environmentKeys: envKeys,

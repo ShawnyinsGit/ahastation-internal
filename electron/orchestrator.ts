@@ -95,8 +95,13 @@ import {
   backendEffectiveProfileSchema,
   type BackendEffectiveProfile,
   type ContextPackage,
+  type TaskAuthorityGrant,
   type TaskExecutionProfile,
 } from './task-collaboration.js';
+import {
+  compileTaskAuthority,
+  hashTaskAuthorityRequest,
+} from './task-authority.js';
 
 export const MAX_HOSTS = 3;
 
@@ -401,6 +406,34 @@ export class Orchestrator implements OrchestratorBridge {
         ? (input) => this.persistTaskProfile(input)
         : undefined,
       taskProfileCompilerRequired: this.sessionFactory === Orchestrator.defaultClaudeFactory,
+      compileTaskAuthority: this.sessionFactory === Orchestrator.defaultClaudeFactory
+        ? (input) => compileTaskAuthority(
+            input.taskId,
+            input.attempt,
+            input.planVersion,
+            input.approvalDecisionId,
+            input.workspaceRoot,
+            input.authorityRequest,
+            input.approvedAt,
+          )
+        : undefined,
+      persistTaskAuthority: this.sessionFactory === Orchestrator.defaultClaudeFactory
+        ? (input) => this.persistTaskAuthority(input)
+        : undefined,
+      normalizePermissionRequest: this.sessionFactory === Orchestrator.defaultClaudeFactory
+        ? (backendId, native) => {
+            const backend = getBackendRegistry().get(backendId);
+            return backend?.normalizePermissionRequest?.(native) ?? {
+              ok: false as const,
+              diagnostic: 'unsupported-native-tool' as const,
+              requiresUser: true as const,
+            };
+          }
+        : undefined,
+      persistPermissionDecision: this.sessionFactory === Orchestrator.defaultClaudeFactory
+        ? (input) => this.persistPermissionDecision(input)
+        : undefined,
+      taskAuthorityCompilerRequired: this.sessionFactory === Orchestrator.defaultClaudeFactory,
     });
     this.hostGroups.set(id, hg);
     if (id === DEFAULT_HOST_ID) {
@@ -1009,7 +1042,7 @@ export class Orchestrator implements OrchestratorBridge {
     }
     const backendError = await this.validateExecutionBackends(normalized);
     if (backendError) return { ok: false, error: backendError };
-    return this.meetingScheduler.installPlan(normalized);
+    return this.installApprovedPlan(normalized, 'manual-install');
   }
 
   async proposePlan(tasks: PlanMeetingTaskInput[]): Promise<{ ok: true } | { ok: false; error: string }> {
@@ -1027,7 +1060,7 @@ export class Orchestrator implements OrchestratorBridge {
       void this.repository.append('plan-proposed', { tasks: this.pendingPlan });
       return { ok: true };
     }
-    return this.meetingScheduler.installPlan(normalized);
+    return this.installApprovedPlan(normalized, 'auto-orchestration');
   }
 
   setAutoOrchestration(enabled: boolean): void {
@@ -1052,7 +1085,27 @@ export class Orchestrator implements OrchestratorBridge {
     this.pendingPlan = null;
     if (!tasks) return { ok: false, error: 'no pending plan' };
     if (!approved) return { ok: true };
-    return this.meetingScheduler.installPlan(tasks);
+    return this.installApprovedPlan(tasks, 'plan-meeting-confirmation');
+  }
+
+  private async installApprovedPlan(
+    tasks: PlanMeetingTask[],
+    source: 'manual-install' | 'auto-orchestration' | 'plan-meeting-confirmation',
+  ): Promise<{ ok: true } | { ok: false; error: string }> {
+    const decisionId = randomUUID();
+    const approvedAt = Date.now();
+    await this.repository.append('plan-authority-approved', {
+      decisionId,
+      approvedAt,
+      source,
+      planVersion: this.meetingScheduler.getPlanVersion() + 1,
+      tasks: tasks.map((task) => ({
+        taskId: task.id,
+        authorityRequestHash: hashTaskAuthorityRequest(task.authorityRequest),
+      })),
+    });
+    await this.repository.flush();
+    return this.meetingScheduler.installPlan(tasks, { decisionId, approvedAt });
   }
 
   private async validateExecutionBackends(tasks: PlanMeetingTask[]): Promise<string | null> {
@@ -1067,6 +1120,9 @@ export class Orchestrator implements OrchestratorBridge {
       }
       if (!backend.compileTaskProfile) {
         return `backend '${backendId}' does not compile task profiles`;
+      }
+      if (!backend.normalizePermissionRequest) {
+        return `backend '${backendId}' does not normalize permission requests`;
       }
       if (checked.has(backendId)) continue;
       checked.add(backendId);
@@ -1272,6 +1328,33 @@ export class Orchestrator implements OrchestratorBridge {
       effectiveProfile: input.effectiveProfile,
       capabilityHash: input.effectiveProfile.capabilityHash,
     });
+    await this.repository.flush();
+  }
+
+  private async persistTaskAuthority(input: {
+    taskId: string;
+    attempt: number;
+    authorityGrant: TaskAuthorityGrant;
+  }): Promise<void> {
+    await this.repository.append('task-authority-compiled', {
+      taskId: input.taskId,
+      attempt: input.attempt,
+      authorityGrant: input.authorityGrant,
+      grantHash: input.authorityGrant.grantHash,
+    });
+    await this.repository.flush();
+  }
+
+  private async persistPermissionDecision(input: {
+    taskId: string;
+    attempt: number;
+    nativeRequestId: string;
+    decision: 'allow' | 'ask-user' | 'deny';
+    reason: string;
+    safeInput: Record<string, unknown>;
+    grantHash?: string;
+  }): Promise<void> {
+    await this.repository.append('task-permission-decided', input);
     await this.repository.flush();
   }
 

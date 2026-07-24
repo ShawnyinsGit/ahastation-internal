@@ -21,6 +21,47 @@
 
 import { classifyToolRisk, type AutoApproveScope, type ToolRisk } from './auto-approve-policy.js';
 import type { BackendSessionEvent } from './backends/cli-backend.js';
+import type { PermissionNormalizationResult } from './backends/canonical-execution.js';
+import type { TaskAuthorityGrant } from './task-collaboration.js';
+import {
+  evaluateTaskAuthority,
+  summarizeCanonicalRequest,
+  type AuthorityDecision,
+} from './task-authority.js';
+
+export interface CanonicalPermissionDecision {
+  decision: AuthorityDecision;
+  safeInput: Record<string, unknown>;
+}
+
+export function decideTaskPermission(
+  normalized: PermissionNormalizationResult,
+  grant: TaskAuthorityGrant | undefined,
+  now = Date.now(),
+): CanonicalPermissionDecision {
+  if (!normalized.ok) {
+    return {
+      decision: {
+        kind: 'ask-user',
+        reason: `native-request:${normalized.diagnostic}`,
+      },
+      safeInput: {
+        normalizationDiagnostic: normalized.diagnostic,
+        requiresUser: true,
+      },
+    };
+  }
+  if (!grant) {
+    return {
+      decision: { kind: 'deny', reason: 'task-authority-missing' },
+      safeInput: summarizeCanonicalRequest(normalized.request),
+    };
+  }
+  return {
+    decision: evaluateTaskAuthority(grant, normalized.request, now),
+    safeInput: summarizeCanonicalRequest(normalized.request),
+  };
+}
 
 // ── OpenCode tool-name → risk mapping ───────────────────────────────────────
 // OpenCode built-in tools are lowercase; map them onto the Claude-style

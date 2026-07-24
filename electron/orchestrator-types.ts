@@ -173,6 +173,10 @@ export interface WorkerHandle {
   contextPackageHash?: string;
   backendRuntime?: import('./backends/task-profile.js').BackendRuntime;
   effectiveProfile?: import('./task-collaboration.js').BackendEffectiveProfile;
+  authorityGrant?: import('./task-collaboration.js').TaskAuthorityGrant;
+  approvalDecisionId?: string;
+  approvalRecordedAt?: number;
+  approvedPlanVersion?: number;
   acceptanceCriteria?: import('./worker-protocol.js').AcceptanceCriterion[];
   status: WorkerStatusKind;
   session: BackendSession | null;

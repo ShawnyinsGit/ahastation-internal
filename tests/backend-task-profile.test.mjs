@@ -15,6 +15,7 @@ import {
   openCodePromptModel,
 } from '../dist-electron/backends/opencode-adapter.js';
 import { WorkerScheduler } from '../dist-electron/worker-scheduler.js';
+import { compileTaskAuthority } from '../dist-electron/task-authority.js';
 
 const runtime = (backendId, runtimeVersion = '1.2.3') => ({
   schemaVersion: 1,
@@ -212,6 +213,7 @@ test('scheduler persists effective profile before workspace and session', async 
     autoApproveScope: 'off',
     contextCompilerRequired: true,
     taskProfileCompilerRequired: true,
+    taskAuthorityCompilerRequired: true,
     async getAuthorizedTaskContextSource() {
       order.push('context-source');
       return contextSource();
@@ -228,6 +230,25 @@ test('scheduler persists effective profile before workspace and session', async 
       };
     },
     async persistTaskProfile() { order.push('profile-persist'); },
+    compileTaskAuthority(input) {
+      order.push('authority-compile');
+      return compileTaskAuthority(
+        input.taskId,
+        input.attempt,
+        input.planVersion,
+        input.approvalDecisionId,
+        input.workspaceRoot,
+        input.authorityRequest,
+        input.approvedAt,
+      );
+    },
+    async persistTaskAuthority() { order.push('authority-persist'); },
+    normalizePermissionRequest() {
+      throw new Error('not used');
+    },
+    async persistPermissionDecision() {
+      throw new Error('not used');
+    },
     workspaceManager: {
       canPrepare() { return true; },
       prepare() {
@@ -253,21 +274,30 @@ test('scheduler persists effective profile before workspace and session', async 
     getSpeechFilterMode() { return 'strict'; },
   });
 
-  scheduler.installPlan([schedulerTask()]);
+  scheduler.installPlan([schedulerTask()], {
+    decisionId: 'approval-profile',
+    approvedAt: 1_700_000_000_000,
+  });
   await new Promise((resolve) => setImmediate(resolve));
 
-  assert.deepEqual(order.slice(0, 6), [
+  assert.deepEqual(order.slice(0, 8), [
     'context-source',
     'context-persist',
     'profile-compile',
     'profile-persist',
     'workspace',
+    'authority-compile',
+    'authority-persist',
     'session',
   ]);
   assert.equal(receivedOptions.sessionOptions.model, 'gpt-5.4');
   assert.equal(
     receivedOptions.sessionOptions.taskProfile.nativeReasoning.modelReasoningEffort,
     'high',
+  );
+  assert.equal(
+    scheduler.snapshot().find((task) => task.id === 'profile-task').authorityGrant.taskId,
+    'profile-task',
   );
 });
 

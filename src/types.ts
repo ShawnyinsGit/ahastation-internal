@@ -198,6 +198,12 @@ export interface ContextPackage {
 
 export interface TaskAuthorityGrant {
   schemaVersion: 1;
+  taskId: string;
+  attempt: number;
+  planVersion: number;
+  approvalDecisionId: string;
+  authorityRequestHash: string;
+  workspaceIdentityHash: string;
   workspaceRoot: string;
   writePaths: string[];
   allowedToolKinds: string[];
@@ -206,6 +212,7 @@ export interface TaskAuthorityGrant {
   allowedEnvironmentKeys: string[];
   maxCommandTimeoutMs: number;
   allowedNetworkHosts: string[];
+  approvedAt: number;
   expiresAt: number;
   grantHash: string;
 }

@@ -123,6 +123,12 @@ export type ContextPackage = z.infer<typeof contextPackageSchema>;
 
 export const taskAuthorityGrantSchema = z.object({
   schemaVersion: z.literal(1),
+  taskId: idSchema,
+  attempt: z.number().int().positive(),
+  planVersion: z.number().int().positive(),
+  approvalDecisionId: idSchema,
+  authorityRequestHash: hashSchema,
+  workspaceIdentityHash: hashSchema,
   workspaceRoot: z.string().trim().min(1).max(4_096),
   writePaths: z.array(z.string().trim().min(1).max(4_096)).max(1_000),
   allowedToolKinds: z.array(z.string().trim().min(1).max(200)).max(1_000),
@@ -133,9 +139,18 @@ export const taskAuthorityGrantSchema = z.object({
   allowedEnvironmentKeys: z.array(z.string().trim().min(1).max(500)).max(1_000),
   maxCommandTimeoutMs: z.number().int().min(1_000).max(7_200_000),
   allowedNetworkHosts: z.array(z.string().trim().min(1).max(500)).max(1_000),
+  approvedAt: timestampSchema,
   expiresAt: timestampSchema,
   grantHash: hashSchema,
-}).strict();
+}).strict().superRefine((value, ctx) => {
+  if (value.expiresAt <= value.approvedAt) {
+    ctx.addIssue({
+      code: 'custom',
+      message: 'expiresAt must follow approvedAt',
+      path: ['expiresAt'],
+    });
+  }
+});
 
 export type TaskAuthorityGrant = z.infer<typeof taskAuthorityGrantSchema>;
 
@@ -297,6 +312,27 @@ export const meetingTaskRecordSchema = z.object({
       code: 'custom',
       message: 'context package attempt does not match currentAttempt',
       path: ['contextPackage', 'attempt'],
+    });
+  }
+  if (value.authorityGrant.taskId !== value.id) {
+    ctx.addIssue({
+      code: 'custom',
+      message: 'authority grant belongs to a different task',
+      path: ['authorityGrant', 'taskId'],
+    });
+  }
+  if (value.authorityGrant.attempt !== value.currentAttempt) {
+    ctx.addIssue({
+      code: 'custom',
+      message: 'authority grant attempt does not match currentAttempt',
+      path: ['authorityGrant', 'attempt'],
+    });
+  }
+  if (value.authorityGrant.planVersion !== value.planVersion) {
+    ctx.addIssue({
+      code: 'custom',
+      message: 'authority grant planVersion does not match task planVersion',
+      path: ['authorityGrant', 'planVersion'],
     });
   }
   const attemptNumbers = new Set(value.attempts.map((entry) => entry.attempt));

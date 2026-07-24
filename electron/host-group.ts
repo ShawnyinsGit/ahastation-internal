@@ -14,6 +14,10 @@
 
 import { ClaudeSession, type SessionEvent } from './claude-session.js';
 import type { BackendSession } from './backends/cli-backend.js';
+import type {
+  NativePermissionRequest,
+  PermissionNormalizationResult,
+} from './backends/canonical-execution.js';
 import type { AutoApproveScope } from './auto-approve-policy.js';
 import type { BrowserTabManager } from './browser-tab-manager.js';
 import {
@@ -51,12 +55,13 @@ import type {
   AuthorizedMeetingContextSource,
   ContextSelection,
 } from './task-context.js';
-import type { ContextPackage } from './task-collaboration.js';
+import type { ContextPackage, TaskAuthorityGrant } from './task-collaboration.js';
 import type {
   BackendEffectiveProfile,
   TaskExecutionProfile,
 } from './task-collaboration.js';
 import type { BackendRuntime } from './backends/task-profile.js';
+import type { PlanMeetingTask } from './meeting-tools.js';
 
 export interface HostGroupOpts {
   /** Unique identifier for this host group. Default = 'default'. */
@@ -108,6 +113,34 @@ export interface HostGroupOpts {
     effectiveProfile: BackendEffectiveProfile;
   }) => Promise<void>;
   taskProfileCompilerRequired?: boolean;
+  compileTaskAuthority?: (input: {
+    taskId: string;
+    attempt: number;
+    planVersion: number;
+    approvalDecisionId: string;
+    workspaceRoot: string;
+    authorityRequest: PlanMeetingTask['authorityRequest'];
+    approvedAt: number;
+  }) => TaskAuthorityGrant;
+  persistTaskAuthority?: (input: {
+    taskId: string;
+    attempt: number;
+    authorityGrant: TaskAuthorityGrant;
+  }) => Promise<void>;
+  normalizePermissionRequest?: (
+    backendId: string,
+    native: NativePermissionRequest,
+  ) => PermissionNormalizationResult;
+  persistPermissionDecision?: (input: {
+    taskId: string;
+    attempt: number;
+    nativeRequestId: string;
+    decision: 'allow' | 'ask-user' | 'deny';
+    reason: string;
+    safeInput: Record<string, unknown>;
+    grantHash?: string;
+  }) => Promise<void>;
+  taskAuthorityCompilerRequired?: boolean;
 }
 
 export class HostGroup {
@@ -185,6 +218,11 @@ export class HostGroup {
       compileTaskProfile: opts.compileTaskProfile,
       persistTaskProfile: opts.persistTaskProfile,
       taskProfileCompilerRequired: opts.taskProfileCompilerRequired,
+      compileTaskAuthority: opts.compileTaskAuthority,
+      persistTaskAuthority: opts.persistTaskAuthority,
+      normalizePermissionRequest: opts.normalizePermissionRequest,
+      persistPermissionDecision: opts.persistPermissionDecision,
+      taskAuthorityCompilerRequired: opts.taskAuthorityCompilerRequired,
       buildWorkerMcp: (workerId) => buildWorkerMcp(this.bridge, workerId, this.cwd),
       buildComputerUseMcp: process.platform === 'darwin'
         ? (workerId) => buildComputerUseMcp(cuBridge, workerId)

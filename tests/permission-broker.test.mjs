@@ -3,10 +3,15 @@ import test from 'node:test';
 
 import {
   classifyOpenCodeToolRisk,
+  decideTaskPermission,
   mapOpenCodeToolName,
   mapUiDecisionToOpencode,
   PermissionBroker,
 } from '../dist-electron/permission-broker.js';
+import { compileTaskAuthority } from '../dist-electron/task-authority.js';
+import { mkdtempSync, mkdirSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 // ---------------------------------------------------------------------------
 // Tool-name mapping: known → policy classification, unknown → destructive
@@ -214,4 +219,60 @@ test('re-submitting the same permission id is a no-op', async () => {
   await broker.submit(req('p1', 'bash'));
   assert.equal(broker.size, 1);
   assert.equal(meetingEvents.length, 1);
+});
+
+test('canonical decisions use only a valid bounded task grant', () => {
+  const root = mkdtempSync(join(tmpdir(), 'ahastation-broker-'));
+  mkdirSync(join(root, 'src'), { recursive: true });
+  const approvedAt = 1_700_000_000_000;
+  const grant = compileTaskAuthority(
+    'task-a',
+    1,
+    1,
+    'approval-a',
+    root,
+    {
+      writePaths: ['src'],
+      toolKinds: ['read', 'write'],
+      workingDirectories: ['.'],
+      commands: [],
+      environmentKeys: [],
+      maxCommandTimeoutMs: 30_000,
+      networkHosts: [],
+    },
+    approvedAt,
+  );
+  const normalized = {
+    ok: true,
+    request: {
+      schemaVersion: 1,
+      taskId: 'task-a',
+      attempt: 1,
+      backendId: 'codex',
+      kind: 'write',
+      workspaceRoot: root,
+      readPaths: [],
+      writePaths: ['src/a.ts'],
+      networkHosts: [],
+      environmentKeys: [],
+      sideEffects: ['workspace-write'],
+      nativeRequestId: 'native-a',
+    },
+  };
+  assert.deepEqual(
+    decideTaskPermission(normalized, grant, approvedAt + 1).decision,
+    { kind: 'allow', reason: 'within-task-authority' },
+  );
+  assert.deepEqual(
+    decideTaskPermission(normalized, undefined, approvedAt + 1).decision,
+    { kind: 'deny', reason: 'task-authority-missing' },
+  );
+  assert.equal(
+    decideTaskPermission({
+      ok: false,
+      diagnostic: 'opaque-shell-command',
+      requiresUser: true,
+    }, grant, approvedAt + 1).decision.kind,
+    'ask-user',
+  );
 });
