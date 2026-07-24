@@ -13,6 +13,19 @@ import type { TaskWorkspace } from './task-workspace.js';
 import type { DeliveryView } from './delivery-harness.js';
 import type { WorkReport, WorkerEvent } from './worker-protocol.js';
 
+export type {
+  BackendEffectiveProfile,
+  ContextPackage,
+  LegacyDeliveryEvidence,
+  MeetingTaskRecord,
+  MeetingTaskStatus,
+  TaskAttemptRecord,
+  TaskAuthorityGrant,
+  TaskExecutionProfile,
+  TaskMessage,
+  TaskWorkspaceSnapshot,
+} from './task-collaboration.js';
+
 export type OrchestratorSource = 'talker' | string;
 
 export type WorkerStatusKind =

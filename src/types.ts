@@ -130,6 +130,26 @@ export interface IdeRegistryState {
 
 export type AgentSource = 'talker' | string;
 
+export const MEETING_TASK_STATUSES = [
+  'draft',
+  'pending',
+  'running',
+  'verifying',
+  'coordinator-reviewing',
+  'integration-queued',
+  'integrating',
+  'accepted',
+  'blocked',
+  'reworking',
+  'integration-conflict',
+  'budget-paused',
+  'interrupted',
+  'failed',
+  'cancelled',
+] as const;
+
+export type MeetingTaskStatus = (typeof MEETING_TASK_STATUSES)[number];
+
 export type WorkerStatus =
   | 'pending'
   | 'running'
@@ -141,6 +161,85 @@ export type WorkerStatus =
   | 'interrupted'
   | 'done'
   | 'failed';
+
+export interface TaskExecutionProfile {
+  schemaVersion: 1;
+  backendId: string;
+  modelPreference?: string;
+  workMode: 'fast' | 'balanced' | 'deep';
+  contextMode: 'minimal' | 'meeting-summary' | 'selected-history' | 'full-visible-history';
+  timeoutMs: number;
+  maxTokenBudget: number;
+}
+
+export interface BackendEffectiveProfile {
+  schemaVersion: 1;
+  backendId: string;
+  runtimeVersion: string;
+  model: string;
+  nativeReasoning?: Record<string, unknown>;
+  unsupported: string[];
+  downgraded: string[];
+  capabilityHash: string;
+}
+
+export interface ContextPackage {
+  schemaVersion: 1;
+  taskId: string;
+  attempt: number;
+  mode: 'minimal' | 'meeting-summary' | 'selected-history' | 'full-visible-history';
+  messages: Array<{ id: string; role: 'user' | 'assistant'; text: string }>;
+  decisions: Array<{ id: string; summary: string }>;
+  dependencyReports: Array<{ taskId: string; reportHash: string; summary: string }>;
+  attachments: Array<{ id: string; name: string; contentHash: string }>;
+  byteLength: number;
+  packageHash: string;
+}
+
+export interface TaskAuthorityGrant {
+  schemaVersion: 1;
+  workspaceRoot: string;
+  writePaths: string[];
+  allowedToolKinds: string[];
+  allowedWorkingDirectories: string[];
+  allowedCommands: string[][];
+  allowedEnvironmentKeys: string[];
+  maxCommandTimeoutMs: number;
+  allowedNetworkHosts: string[];
+  expiresAt: number;
+  grantHash: string;
+}
+
+export interface TaskMessage {
+  schemaVersion: 1;
+  id: string;
+  seq: number;
+  taskId: string;
+  attempt: number;
+  sender: 'user' | 'coordinator' | 'worker' | 'system';
+  kind:
+    | 'instruction'
+    | 'follow-up'
+    | 'steer'
+    | 'interrupt'
+    | 'status-request'
+    | 'progress'
+    | 'question'
+    | 'approval-request'
+    | 'approval-response';
+  replyTo?: string;
+  payload: unknown;
+  status: 'queued' | 'delivered' | 'acknowledged' | 'failed';
+  timestamp: number;
+}
+
+export interface TaskWorkspaceSnapshot {
+  kind: 'git-worktree' | 'shared-locked';
+  cwd: string;
+  branch?: string;
+  sourceRevision: string;
+  lockKeys: string[];
+}
 
 export type WorkerSpecialty =
   | 'general'
@@ -215,6 +314,58 @@ export interface WorkReport {
     summary?: string;
   }>;
   unresolved: Array<{ code: string; message: string; blocking: boolean }>;
+}
+
+export interface TaskAttemptRecord {
+  schemaVersion: 1;
+  attempt: number;
+  backendId: string;
+  backendSessionId?: string;
+  contextPackageHash: string;
+  grantHash: string;
+  baseRevision: string;
+  workspace: TaskWorkspaceSnapshot | null;
+  messageSeqStart: number;
+  messageSeqEnd?: number;
+  report?: WorkReport;
+  verification?: {
+    status: 'passed' | 'failed' | 'not-run';
+    checks: Array<{
+      name: string;
+      status: 'passed' | 'failed' | 'not-run';
+      summary?: string;
+    }>;
+  };
+  reviewCoverage?: {
+    totalChunks: number;
+    reviewedChunks: number;
+    complete: boolean;
+  };
+  candidateCommit?: string;
+  failureFingerprint?: string | null;
+  tokenCost: number;
+  durationMs: number;
+  startedAt: number;
+  finishedAt?: number;
+}
+
+export interface MeetingTaskRecord {
+  schemaVersion: 1;
+  id: string;
+  title: string;
+  prompt: string;
+  deps: string[];
+  status: MeetingTaskStatus;
+  planVersion: number;
+  requestedProfile: TaskExecutionProfile;
+  effectiveProfile?: BackendEffectiveProfile;
+  contextPackage: ContextPackage;
+  authorityGrant: TaskAuthorityGrant;
+  workspace: TaskWorkspaceSnapshot | null;
+  currentAttempt: number;
+  attempts: TaskAttemptRecord[];
+  mailboxCursor: number;
+  eventCursor: number;
 }
 
 export type WorkerAdapterSignal =
