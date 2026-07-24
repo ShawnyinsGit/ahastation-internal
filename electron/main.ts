@@ -342,6 +342,7 @@ async function registerAllIpc(ctx: IpcContext): Promise<void> {
     { registerIdeFilesIpc },
     { registerIdeRegistryIpc },
     { registerIdePtyIpc },
+    { registerDeviceDiagnosticsIpc },
     { registerCompanionIpc },
   ] = await Promise.all([
     import('./ipc/session.js'),
@@ -366,6 +367,7 @@ async function registerAllIpc(ctx: IpcContext): Promise<void> {
     import('./ipc/ide-files.js'),
     import('./ipc/ide-registry.js'),
     import('./ipc/ide-pty.js'),
+    import('./ipc/device-diagnostics.js'),
     import('./companion/companion-feed.js'),
   ]);
   _flushOpenTabsNow = flushOpenTabsNow;
@@ -391,6 +393,7 @@ async function registerAllIpc(ctx: IpcContext): Promise<void> {
   registerIdeFilesIpc();
   registerIdeRegistryIpc(ctx);
   registerIdePtyIpc(ctx);
+  registerDeviceDiagnosticsIpc();
   registerCompanionIpc(ctx);
   // Register custom backends from settings so they appear in the backend list
   registerCustomBackends();

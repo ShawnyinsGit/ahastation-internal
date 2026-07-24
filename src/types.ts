@@ -130,7 +130,17 @@ export interface IdeRegistryState {
 
 export type AgentSource = 'talker' | string;
 
-export type WorkerStatus = 'pending' | 'running' | 'interrupted' | 'done' | 'failed';
+export type WorkerStatus =
+  | 'pending'
+  | 'running'
+  | 'verifying'
+  | 'reviewing'
+  | 'awaiting-acceptance'
+  | 'reworking'
+  | 'accepted'
+  | 'interrupted'
+  | 'done'
+  | 'failed';
 
 export type WorkerSpecialty =
   | 'general'
@@ -157,17 +167,132 @@ export interface MeetingPlanNode {
   title: string;
   status: WorkerStatus;
   deps: string[];
+  executorBackendId?: string;
 }
 
 export interface MeetingPlan {
+  version: number;
   nodes: MeetingPlanNode[];
+}
+
+export interface CoordinatorBriefing {
+  id: string;
+  timestamp: number;
+  kind: 'delivery-ready' | 'accepted' | 'failed' | 'stalled' | 'capacity';
+  title: string;
+  summary: string;
+  completedTasks: number;
+  failedTasks: number;
+  files: number;
+  testsPassed: number;
+  testsFailed: number;
+  blockers: string[];
+  recommendedAction: 'continue' | 'review' | 'rework' | 'revise-plan' | 'request-user-decision';
+  workerId?: string;
+  taskId?: string;
+  capacity?: { running: number; limit: number; waiting: number };
 }
 
 /** One file delivered by a worker turn. Path is absolute; the renderer
  *  fetches contents via `documents.read`. */
 export interface WorkerDeliveryFile {
   path: string;
+  snapshotPath?: string;
+  /** Legacy recovery field from builds that stored snapshots in the project. */
   snapshotRelativePath?: string;
+  sizeBytes?: number;
+  sha256?: string;
+  previewStatus?: 'copied' | 'too-large' | 'missing' | 'invalid' | 'copy-failed';
+}
+
+export interface WorkReport {
+  status: 'completed' | 'partial' | 'blocked';
+  summary: string;
+  files: Array<{ path: string; action: 'created' | 'modified' | 'deleted' }>;
+  tests: Array<{
+    command: string;
+    status: 'passed' | 'failed' | 'not-run';
+    summary?: string;
+  }>;
+  unresolved: Array<{ code: string; message: string; blocking: boolean }>;
+}
+
+export type WorkerAdapterSignal =
+  | { kind: 'progress'; message: string; percent?: number }
+  | { kind: 'tool'; toolName: string; phase: 'started' | 'completed' | 'failed'; detail?: string }
+  | { kind: 'delivery'; report: WorkReport }
+  | { kind: 'failed'; code: string; message: string; retryable: boolean }
+  | { kind: 'ended'; reason: 'completed' | 'interrupted' | 'crashed' };
+
+export interface WorkerEventV2 {
+  schemaVersion: 2;
+  eventId: string;
+  seq: number;
+  timestamp: number;
+  meetingId: string;
+  taskId: string;
+  attempt: number;
+  workerId: string;
+  backendId: string;
+  payload: WorkerAdapterSignal;
+}
+
+export interface DeliveryView {
+  id: string;
+  meetingId: string;
+  status:
+    | 'awaiting-spec-approval'
+    | 'preparing-workspace'
+    | 'executing'
+    | 'verifying'
+    | 'reviewing'
+    | 'awaiting-delivery-acceptance'
+    | 'integrating'
+    | 'accepted'
+    | 'reworking'
+    | 'interrupted'
+    | 'failed'
+    | 'cancelled';
+  spec: {
+    version: number;
+    objective: string;
+    acceptanceCriteria: Array<{
+      id: string;
+      description: string;
+      verification:
+        | { kind: 'command'; argv: string[]; timeoutMs?: number }
+        | { kind: 'manual' };
+    }>;
+  };
+  sourceRevision: string;
+  workspace: string;
+  attempt: number;
+  attempts: Array<{
+    attempt: number;
+    report: WorkReport;
+    verification?: { passed: boolean; checks: unknown[]; error?: string };
+    review?: { passed: boolean; findings: unknown[] };
+    outcome:
+      | 'reported'
+      | 'worker-incomplete'
+      | 'verification-failed'
+      | 'review-failed'
+      | 'awaiting-acceptance'
+      | 'returned'
+      | 'accepted';
+    feedback?: string;
+    updatedAt: number;
+  }>;
+  candidate?: {
+    id: string;
+    attempt: number;
+    report: WorkReport;
+    verification: { passed: boolean; checks: unknown[]; error?: string };
+    review: { passed: boolean; findings: unknown[] };
+  };
+  integration?: Record<string, unknown>;
+  error?: string;
+  updatedAt: number;
 }
 
 /** Every event from main is tagged with the sessionId of the slot that
@@ -183,7 +308,10 @@ export type RendererEvent =
   | { kind: 'worker-spawned'; workerId: string; title: string; deps: string[]; specialty: WorkerSpecialty; source?: AgentSource; sessionId?: string; hostId?: string }
   | { kind: 'worker-ended'; workerId: string; status: WorkerStatus; summary?: string; source?: AgentSource; sessionId?: string; hostId?: string }
   | { kind: 'worker-stalled'; workerId: string; title: string; idleMs: number; currentTool: string | null; source?: AgentSource; sessionId?: string; hostId?: string }
-  | { kind: 'worker-delivery'; workerId: string; title: string; summary: string; taskId: string; files: WorkerDeliveryFile[]; source?: AgentSource; sessionId?: string; hostId?: string }
+  | { kind: 'worker-delivery'; workerId: string; title: string; summary: string; taskId: string; deliveryId: string; files: WorkerDeliveryFile[]; source?: AgentSource; sessionId?: string; hostId?: string }
+  | { kind: 'worker-event'; event: WorkerEventV2; source?: AgentSource; sessionId?: string; hostId?: string }
+  | { kind: 'delivery-status'; workerId: string; taskId: string; delivery: DeliveryView; source?: AgentSource; sessionId?: string; hostId?: string }
+  | { kind: 'coordinator-briefing'; briefing: CoordinatorBriefing; source?: AgentSource; sessionId?: string; hostId?: string }
   | { kind: 'plan-updated'; plan: MeetingPlan; source?: AgentSource; sessionId?: string; hostId?: string }
   | { kind: 'plan-proposed'; tasks: PlanMeetingTaskInput[]; source?: AgentSource; sessionId?: string; hostId?: string }
   | { kind: 'coordinator-failed'; hostId: string; candidateHostId: string | null; error?: string; source?: AgentSource; sessionId?: string }
@@ -280,6 +408,17 @@ export interface BackendInfo {
   supportsPermissions: boolean;
   supportsCoordinator: boolean;
   supportsWorkers: boolean;
+  workerImplementation: boolean;
+  workerRuntimeState:
+    | 'available'
+    | 'needs-install'
+    | 'needs-login'
+    | 'version-incompatible'
+    | 'contract-disabled'
+    | 'diagnostic-failed';
+  workerRuntimeReason: string;
+  version: string | null;
+  expectedVersion: string | null;
   /** Custom avatar image as base64 data URL. */
   customAvatar: string | null;
 }
@@ -410,7 +549,7 @@ export interface SessionsApi {
   resolveRecoveredTask: (
     sessionId: string | null,
     taskId: string,
-    action: 'continue' | 'retry' | 'complete' | 'abandon',
+    action: 'continue' | 'retry' | 'abandon',
   ) => Promise<{ ok: true } | { ok: false; error: string }>;
   addHost: (
     sessionId: string | null,
@@ -491,7 +630,22 @@ export interface VibeMeetApi {
   setPermissionMode: (sessionId: string | null, mode: string) => Promise<{ ok: boolean }>;
   setAutoApprove: (scope: AutoApproveScope) => Promise<{ ok: boolean; autoApproveScope?: AutoApproveScope }>;
   setOrchestrationMode: (sessionId: string | null, enabled: boolean) => Promise<{ ok: boolean; error?: string }>;
-  approvePlan: (sessionId: string | null, approved: boolean) => Promise<{ ok: boolean; error?: string }>;
+  approvePlan: (
+    sessionId: string | null,
+    approved: boolean,
+    tasks?: PlanMeetingTaskInput[],
+  ) => Promise<{ ok: boolean; error?: string }>;
+  acceptDelivery: (
+    sessionId: string | null,
+    deliveryId: string,
+    candidateId: string,
+  ) => Promise<{ ok: true; delivery: DeliveryView } | { ok: false; error: string }>;
+  returnDelivery: (
+    sessionId: string | null,
+    deliveryId: string,
+    candidateId: string | undefined,
+    feedback: string,
+  ) => Promise<{ ok: true; delivery: DeliveryView } | { ok: false; error: string }>;
   endSession: (sessionId: string | null) => Promise<{ ok: boolean }>;
   pickCwd: () => Promise<string | null>;
   getVoiceConfig: () => Promise<{ enabled: boolean; voicePrint: VoicePrint | null }>;
@@ -510,6 +664,29 @@ export interface VibeMeetApi {
   relaunchApp: () => Promise<void>;
   requestMicPermission: () => Promise<boolean>;
   asrAvailable: () => Promise<{ ok: boolean; available: boolean }>;
+  deviceDiagnostics: () => Promise<
+    | {
+        ok: true;
+        diagnostics: {
+          capturedAt: number;
+          platform: string;
+          arch: string;
+          kernel: string;
+          totalMemoryBytes: number;
+          electronVersion: string;
+          sessionType: string;
+          gpu: { available: boolean; status: Record<string, string> };
+          audio: {
+            microphone: 'granted' | 'denied' | 'available' | 'unavailable' | 'unknown';
+            speaker: 'available' | 'unknown';
+            whisper: boolean;
+          };
+          workspace: { git: boolean; worktree: boolean; version: string | null };
+          capacity: { hosts: number; workers: number };
+        };
+      }
+    | { ok: false; error: string }
+  >;
   transcribePcm: (
     pcm: ArrayBuffer,
     lang?: 'auto' | 'zh' | 'en',
@@ -585,6 +762,10 @@ export interface VibeMeetApi {
     workerId: string,
     addendum: string,
   ) => Promise<{ ok: true; queued: boolean } | { ok: false; error: string; reason?: string }>;
+  interruptWorker: (
+    sessionId: string | null,
+    workerId: string,
+  ) => Promise<{ ok: true } | { ok: false; error: string }>;
   onEvent: (cb: (e: RendererEvent) => void) => () => void;
 }
 
@@ -727,6 +908,15 @@ export interface PlanMeetingTaskInput {
   prompt: string;
   deps: string[];
   executorBackendId?: string;
+  writePaths?: string[];
+  requiresDecision?: boolean;
+  acceptanceCriteria?: Array<{
+    id: string;
+    description: string;
+    verification:
+      | { kind: 'command'; argv: string[]; timeoutMs?: number }
+      | { kind: 'manual' };
+  }>;
 }
 
 export interface PendingPermission {

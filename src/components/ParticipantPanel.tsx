@@ -76,6 +76,23 @@ export const ParticipantPanel = memo(function ParticipantPanel({
     });
     return entries;
   }, [hostGroups]);
+  const taskWorkers = useMemo(
+    () => workers.filter((worker) => worker.role === 'worker'),
+    [workers],
+  );
+  const titleByWorkerId = useMemo(
+    () => new Map(taskWorkers.map((worker) => [worker.id, worker.title])),
+    [taskWorkers],
+  );
+  const workerIconId = (backendId?: string): string => {
+    switch (backendId) {
+      case 'claude-code': return 'claude';
+      case 'codex': return 'codex';
+      case 'kimi': return 'kimi';
+      case 'qoder': return 'qoder';
+      default: return backendId ?? 'worker';
+    }
+  };
 
   return (
     <aside className="tiles-gallery">
@@ -222,6 +239,25 @@ export const ParticipantPanel = memo(function ParticipantPanel({
                 <div className="tiles-gallery-placeholder-status">Connecting…</div>
               </div>
               {actions}
+            </div>
+          );
+        })}
+
+        {taskWorkers.map((worker) => {
+          const iconId = workerIconId(worker.backendId);
+          return (
+            <div key={worker.id} className="tiles-gallery-tile-wrap tiles-gallery-worker-wrap">
+              <WorkerCard
+                worker={worker}
+                depTitles={titleByWorkerId}
+                mode="gallery"
+                selected={false}
+                speaking={false}
+                onSelect={onSelectParticipant ? () => onSelectParticipant(worker.id) : undefined}
+                onResolvePermission={onResolvePermission}
+                iconId={iconId}
+                customAvatar={customAvatars?.get(iconId) ?? null}
+              />
             </div>
           );
         })}

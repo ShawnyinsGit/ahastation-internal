@@ -29,6 +29,7 @@ import { VoiceGuideModal } from './components/VoiceGuideModal';
 import { ParticipantPanel } from './components/ParticipantPanel';
 import { PermissionCard } from './components/PermissionCard';
 import { EditorOverlay } from './components/EditorOverlay';
+import { PlanMeetingModal } from './components/PlanMeetingModal';
 import type { AutoApproveScope, BackendInfo, DesktopSource, SkillInfo } from './types';
 
 export function App() {
@@ -57,6 +58,8 @@ export function App() {
   const [mutedHostIds, setMutedHostIds] = useState<Set<string>>(new Set());
   const [skills, setSkills] = useState<SkillInfo[]>([]);
   const elapsed = useElapsedSeconds(activeOpenedAt);
+  const visualFixture = import.meta.env.DEV
+    && new URLSearchParams(window.location.search).has('ui-fixture');
 
   useEffect(() => {
     if (!activeTab || activeTab.placeholder) return;
@@ -152,9 +155,8 @@ export function App() {
     // are always read from the project directory, not external locations.
     const cwd = state.cwd;
     for (const f of delivery.files) {
-      const filePath = f.snapshotRelativePath && cwd
-        ? `${cwd}/${f.snapshotRelativePath}`
-        : f.path;
+      const filePath = f.snapshotPath
+        ?? (f.snapshotRelativePath && cwd ? `${cwd}/${f.snapshotRelativePath}` : f.path);
       stageWindows.openFile(filePath);
     }
   }, [workers.currentDelivery, stageWindows, state.cwd]);
@@ -172,7 +174,7 @@ export function App() {
     }
   }, [workers.savedDocuments, stageWindows]);
 
-  const micEnabled = hasLiveTab || voiceLock.enrollmentActive;
+  const micEnabled = !visualFixture && (hasLiveTab || voiceLock.enrollmentActive);
 
   const onVoiceFinal = useCallback(async (text: string) => {
     const id = meetingStore.getActiveId();
@@ -386,6 +388,12 @@ export function App() {
   // the editor form factor (overlay in handheld, independent window else).
   const { mode: uiMode, override: uiModeOverride } = useHandheldMode();
   const handheld = uiMode === 'handheld';
+  const handheldInitialDrawerApplied = useRef(false);
+  useEffect(() => {
+    if (!handheld || handheldInitialDrawerApplied.current) return;
+    handheldInitialDrawerApplied.current = true;
+    setDrawerOpen(false);
+  }, [handheld]);
   const [permModalOpen, setPermModalOpen] = useState(false);
   const permissionCount = workers.workerList.filter((w) => w.pendingPermission).length;
   // Pragmatic update notice (Phase 6b): shown only when the probe actually
@@ -525,6 +533,7 @@ ${trimmed}`
             workers={workers.workerList}
             hostGroups={workers.hostGroups}
             plan={workers.plan}
+            coordinatorBriefings={workers.coordinatorBriefings}
             running={state.running}
             aiSpeaking={aiSpeaking}
             galleryContent={
@@ -561,8 +570,8 @@ ${trimmed}`
             }
             delivery={workers.currentDelivery}
             sessionId={activeTab?.id ?? null}
-            onAcceptDelivery={() => { setViewingFile(null); workers.acceptDelivery(); }}
-            onReviseDelivery={(fb: string) => { setViewingFile(null); return workers.reviseDelivery(fb); }}
+            onAcceptDelivery={() => workers.acceptDelivery()}
+            onReviseDelivery={(fb: string) => workers.reviseDelivery(fb)}
             viewingFile={viewingFile}
             onCloseFileView={() => setViewingFile(null)}
             stageWindows={stageWindows.windows}
@@ -685,6 +694,14 @@ ${trimmed}`
         open={voicePrefs.guideOpen}
         onClose={voicePrefs.handleGuideClose}
         onDismissForever={voicePrefs.handleDismissForever}
+      />
+
+      <PlanMeetingModal
+        open={Boolean(workers.pendingPlan)}
+        tasks={workers.pendingPlan ?? []}
+        backends={backends}
+        onReject={() => workers.decidePendingPlan(false)}
+        onSubmit={(tasks) => workers.decidePendingPlan(true, tasks)}
       />
 
       {(state.lastError || micError) && (

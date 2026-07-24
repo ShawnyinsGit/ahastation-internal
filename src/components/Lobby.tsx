@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react';
-import { ChevronDown, Clock, DownloadCloud, FolderOpen, KeyRound, LogIn, Mic, MonitorUp } from 'lucide-react';
+import { Activity, ChevronDown, Clock, DownloadCloud, FolderOpen, KeyRound, LogIn, Mic, MonitorUp } from 'lucide-react';
 import { meetingStore } from '../lib/meeting-store';
 import type { BackendInfo } from '../types';
 
@@ -11,6 +11,23 @@ interface RecoverableMeeting {
   meetingId: string;
   seq: number;
   state: Record<string, unknown>;
+}
+
+interface DeviceSnapshot {
+  platform: string;
+  arch: string;
+  kernel: string;
+  totalMemoryBytes: number;
+  electronVersion: string;
+  sessionType: string;
+  gpu: { available: boolean; status: Record<string, string> };
+  audio: {
+    microphone: 'granted' | 'denied' | 'available' | 'unavailable' | 'unknown';
+    speaker: 'available' | 'unknown';
+    whisper: boolean;
+  };
+  workspace: { git: boolean; worktree: boolean; version: string | null };
+  capacity: { hosts: number; workers: number };
 }
 
 function formatRelative(ts: number): string {
@@ -38,12 +55,25 @@ function backendAuthLabel(b: BackendInfo): string {
   return '';
 }
 
+function microphoneLabel(status: DeviceSnapshot['audio']['microphone']): string {
+  switch (status) {
+    case 'granted': return '已授权';
+    case 'denied': return '被拒绝';
+    case 'available': return '可用';
+    case 'unavailable': return '未检测到';
+    default: return '进入会议后测试';
+  }
+}
+
 export function Lobby({ lastError }: LobbyProps) {
   const lobby = useSyncExternalStore(meetingStore.subscribeTabs, meetingStore.getLobbyData);
 
   const [backends, setBackends] = useState<BackendInfo[]>([]);
   const [selectedBackend, setSelectedBackend] = useState('codex');
   const [authOpen, setAuthOpen] = useState(false);
+  const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
+  const [diagnostics, setDiagnostics] = useState<DeviceSnapshot | null>(null);
+  const [diagnosticsError, setDiagnosticsError] = useState<string | null>(null);
 
   // Per-backend auth editing state
   const [apiKeyInputs, setApiKeyInputs] = useState<Record<string, string>>({});
@@ -227,6 +257,17 @@ export function Lobby({ lastError }: LobbyProps) {
       setInstalling(null);
     }
   }, [installing, reloadBackends]);
+
+  const openDiagnostics = useCallback(async () => {
+    const next = !diagnosticsOpen;
+    setDiagnosticsOpen(next);
+    if (!next) return;
+    setDiagnosticsError(null);
+    await reloadBackends();
+    const result = await window.vibeMeet.deviceDiagnostics();
+    if (result.ok) setDiagnostics(result.diagnostics);
+    else setDiagnosticsError(result.error);
+  }, [diagnosticsOpen, reloadBackends]);
 
   // Build the toggle label
   const toggleLabel = currentBackend
@@ -433,6 +474,101 @@ export function Lobby({ lastError }: LobbyProps) {
             </div>
           )}
         </div>
+
+        <section className="lobby-readiness">
+          <button
+            type="button"
+            className="join-auth-toggle"
+            onClick={() => { void openDiagnostics(); }}
+          >
+            <Activity size={14} aria-hidden="true" />
+            <span>设备就绪</span>
+            <span className="lobby-readiness-summary">
+              {backends.filter((backend) => backend.supportsWorkers).length}/4 Worker
+            </span>
+            <ChevronDown size={14} className={diagnosticsOpen ? 'join-auth-chevron open' : 'join-auth-chevron'} />
+          </button>
+
+          {diagnosticsOpen && (
+            <div className="device-readiness-panel">
+              {diagnostics ? (
+                <>
+                  <div className="device-readiness-grid">
+                    <div>
+                      <span>系统</span>
+                      <strong>{diagnostics.platform} · {diagnostics.arch}</strong>
+                      <small>kernel {diagnostics.kernel} · {diagnostics.sessionType}</small>
+                    </div>
+                    <div>
+                      <span>Electron / GPU</span>
+                      <strong>{diagnostics.gpu.available ? '可用' : '诊断失败'}</strong>
+                      <small>Electron {diagnostics.electronVersion}</small>
+                    </div>
+                    <div>
+                      <span>音频 / Whisper</span>
+                      <strong>{diagnostics.audio.whisper ? 'Whisper 可用' : 'Whisper 需安装'}</strong>
+                      <small>
+                        麦克风 {microphoneLabel(diagnostics.audio.microphone)}
+                        {' · '}
+                        扬声器 {diagnostics.audio.speaker === 'available' ? '可用' : '待测试'}
+                      </small>
+                    </div>
+                    <div>
+                      <span>Git / 容量</span>
+                      <strong>{diagnostics.workspace.worktree ? 'worktree 可用' : '需安装 Git'}</strong>
+                      <small>{diagnostics.capacity.hosts} Host · {diagnostics.capacity.workers} Worker</small>
+                    </div>
+                  </div>
+
+                  <div className="backend-readiness-list">
+                    {backends.filter((backend) => ['claude-code', 'opencode', 'codex', 'kimi'].includes(backend.id)).map((backend) => (
+                      <div className={`backend-readiness-row is-${backend.workerRuntimeState}`} key={backend.id}>
+                        <div>
+                          <strong>{backend.displayName}</strong>
+                          <span>
+                            {backend.workerRuntimeState === 'available'
+                              ? '可用'
+                              : backend.workerRuntimeState === 'needs-login'
+                                ? '需登录'
+                                : backend.workerRuntimeState === 'needs-install'
+                                  ? '需安装'
+                                  : backend.workerRuntimeState === 'version-incompatible'
+                                    ? '版本不兼容'
+                                    : '诊断失败'}
+                          </span>
+                        </div>
+                        <p>{backend.workerRuntimeReason}</p>
+                        <small>
+                          {backend.version ?? '版本未知'}
+                          {backend.expectedVersion ? ` / 验证版本 ${backend.expectedVersion}` : ''}
+                        </small>
+                        {backend.workerRuntimeState !== 'available' && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSelectedBackend(backend.id);
+                              setAuthOpen(true);
+                            }}
+                          >
+                            {backend.workerRuntimeState === 'needs-install'
+                              ? '前往安装'
+                              : backend.workerRuntimeState === 'needs-login'
+                                ? '前往登录'
+                                : '查看处理方式'}
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </>
+              ) : (
+                <div className="device-readiness-loading" aria-live="polite">
+                  {diagnosticsError ?? '正在检查设备、音频、Git 和 Worker 契约…'}
+                </div>
+              )}
+            </div>
+          )}
+        </section>
 
         {recoverable.length > 0 && (
           <section className="lobby-section">

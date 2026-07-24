@@ -39,7 +39,17 @@ const api = {
     ipcRenderer.invoke('session:set-permission-mode', { sessionId, mode }),
   setAutoApprove: (scope) => ipcRenderer.invoke('session:set-auto-approve', { scope }),
   setOrchestrationMode: (sessionId, enabled) => ipcRenderer.invoke('session:set-orchestration-mode', { sessionId, enabled }),
-  approvePlan: (sessionId, approved) => ipcRenderer.invoke('session:approve-plan', { sessionId, approved }),
+  approvePlan: (sessionId, approved, tasks) =>
+    ipcRenderer.invoke('session:approve-plan', { sessionId, approved, ...(tasks ? { tasks } : {}) }),
+  acceptDelivery: (sessionId, deliveryId, candidateId) =>
+    ipcRenderer.invoke('session:accept-delivery', { sessionId, deliveryId, candidateId }),
+  returnDelivery: (sessionId, deliveryId, candidateId, feedback) =>
+    ipcRenderer.invoke('session:return-delivery', {
+      sessionId,
+      deliveryId,
+      candidateId,
+      feedback,
+    }),
   endSession: (sessionId) => ipcRenderer.invoke('session:end', { sessionId }),
   pickCwd: () => ipcRenderer.invoke('dialog:pick-cwd'),
   getVoiceConfig: () => ipcRenderer.invoke('settings:get-voice-config'),
@@ -55,6 +65,7 @@ const api = {
   requestMicPermission: () => ipcRenderer.invoke('mic:request-permission'),
   relaunchApp: () => ipcRenderer.invoke('app:relaunch'),
   asrAvailable: () => ipcRenderer.invoke('asr:available'),
+  deviceDiagnostics: () => ipcRenderer.invoke('device:diagnostics'),
   transcribePcm: (pcmBuffer, lang) => ipcRenderer.invoke('asr:transcribe', pcmBuffer, lang),
   polishAsrText: (text) => ipcRenderer.invoke('asr:polish-text', text),
   auth: {
@@ -216,6 +227,8 @@ const api = {
   },
   steerWorker: (sessionId, workerId, addendum) =>
     ipcRenderer.invoke('session:steer-worker', { sessionId, workerId, addendum }),
+  interruptWorker: (sessionId, workerId) =>
+    ipcRenderer.invoke('session:interrupt-worker', { sessionId, workerId }),
   onEvent: (cb) => {
     const listener = (_, e) => cb(e);
     ipcRenderer.on('session:event', listener);

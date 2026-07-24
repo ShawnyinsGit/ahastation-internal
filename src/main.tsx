@@ -1,3 +1,4 @@
+import { startDevFixtureIfPresent } from './dev-fixture-bootstrap';
 import React from 'react';
 import { createRoot } from 'react-dom/client';
 import { App } from './App';
@@ -7,6 +8,7 @@ import { OpenCodeEditor } from './components/OpenCodeEditor';
 import { CompanionScreen } from './components/CompanionScreen';
 import { AppErrorBoundary } from './components/AppErrorBoundary';
 import { parseEditorCapabilities } from './types';
+import { meetingStore } from './lib/meeting-store';
 import './styles.css';
 
 const params = new URLSearchParams(window.location.search);
@@ -57,3 +59,16 @@ root.render(
             : <App />}
   </AppErrorBoundary>,
 );
+
+if (import.meta.env.DEV) {
+  const fixture = params.get('ui-fixture');
+  if (fixture && fixture !== 'lobby') {
+    window.setTimeout(() => {
+      void meetingStore.openSession('/workspace/ahastation-demo').then(() => {
+        window.setTimeout(startDevFixtureIfPresent, 100);
+      });
+    }, 100);
+  } else {
+    window.setTimeout(startDevFixtureIfPresent, 100);
+  }
+}

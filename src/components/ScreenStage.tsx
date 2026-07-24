@@ -1,13 +1,24 @@
-import { ReactNode, RefObject, useState, useCallback, useMemo, cloneElement, isValidElement } from 'react';
+import {
+  ReactNode,
+  RefObject,
+  useState,
+  useCallback,
+  useMemo,
+  useRef,
+  cloneElement,
+  isValidElement,
+} from 'react';
 import type { ScreenShareState } from '../hooks/useScreenShare';
 import type { DeliverySnapshot, HostGroupState, WorkerState } from '../lib/meeting-store';
-import type { ActivityEntry, BrowserTabInfo, MeetingPlan } from '../types';
+import type { ActivityEntry, BrowserTabInfo, CoordinatorBriefing, MeetingPlan } from '../types';
 import type { StageWindow, StageWindowType } from '../lib/stage-window-store';
 import { FileViewer } from './FileViewer';
 import { BrowserStage } from './BrowserStage';
 import { StageTabBar } from './StageTabBar';
 import { TerminalPanel } from './TerminalPanel';
 import { ActivityTabContent } from './ActivityTabContent';
+import { DeliveryViewer } from './DeliveryViewer';
+import { TaskRail } from './TaskRail';
 
 interface ScreenStageProps {
   share: ScreenShareState;
@@ -17,12 +28,13 @@ interface ScreenStageProps {
   workers: WorkerState[];
   hostGroups: Map<string, HostGroupState>;
   plan: MeetingPlan | null;
+  coordinatorBriefings: CoordinatorBriefing[];
   running: boolean;
   aiSpeaking: boolean;
   galleryContent: ReactNode;
   delivery: DeliverySnapshot | null;
   sessionId: string | null;
-  onAcceptDelivery: () => void;
+  onAcceptDelivery: () => Promise<{ ok: true } | { ok: false; error: string }>;
   onReviseDelivery: (feedback: string) => Promise<
     | { ok: true; route: 'worker' | 'talker'; queued?: boolean }
     | { ok: false; error: string }
@@ -60,6 +72,7 @@ export function ScreenStage({
   workers,
   hostGroups,
   plan,
+  coordinatorBriefings,
   running,
   aiSpeaking = false,
   galleryContent,
@@ -89,17 +102,82 @@ export function ScreenStage({
   customAvatars,
 }: ScreenStageProps) {
   const [selectedParticipantId, setSelectedParticipantId] = useState<string | null>(null);
+  const [inspectorHeight, setInspectorHeight] = useState(76);
+  const [inspectorFullscreen, setInspectorFullscreen] = useState(false);
+  const dragState = useRef<{ pointerId: number; startY: number } | null>(null);
+  const suppressInspectorClick = useRef(false);
 
   const handleSelectParticipant = useCallback((id: string) => {
     setSelectedParticipantId(id);
+    setInspectorHeight(76);
+    setInspectorFullscreen(false);
     // Auto-switch to activity tab so the selection is visible
     if (activeWindowId !== ACTIVITY_TAB_ID) {
       onSelectWindow(ACTIVITY_TAB_ID);
     }
   }, [activeWindowId, onSelectWindow]);
 
+  const handleInspectorPointerDown = useCallback((event: React.PointerEvent<HTMLButtonElement>) => {
+    dragState.current = { pointerId: event.pointerId, startY: event.clientY };
+    suppressInspectorClick.current = false;
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }, []);
+
+  const handleInspectorPointerMove = useCallback((event: React.PointerEvent<HTMLButtonElement>) => {
+    if (dragState.current?.pointerId !== event.pointerId) return;
+    if (Math.abs(event.clientY - dragState.current.startY) > 4) {
+      suppressInspectorClick.current = true;
+    }
+    const next = Math.max(44, Math.min(100, ((window.innerHeight - event.clientY) / window.innerHeight) * 100));
+    setInspectorHeight(next);
+    setInspectorFullscreen(next >= 96);
+  }, []);
+
+  const finishInspectorDrag = useCallback((event: React.PointerEvent<HTMLButtonElement>) => {
+    if (dragState.current?.pointerId !== event.pointerId) return;
+    dragState.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    setInspectorHeight((current) => {
+      if (current >= 88) {
+        setInspectorFullscreen(true);
+        return 100;
+      }
+      if (current <= 56) return 52;
+      return 76;
+    });
+  }, []);
+
+  const toggleInspectorFullscreen = useCallback(() => {
+    setInspectorFullscreen((current) => {
+      setInspectorHeight(current ? 76 : 100);
+      return !current;
+    });
+  }, []);
+
   const activeWindow = stageWindows.find((w) => w.id === activeWindowId) ?? null;
   const isActivityTab = activeWindow?.type === 'activity' || activeWindowId === ACTIVITY_TAB_ID;
+  const selectedIsWorker = Boolean(
+    selectedParticipantId
+    && workers.some((worker) => worker.role !== 'talker' && worker.id === selectedParticipantId),
+  );
+  const capacity = useMemo(() => {
+    const nodes = plan?.nodes ?? [];
+    const statusById = new Map(nodes.map((node) => [node.id, node.status]));
+    const active = nodes.filter((node) => (
+      node.status === 'running'
+      || node.status === 'verifying'
+      || node.status === 'reviewing'
+      || node.status === 'awaiting-acceptance'
+      || node.status === 'reworking'
+    )).length;
+    const waiting = nodes.filter((node) => (
+      node.status === 'pending'
+      && node.deps.every((dependencyId) => statusById.get(dependencyId) === 'accepted')
+    )).length;
+    return { active, waiting, saturated: active >= 4 && waiting > 0 };
+  }, [plan]);
 
   // For terminal stage windows, find the worker whose activity should be
   // displayed. When no workerId is specified, aggregate all workers' Bash
@@ -168,6 +246,13 @@ export function ScreenStage({
               : galleryContent}
           </div>
 
+          {capacity.saturated && (
+            <div className="stage-capacity-banner" role="status" aria-live="polite">
+              <span>Worker 已满载（{capacity.active}/4）</span>
+              <small>{capacity.waiting} 项任务正在等待执行名额；已运行任务不会被抢占。</small>
+            </div>
+          )}
+
           <StageTabBar
             windows={stageWindows}
             activeWindowId={activeWindowId}
@@ -177,12 +262,89 @@ export function ScreenStage({
             onPopOut={onPopOutWindow}
           />
 
-          <div className="stage-content">
-            {isActivityTab && (
+          <TaskRail
+            plan={plan}
+            workers={workers}
+            selectedId={selectedParticipantId}
+            onSelect={handleSelectParticipant}
+          />
+
+          <div
+            className={`stage-content${selectedIsWorker && !delivery ? ' has-task-inspector' : ''}${inspectorFullscreen ? ' is-task-inspector-fullscreen' : ''}`}
+            style={selectedIsWorker && !delivery
+              ? { '--task-inspector-height': `${inspectorHeight}dvh` } as React.CSSProperties
+              : undefined}
+          >
+            {selectedIsWorker && !delivery && (
+              <>
+                <button
+                  type="button"
+                  className="task-inspector-drag-handle"
+                  onPointerDown={handleInspectorPointerDown}
+                  onPointerMove={handleInspectorPointerMove}
+                  onPointerUp={finishInspectorDrag}
+                  onPointerCancel={finishInspectorDrag}
+                  onClick={() => {
+                    if (suppressInspectorClick.current) {
+                      suppressInspectorClick.current = false;
+                      return;
+                    }
+                    toggleInspectorFullscreen();
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault();
+                      toggleInspectorFullscreen();
+                    } else if (event.key === 'ArrowUp') {
+                      event.preventDefault();
+                      setInspectorHeight((current) => Math.min(100, current + 12));
+                    } else if (event.key === 'ArrowDown') {
+                      event.preventDefault();
+                      setInspectorFullscreen(false);
+                      setInspectorHeight((current) => Math.max(44, current - 12));
+                    } else if (event.key === 'Home') {
+                      event.preventDefault();
+                      setInspectorFullscreen(true);
+                      setInspectorHeight(100);
+                    } else if (event.key === 'End') {
+                      event.preventDefault();
+                      setInspectorFullscreen(false);
+                      setInspectorHeight(52);
+                    }
+                  }}
+                  aria-label={inspectorFullscreen ? '收起任务检查器' : '展开任务检查器至全屏'}
+                  aria-valuemin={44}
+                  aria-valuemax={100}
+                  aria-valuenow={Math.round(inspectorHeight)}
+                >
+                  <span aria-hidden />
+                </button>
+                <button
+                  type="button"
+                  className="task-inspector-close"
+                  onClick={() => setSelectedParticipantId(null)}
+                  aria-label="关闭任务检查器"
+                >
+                  ×
+                </button>
+              </>
+            )}
+            {delivery ? (
+              <div className="stage-delivery-content">
+                <DeliveryViewer
+                  delivery={delivery}
+                  sessionId={sessionId}
+                  aiSpeaking={aiSpeaking}
+                  onAccept={onAcceptDelivery}
+                  onRevise={onReviseDelivery}
+                />
+              </div>
+            ) : isActivityTab && (
               <ActivityTabContent
                 workers={workers}
                 hostGroups={hostGroups}
                 plan={plan}
+                coordinatorBriefings={coordinatorBriefings}
                 running={running}
                 aiSpeaking={aiSpeaking}
                 onResolvePermission={onResolvePermission}
@@ -193,7 +355,7 @@ export function ScreenStage({
               />
             )}
 
-            {activeWindow?.type === 'browser' && browserViewportRef && onBrowserOpenTab && onBrowserCloseTab && onBrowserSetActive && onBrowserNavigate && onBrowserBack && onBrowserForward && onBrowserReload && (
+            {!delivery && activeWindow?.type === 'browser' && browserViewportRef && onBrowserOpenTab && onBrowserCloseTab && onBrowserSetActive && onBrowserNavigate && onBrowserBack && onBrowserForward && onBrowserReload && (
               <div className="stage-browser-content">
                 <BrowserStage
                   tabs={browserTabs}
@@ -210,13 +372,13 @@ export function ScreenStage({
               </div>
             )}
 
-            {activeWindow?.type === 'terminal' && (
+            {!delivery && activeWindow?.type === 'terminal' && (
               <div className="stage-terminal-content">
                 <TerminalPanel activity={terminalActivity} />
               </div>
             )}
 
-            {activeWindow?.type === 'file' && activeWindow.filePath && (
+            {!delivery && activeWindow?.type === 'file' && activeWindow.filePath && (
               <div className="stage-file-content">
                 <FileViewer
                   relativePath={activeWindow.filePath}

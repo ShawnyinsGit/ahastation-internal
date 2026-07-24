@@ -197,7 +197,9 @@ export function registerDocumentsIpc(ctx: IpcContext): void {
     // Redirect the rest of the handler to the resolved absolute path.
     const resolvedRawPath = absPath;
     const pathInCwd = isUnderCwd(resolvedRawPath, cwd);
-    if (!pathInCwd) {
+    const artifactRoot = slot.orchestrator.getDeliveryArtifactRoot();
+    const pathInArtifacts = isUnderCwd(resolvedRawPath, artifactRoot);
+    if (!pathInCwd && !pathInArtifacts) {
       const allowed = await maybeAuthorizeExternal(resolvedRawPath, dirname(resolvedRawPath), slot.id, ctx);
       if (!allowed) {
         return { ok: false, error: 'Path is not inside the session workspace', code: 'not-in-cwd' };
@@ -214,13 +216,13 @@ export function registerDocumentsIpc(ctx: IpcContext): void {
     } catch {
       return { ok: false, error: `File not found: ${basename(resolvedRawPath)}`, code: 'missing' };
     }
-    let realCwd: string;
+    let realAllowedRoot: string;
     try {
-      realCwd = await fs.realpath(cwd);
+      realAllowedRoot = await fs.realpath(pathInArtifacts ? artifactRoot : cwd);
     } catch {
-      realCwd = cwd;
+      realAllowedRoot = pathInArtifacts ? artifactRoot : cwd;
     }
-    if (pathInCwd && !isUnderCwd(realPath, realCwd)) {
+    if ((pathInCwd || pathInArtifacts) && !isUnderCwd(realPath, realAllowedRoot)) {
       console.warn(`[documents:read] symlink escape blocked: ${resolvedRawPath} -> ${realPath}`);
       return { ok: false, error: 'Path is not inside the session workspace', code: 'not-in-cwd' };
     }
@@ -427,7 +429,9 @@ export function registerDocumentsIpc(ctx: IpcContext): void {
     if (!rawPath) return { ok: false, error: 'Path required' };
     const absPath = isAbsolute(rawPath) ? rawPath : pathResolve(cwd, rawPath);
     const openInCwd = isUnderCwd(absPath, cwd);
-    if (!openInCwd) {
+    const artifactRoot = slot.orchestrator.getDeliveryArtifactRoot();
+    const openInArtifacts = isUnderCwd(absPath, artifactRoot);
+    if (!openInCwd && !openInArtifacts) {
       const allowed = await maybeAuthorizeExternal(absPath, dirname(absPath), slot.id, ctx);
       if (!allowed) return { ok: false, error: 'Path outside workspace' };
     }
@@ -435,9 +439,13 @@ export function registerDocumentsIpc(ctx: IpcContext): void {
     try { realPath = await fs.realpath(absPath); } catch {
       return { ok: false, error: 'File not found' };
     }
-    let realCwd: string;
-    try { realCwd = await fs.realpath(cwd); } catch { realCwd = cwd; }
-    if (openInCwd && !isUnderCwd(realPath, realCwd)) return { ok: false, error: 'Path outside workspace' };
+    let realAllowedRoot: string;
+    try { realAllowedRoot = await fs.realpath(openInArtifacts ? artifactRoot : cwd); } catch {
+      realAllowedRoot = openInArtifacts ? artifactRoot : cwd;
+    }
+    if ((openInCwd || openInArtifacts) && !isUnderCwd(realPath, realAllowedRoot)) {
+      return { ok: false, error: 'Path outside workspace' };
+    }
     const err = await shell.openPath(realPath);
     if (err) return { ok: false, error: err };
     return { ok: true };
@@ -456,5 +464,17 @@ export function registerDocumentsIpc(ctx: IpcContext): void {
       return { ok: false, error: `steer-worker failed: ${result.reason}`, reason: result.reason };
     }
     return { ok: true, queued: result.queued === true };
+  });
+
+  ipcMain.handle('session:interrupt-worker', async (_e, payload: { sessionId?: unknown; workerId?: unknown }) => {
+    const slot = ctx.registry.resolve(pickSessionId(payload));
+    if (!slot) return { ok: false, error: 'No active session' };
+    const workerId = typeof payload?.workerId === 'string' ? payload.workerId : '';
+    if (!/^[a-zA-Z0-9._-]{1,128}$/.test(workerId)) {
+      return { ok: false, error: 'Invalid workerId' };
+    }
+    const result = await slot.orchestrator.interruptWorker(workerId);
+    ctx.registry.touch(slot.id);
+    return result;
   });
 }

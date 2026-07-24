@@ -9,6 +9,7 @@
 // user clicks their own participant tile — replaces the old modal so the UX
 // matches clicking any other participant.
 
+import { useState } from 'react';
 import type { WorkerState } from '../lib/meeting-store';
 import type { MeetingPlan, WorkerStatus } from '../types';
 
@@ -27,12 +28,17 @@ interface TaskRow {
 }
 
 const STATUS_LABEL: Record<TaskRow['status'], string> = {
-  idle: 'Idle',
-  pending: 'Pending',
-  interrupted: 'Interrupted',
-  running: 'Running',
-  done: 'Done',
-  failed: 'Failed',
+  idle: '空闲',
+  pending: '等待调度',
+  interrupted: '已中断',
+  running: '执行中',
+  verifying: '校验中',
+  reviewing: '评审中',
+  'awaiting-acceptance': '等待验收',
+  reworking: '需要返工',
+  accepted: '已接受',
+  done: '已完成',
+  failed: '失败',
 };
 
 const STATUS_TONE: Record<TaskRow['status'], string> = {
@@ -40,6 +46,11 @@ const STATUS_TONE: Record<TaskRow['status'], string> = {
   pending: 'task-status-pending',
   interrupted: 'task-status-pending',
   running: 'task-status-running',
+  verifying: 'task-status-running',
+  reviewing: 'task-status-running',
+  'awaiting-acceptance': 'task-status-pending',
+  reworking: 'task-status-failed',
+  accepted: 'task-status-done',
   done: 'task-status-done',
   failed: 'task-status-failed',
 };
@@ -67,13 +78,17 @@ function buildRows(workers: WorkerState[], plan?: MeetingPlan | null): TaskRow[]
 
 export function UserTasksPanel({ workers, plan, sessionId }: UserTasksPanelProps) {
   const rows = buildRows(workers, plan);
+  const [pendingRecovery, setPendingRecovery] = useState<{
+    taskId: string;
+    action: 'continue' | 'retry';
+  } | null>(null);
+  const [recoveryError, setRecoveryError] = useState('');
 
-  const resolveInterrupted = async (taskId: string, action: 'continue' | 'retry' | 'complete' | 'abandon') => {
-    if ((action === 'continue' || action === 'retry') && !window.confirm(
-      '该任务上次执行被中断。重新启动可能重复外部副作用，确认继续吗？',
-    )) return;
+  const resolveInterrupted = async (taskId: string, action: 'continue' | 'retry' | 'abandon') => {
+    setRecoveryError('');
     const result = await window.vibeMeet.sessions.resolveRecoveredTask(sessionId ?? null, taskId, action);
-    if (!result.ok) window.alert(result.error);
+    if (!result.ok) setRecoveryError(result.error);
+    else setPendingRecovery(null);
   };
 
   return (
@@ -116,12 +131,31 @@ export function UserTasksPanel({ workers, plan, sessionId }: UserTasksPanelProps
                       {STATUS_LABEL[row.status]}
                     </span>
                     {row.status === 'interrupted' && (
-                      <div className="user-tasks-recovery-actions">
-                        <button type="button" onClick={() => { void resolveInterrupted(row.id, 'continue'); }}>继续</button>
-                        <button type="button" onClick={() => { void resolveInterrupted(row.id, 'retry'); }}>重跑</button>
-                        <button type="button" onClick={() => { void resolveInterrupted(row.id, 'complete'); }}>完成</button>
-                        <button type="button" onClick={() => { void resolveInterrupted(row.id, 'abandon'); }}>放弃</button>
-                      </div>
+                      <>
+                        <div className="user-tasks-recovery-actions">
+                          <button type="button" onClick={() => setPendingRecovery({ taskId: row.id, action: 'continue' })}>继续</button>
+                          <button type="button" onClick={() => setPendingRecovery({ taskId: row.id, action: 'retry' })}>重跑</button>
+                          <button type="button" onClick={() => { void resolveInterrupted(row.id, 'abandon'); }}>放弃</button>
+                        </div>
+                        {pendingRecovery?.taskId === row.id && (
+                          <div className="user-tasks-recovery-confirm" role="alert">
+                            <strong>{pendingRecovery.action === 'continue' ? '从现有工作区继续' : '创建新的重跑 attempt'}</strong>
+                            <p>执行前会检查现有文件，但仍可能重复网络请求、发布或其他外部副作用。</p>
+                            <div>
+                              <button type="button" onClick={() => setPendingRecovery(null)}>取消</button>
+                              <button
+                                type="button"
+                                className="is-primary"
+                                onClick={() => {
+                                  void resolveInterrupted(row.id, pendingRecovery.action);
+                                }}
+                              >
+                                确认{pendingRecovery.action === 'continue' ? '继续' : '重跑'}
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </>
                     )}
                   </td>
                   <td className="user-tasks-col-owner">
@@ -133,6 +167,7 @@ export function UserTasksPanel({ workers, plan, sessionId }: UserTasksPanelProps
           </table>
         )}
       </div>
+      {recoveryError && <div className="user-tasks-recovery-error" role="alert">{recoveryError}</div>}
     </div>
   );
 }

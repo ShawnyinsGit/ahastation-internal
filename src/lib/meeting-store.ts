@@ -3,13 +3,18 @@ import type {
   AgentSource,
   AttachmentMeta,
   AutoApproveScope,
+  CoordinatorBriefing,
   MeetingPlan,
+  PlanMeetingTaskInput,
   OpenTabMeta,
   PendingPermission,
   RecentCwdMeta,
   RendererEvent,
   StagedAttachment,
   TranscriptEntry,
+  DeliveryView,
+  WorkReport,
+  WorkerEventV2,
   WorkerDeliveryFile,
   WorkerSpecialty,
   WorkerStatus,
@@ -19,6 +24,7 @@ import { MEETING_TOOL_NAMES } from '../../electron/meeting-tools';
 import { redactSecrets } from '../../electron/format-error';
 import { extractText, extractToolUses, uid } from './sdk-message';
 import { isSpeechActive, type SpeakHandle } from './speech-session';
+import { reduceWorkerEvent } from './worker-event-reducer';
 
 const MAX_TRANSCRIPT = 500;
 const MAX_ACTIVITY = 500;
@@ -118,27 +124,41 @@ export interface WorkerState {
   taskHistory: WorkerTaskHistoryEntry[];
   /** Host group this worker belongs to. Defaults to 'default'. */
   hostId: string;
+  backendId?: string;
+  attempt?: number;
+  eventSeq?: number;
+  workReport?: WorkReport;
+  workerEvents?: WorkerEventV2[];
 }
 
 /** Snapshot of one worker's delivered artifacts, displayed in the ScreenStage
- *  "delivery acceptance" panel. Pushed by a `worker-delivery` event from main
- *  when the worker calls `task_done`. Cleared by the user accepting or by a
- *  new delivery from any worker (only the most recent delivery is staged). */
-export type DeliveryStatus = 'pending' | 'accepted' | 'revised';
+ *  delivery acceptance panel. Main emits it only after a schema-valid
+ *  WorkReport passes into DeliveryHarness; legacy task_done cannot create it.
+ *  It is cleared by acceptance or replaced by a newer reviewed delivery. */
+export type DeliveryStatus = DeliveryView['status'] | 'legacy-pending';
 
 export interface DeliverySnapshot {
   workerId: AgentSource;
   title: string;
   summary: string;
   taskId: string;
+  deliveryId: string;
+  candidateId: string | null;
   files: WorkerDeliveryFile[];
   receivedAt: number;
   status: DeliveryStatus;
+  attempt: number;
+  report?: WorkReport;
+  verification?: { passed: boolean; checks: unknown[]; error?: string };
+  review?: { passed: boolean; findings: unknown[] };
+  error?: string;
+  view?: DeliveryView;
 }
 
 export interface MeetingState {
   workers: Map<AgentSource, WorkerState>;
   plan: MeetingPlan | null;
+  pendingPlan: PlanMeetingTaskInput[] | null;
   running: boolean;
   lastError: string | null;
   /** Most recent delivery awaiting user acceptance. Null when nothing is
@@ -146,6 +166,7 @@ export interface MeetingState {
    *  freshest one. */
   currentDelivery: DeliverySnapshot | null;
   deliveryHistory: DeliverySnapshot[];
+  coordinatorBriefings: CoordinatorBriefing[];
   /** Paths of documents saved via the save_document MCP tool. The renderer
    *  watches this array and auto-opens each new path as a file tab. */
   savedDocuments: string[];
@@ -312,10 +333,12 @@ function emptyState(defaultBackendId: string = 'claude-code'): MeetingState {
   return {
     workers,
     plan: null,
+    pendingPlan: null,
     running: false,
     lastError: null,
     currentDelivery: null,
     deliveryHistory: [],
+    coordinatorBriefings: [],
     savedDocuments: [],
     hostGroups,
     coordinatorHostId: 'default',
@@ -1123,23 +1146,118 @@ class MeetingStore {
       }
       return;
     }
-    if (e.kind === 'worker-delivery') {
-      const snapshot: DeliverySnapshot = {
-        workerId: e.workerId,
-        title: e.title,
-        summary: e.summary,
-        taskId: e.taskId,
-        files: e.files,
-        receivedAt: Date.now(),
-        status: 'pending',
-      };
-      const MAX_DELIVERY_HISTORY = 20;
+    if (e.kind === 'coordinator-briefing') {
       this.mutateSlot(slot.id, (s) => ({
         ...s,
-        currentDelivery: snapshot,
-        deliveryHistory: [...s.deliveryHistory, snapshot].slice(-MAX_DELIVERY_HISTORY),
+        coordinatorBriefings: [...s.coordinatorBriefings, e.briefing].slice(-50),
       }));
       this.bumpUnread(slot);
+      return;
+    }
+    if (e.kind === 'worker-delivery') {
+      const MAX_DELIVERY_HISTORY = 20;
+      this.mutateSlot(slot.id, (s) => {
+        const prior = s.deliveryHistory.find((item) => item.deliveryId === e.deliveryId);
+        const snapshot: DeliverySnapshot = prior
+          ? {
+              ...prior,
+              title: e.title,
+              summary: e.summary,
+              files: e.files,
+              receivedAt: Date.now(),
+            }
+          : {
+              workerId: e.workerId,
+              title: e.title,
+              summary: e.summary,
+              taskId: e.taskId,
+              deliveryId: e.deliveryId,
+              candidateId: null,
+              files: e.files,
+              receivedAt: Date.now(),
+              status: 'legacy-pending',
+              attempt: 1,
+            };
+        const deliveryHistory = prior
+          ? s.deliveryHistory.map((item) => item.deliveryId === e.deliveryId ? snapshot : item)
+          : [...s.deliveryHistory, snapshot].slice(-MAX_DELIVERY_HISTORY);
+        return {
+          ...s,
+          currentDelivery: snapshot.status === 'accepted' ? null : snapshot,
+          deliveryHistory,
+        };
+      });
+      this.bumpUnread(slot);
+      return;
+    }
+    if (e.kind === 'worker-event') {
+      const incoming = e.event;
+      this.updateWorker(slot, incoming.workerId, (worker) =>
+        reduceWorkerEvent(worker, incoming, e.source) as WorkerState);
+      return;
+    }
+    if (e.kind === 'delivery-status') {
+      const delivery = e.delivery;
+      const statusMap: Partial<Record<DeliveryView['status'], WorkerStatus>> = {
+        'preparing-workspace': 'running',
+        executing: 'running',
+        verifying: 'verifying',
+        reviewing: 'reviewing',
+        'awaiting-delivery-acceptance': 'awaiting-acceptance',
+        integrating: 'reviewing',
+        reworking: 'reworking',
+        accepted: 'accepted',
+        interrupted: 'interrupted',
+        failed: 'failed',
+        cancelled: 'failed',
+      };
+      const workerStatus = statusMap[delivery.status];
+      if (workerStatus) {
+        this.updateWorker(slot, e.workerId, (worker) => ({
+          ...worker,
+          status: workerStatus,
+          attempt: delivery.attempt,
+          summary: delivery.candidate?.report.summary ?? worker.summary,
+        }));
+      }
+      const MAX_DELIVERY_HISTORY = 20;
+      this.mutateSlot(slot.id, (s) => {
+        const worker = s.workers.get(e.workerId);
+        const prior = s.deliveryHistory.find((item) => item.deliveryId === delivery.id);
+        const latestAttempt = delivery.attempts.at(-1);
+        const snapshot: DeliverySnapshot = {
+          workerId: e.workerId,
+          title: prior?.title ?? worker?.title ?? e.taskId,
+          summary: delivery.candidate?.report.summary
+            ?? latestAttempt?.report.summary
+            ?? worker?.workReport?.summary
+            ?? prior?.summary
+            ?? '',
+          taskId: e.taskId,
+          deliveryId: delivery.id,
+          candidateId: delivery.candidate?.id ?? null,
+          files: prior?.files ?? [],
+          receivedAt: delivery.updatedAt,
+          status: delivery.status,
+          attempt: delivery.attempt,
+          report: delivery.candidate?.report ?? latestAttempt?.report ?? worker?.workReport ?? prior?.report,
+          verification: delivery.candidate?.verification ?? latestAttempt?.verification,
+          review: delivery.candidate?.review ?? latestAttempt?.review,
+          error: delivery.error,
+          view: delivery,
+        };
+        const deliveryHistory = prior
+          ? s.deliveryHistory.map((item) => item.deliveryId === delivery.id ? snapshot : item)
+          : [...s.deliveryHistory, snapshot].slice(-MAX_DELIVERY_HISTORY);
+        const visible = ['verifying', 'reviewing', 'awaiting-delivery-acceptance', 'reworking']
+          .includes(delivery.status);
+        const currentDelivery = visible
+          ? snapshot
+          : s.currentDelivery?.deliveryId === delivery.id
+            ? null
+            : s.currentDelivery;
+        return { ...s, currentDelivery, deliveryHistory };
+      });
       return;
     }
     if (e.kind === 'plan-updated') {
@@ -1147,15 +1265,19 @@ class MeetingStore {
       return;
     }
     if (e.kind === 'plan-proposed') {
-      const summary = e.tasks
-        .map((task) => `• ${task.title} → ${task.executorBackendId ?? 'coordinator backend'}`)
-        .join('\n');
-      const approved = window.confirm(`Host 提议了 ${e.tasks.length} 个任务：\n\n${summary}\n\n是否启动这些 Worker？`);
-      void window.vibeMeet.approvePlan(slot.id, approved).then((result) => {
-        if (!result.ok) {
-          this.mutateSlot(slot.id, (s) => ({ ...s, lastError: result.error ?? 'Plan approval failed' }));
-        }
-      });
+      this.mutateSlot(slot.id, (s) => ({
+        ...s,
+        pendingPlan: e.tasks.map((task) => ({
+          ...task,
+          deps: [...task.deps],
+          acceptanceCriteria: task.acceptanceCriteria?.map((criterion) => ({
+            ...criterion,
+            verification: criterion.verification.kind === 'command'
+              ? { ...criterion.verification, argv: [...criterion.verification.argv] }
+              : { kind: 'manual' },
+          })),
+        })),
+      }));
       return;
     }
     if (e.kind === 'auth-required') {
@@ -2012,22 +2134,23 @@ class MeetingStore {
 
   // --- Delivery acceptance --------------------------------------------------
 
-  /** Dismiss the staged delivery — user signed off on the work. We don't
-   *  echo anything back to the worker; the absence of feedback IS the
-   *  acceptance signal (worker has already been disposed by markTaskDone). */
-  acceptDelivery() {
+  /** Submit an authoritative acceptance decision to main. The renderer does
+   *  not clear or mark anything locally; it waits for the journal-backed
+   *  delivery-status event emitted by the Orchestrator. */
+  async acceptDelivery(): Promise<{ ok: true } | { ok: false; error: string }> {
     const id = this.effectiveSessionId();
-    if (!id) return;
+    if (!id) return { ok: false, error: 'No active session' };
     const slot = this.slots.get(id);
-    if (!slot || !slot.state.currentDelivery) return;
-    const taskId = slot.state.currentDelivery.taskId;
-    this.mutateSlot(slot.id, (s) => ({
-      ...s,
-      currentDelivery: null,
-      deliveryHistory: s.deliveryHistory.map((d) =>
-        d.taskId === taskId ? { ...d, status: 'accepted' as const } : d,
-      ),
-    }));
+    const delivery = slot?.state.currentDelivery;
+    if (!delivery?.candidateId || !delivery.deliveryId) {
+      return { ok: false, error: 'Delivery is not ready for acceptance' };
+    }
+    const result = await window.vibeMeet.acceptDelivery(
+      id,
+      delivery.deliveryId,
+      delivery.candidateId,
+    );
+    return result.ok ? { ok: true } : result;
   }
 
   /** Push revision feedback back into the meeting. Tries the worker's
@@ -2046,70 +2169,41 @@ class MeetingStore {
       return { ok: false, error: 'No delivery staged' };
     }
     const delivery = slot.state.currentDelivery;
-    const workerId = delivery.workerId;
-
-    const directRes = await window.vibeMeet.steerWorker(id, workerId, trimmed);
-    if (directRes.ok) {
-      this.markDeliveryRevised(slot, workerId, trimmed);
-      return { ok: true, route: 'worker', queued: directRes.queued };
+    if (!delivery.deliveryId) {
+      return { ok: false, error: 'Delivery is not ready to be returned' };
     }
-
-    // Worker already torn down (status='done'/'failed' or session gone) —
-    // route through the talker so it can re-delegate. We append a transcript
-    // entry that mirrors what the user sees so the chat history shows the
-    // request, and we let the talker decide how to dispatch it.
-    const fileLine = delivery.files.length > 0
-      ? `\n相关文件:\n${delivery.files.map((f) => `  - ${f.path}`).join('\n')}`
-      : '';
-    const synthetic = [
-      `刚才 ${workerId}「${delivery.title}」交付的内容我看过了，需要继续改:`,
+    if (delivery.status !== 'awaiting-delivery-acceptance' && delivery.status !== 'reworking') {
+      return { ok: false, error: 'Delivery is not ready to be returned' };
+    }
+    const result = await window.vibeMeet.returnDelivery(
+      id,
+      delivery.deliveryId,
+      delivery.candidateId ?? undefined,
       trimmed,
-      fileLine,
-      '请把这条修改意见交回去（可以复用同一个 worker，也可以重新派活）。',
-    ].filter(Boolean).join('\n');
-
-    await window.vibeMeet.sendUserText(id, synthetic);
-    const revisionEntry: TranscriptEntry = {
-      id: uid(),
-      role: 'user',
-      text: `[对 ${delivery.title} 的修改意见] ${trimmed}`,
-      ts: Date.now(),
-    };
-    this.updateWorker(slot, 'talker', (w) => ({
-      ...w,
-      transcript: appendCapped(w.transcript, [revisionEntry], MAX_TRANSCRIPT),
-    }));
-    this.persistTalkerEntry(slot, revisionEntry);
-    this.markDeliveryRevised(slot, workerId, trimmed);
-    return { ok: true, route: 'talker' };
+    );
+    return result.ok
+      ? { ok: true, route: 'worker' }
+      : { ok: false, error: result.error };
   }
 
-  private markDeliveryRevised(slot: SlotInternal, workerId: AgentSource, feedback: string) {
-    const taskId = slot.state.currentDelivery?.taskId;
-    this.mutateSlot(slot.id, (s) => ({
-      ...s,
-      currentDelivery: null,
-      deliveryHistory: taskId
-        ? s.deliveryHistory.map((d) =>
-            d.taskId === taskId ? { ...d, status: 'revised' as const } : d,
-          )
-        : s.deliveryHistory,
-    }));
-    this.updateWorker(slot, workerId, (w) => ({
-      ...w,
-      activity: appendCapped(
-        w.activity,
-        [{
-          id: uid(),
-          kind: 'system',
-          title: '用户提出修改意见',
-          detail: feedback.slice(0, 300),
-          ts: Date.now(),
-          source: workerId,
-        }],
-        MAX_ACTIVITY,
-      ),
-    }));
+  async decidePendingPlan(
+    approved: boolean,
+    tasks?: PlanMeetingTaskInput[],
+  ): Promise<{ ok: boolean; error?: string }> {
+    const id = this.effectiveSessionId();
+    if (!id) return { ok: false, error: 'No active session' };
+    const slot = this.slots.get(id);
+    if (!slot?.state.pendingPlan) return { ok: false, error: 'No pending plan' };
+    const result = await window.vibeMeet.approvePlan(id, approved, tasks);
+    if (result.ok) {
+      this.mutateSlot(id, (state) => ({ ...state, pendingPlan: null }));
+    } else {
+      this.mutateSlot(id, (state) => ({
+        ...state,
+        lastError: result.error ?? 'Plan approval failed',
+      }));
+    }
+    return result;
   }
 
   // ===========================================================================
