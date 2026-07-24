@@ -236,10 +236,10 @@ test('canonical WorkerEvent and delivery state are journaled before renderer emi
       findings: [],
     });
     await orchestrator.completeDeliveryReview(reviewId);
-    const acceptanceDeadline = Date.now() + 15_000;
+    const acceptanceDeadline = Date.now() + 30_000;
     while (!events.some((event) => (
       event.event.kind === 'delivery-status'
-      && event.event.delivery.status === 'awaiting-delivery-acceptance'
+      && event.event.delivery.status === 'accepted'
     ))) {
       if (Date.now() > acceptanceDeadline) assert.fail('renderer delivery event did not arrive');
       await new Promise((resolve) => setTimeout(resolve, 5));
@@ -253,7 +253,7 @@ test('canonical WorkerEvent and delivery state are journaled before renderer emi
     assert.equal(journal.some((event) => (
       event.type === 'event:delivery-status'
       && event.payload.event.kind === 'delivery-status'
-      && event.payload.event.delivery.status === 'awaiting-delivery-acceptance'
+      && event.payload.event.delivery.status === 'accepted'
     )), true);
   } finally {
     await orchestrator.end();

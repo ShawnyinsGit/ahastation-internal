@@ -25,6 +25,8 @@ async function waitFor(predicate, message) {
 test('dependency is released only after journal-shaped delivery acceptance', async () => {
   const events = [];
   const sessions = [];
+  const workspaceInputs = [];
+  let integrationHead;
   let releaseJournalFlush;
   let flushStarted = false;
   const journalFlush = new Promise((resolve) => {
@@ -34,7 +36,17 @@ test('dependency is released only after journal-shaped delivery acceptance', asy
     executionMode: 'external',
     verifier: { async verify() { return { passed: true, checks: [{ id: 'tests' }] }; } },
     reviewer: { async review() { return { passed: true, findings: [] }; } },
-    integrator: { async integrate() { return { kind: 'test' }; } },
+    integrator: {
+      async integrate() {
+        integrationHead = 'accepted-integration-head';
+        return {
+          kind: 'meeting-branch',
+          sourceRevision: 'base-revision',
+          resultRevision: integrationHead,
+          workspace: process.cwd(),
+        };
+      },
+    },
   });
   const scheduler = new WorkerScheduler({
     emit(event) { events.push(event); },
@@ -61,6 +73,32 @@ test('dependency is released only after journal-shaped delivery acceptance', asy
     meetingId: 'meeting-slice',
     defaultBackendId: 'opencode',
     deliveryHarness: harness,
+    getIntegrationHead() { return integrationHead; },
+    workspaceManager: {
+      inspectBaseline() {
+        return {
+          kind: 'git-clean',
+          revision: 'base-revision',
+          changedPaths: [],
+          untrackedPaths: [],
+          truncated: false,
+        };
+      },
+      preparationBlock() { return null; },
+      canPrepare() { return true; },
+      prepare(taskId, input) {
+        workspaceInputs.push({ taskId, input });
+        return {
+          kind: input.mode,
+          cwd: process.cwd(),
+          sourceRevision: input.sourceRevision ?? 'base-revision',
+          lockKeys: [],
+          baseline: this.inspectBaseline(),
+          managed: true,
+        };
+      },
+      release() {},
+    },
     async flushEvents() {
       flushStarted = true;
       await journalFlush;
@@ -134,6 +172,11 @@ test('dependency is released only after journal-shaped delivery acceptance', asy
     .at(-1).plan;
   assert.equal(plan.nodes.find((node) => node.id === 'first').status, 'accepted');
   assert.equal(plan.nodes.find((node) => node.id === 'dependent').status, 'running');
+  assert.equal(
+    workspaceInputs.find((entry) => entry.taskId === 'dependent').input.sourceRevision,
+    'accepted-integration-head',
+    'dependent task must start from the durably accepted Meeting integration head',
+  );
   scheduler.endAll();
 });
 

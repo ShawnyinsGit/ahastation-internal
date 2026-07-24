@@ -73,7 +73,8 @@ import {
 import { DeliveryHarness } from './delivery-harness.js';
 import { CommandDeliveryVerifier } from './delivery-verifier.js';
 import { DeterministicDeliveryReviewer } from './delivery-reviewer.js';
-import { WorkspaceDeliveryIntegrator } from './delivery-integrator.js';
+import { GitDeliveryIntegrator } from './delivery-integrator.js';
+import { IntegrationQueue } from './integration-queue.js';
 import { prepareFrozenDeliveryCandidate } from './delivery-candidate.js';
 import {
   CoordinatorReviewDriver,
@@ -193,6 +194,7 @@ export class Orchestrator implements OrchestratorBridge {
   private taskProjection: TaskProjectionResult = { tasks: [], diagnostics: [] };
   private deliveryHarness: DeliveryHarness;
   private coordinatorReviewDriver: CoordinatorReviewDriver;
+  private integrationQueue: IntegrationQueue;
   private workspaceManager: TaskWorkspaceManager;
   private customWorkspaceManager: boolean;
   private diagnostics: DiagnosticLogger;
@@ -270,6 +272,40 @@ export class Orchestrator implements OrchestratorBridge {
     this.customWorkspaceManager = opts.workspaceManager !== undefined;
     this.workspaceManager = opts.workspaceManager
       ?? new TaskWorkspaceManager(this.meetingId, this.cwd);
+    const baseline = this.workspaceManager.inspectBaseline();
+    const deliveryVerifier = new CommandDeliveryVerifier();
+    this.integrationQueue = new IntegrationQueue({
+      meetingId: this.meetingId,
+      expectedUserBaseRevision: baseline.revision,
+      integrator: new GitDeliveryIntegrator(
+        this.cwd,
+        this.meetingId,
+        path.join(homedir(), '.ahastation', 'integration-worktrees'),
+      ),
+      verify: (view, candidate, workspace) => deliveryVerifier.verify({
+        deliveryId: view.id,
+        ...(view.spec.taskId ? { taskId: view.spec.taskId } : {}),
+        attempt: candidate.attempt,
+        meetingId: view.meetingId,
+        goal: view.spec.objective,
+        acceptanceCriteria: structuredClone(view.spec.acceptanceCriteria),
+        workspace,
+        sourceRevision: view.sourceRevision,
+      }, candidate.report),
+      append: async (type, payload) => {
+        const record = payload as {
+          taskId?: string;
+          attempt?: number;
+        };
+        await this.repository.appendTaskEvent(type, {
+          schemaVersion: 1,
+          taskId: record.taskId ?? 'unknown-integration-task',
+          ...(record.attempt ? { attempt: record.attempt } : {}),
+          data: payload,
+        });
+      },
+      flush: () => this.repository.flush(),
+    });
     this.coordinatorReviewDriver = new CoordinatorReviewDriver({
       append: async (type, payload) => {
         const projection = (payload as {
@@ -293,14 +329,16 @@ export class Orchestrator implements OrchestratorBridge {
     });
     this.deliveryHarness = new DeliveryHarness({
       executionMode: 'external',
-      verifier: new CommandDeliveryVerifier(),
+      verifier: deliveryVerifier,
       reviewer: new DeterministicDeliveryReviewer(),
       candidatePreparer: {
         prepare: (order, report, verification) =>
           prepareFrozenDeliveryCandidate({ order, report, verification }),
       },
       reviewDriver: this.coordinatorReviewDriver,
-      integrator: new WorkspaceDeliveryIntegrator(this.cwd),
+      integrator: {
+        integrate: (view, candidate) => this.integrationQueue.enqueue(view, candidate),
+      },
     });
     this.diagnostics = new DiagnosticLogger(this.meetingId);
     this.repositoryReady = this.repository
@@ -461,6 +499,7 @@ export class Orchestrator implements OrchestratorBridge {
       deliveryHarness: this.deliveryHarness,
       deliveryArtifactRoot: this.repository.deliveryArtifactRoot(),
       flushEvents: () => this.repository.flush(),
+      getIntegrationHead: () => this.integrationQueue.currentHead(),
       initialPlanVersion: id === DEFAULT_HOST_ID ? this.recoveredPlanVersion : 0,
       getAuthorizedTaskContextSource: (taskId, selection) =>
         this.getAuthorizedTaskContextSource(taskId, selection),
@@ -880,6 +919,7 @@ export class Orchestrator implements OrchestratorBridge {
     await this.repositoryReady;
     this.repository.assertWritable();
     const journal = await MeetingRepository.replay(this.meetingId);
+    this.integrationQueue.restore(journal);
     this.taskMailbox.restore(journal);
     this.taskProjection = projectMeetingTasks(journal);
     await this.defaultHost().start(greeting);

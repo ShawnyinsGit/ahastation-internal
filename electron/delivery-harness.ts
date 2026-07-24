@@ -14,7 +14,9 @@ export type DeliveryStatus =
   | 'reviewing'
   | 'coordinator-reviewing'
   | 'awaiting-delivery-acceptance'
+  | 'integration-queued'
   | 'integrating'
+  | 'integration-conflict'
   | 'accepted'
   | 'reworking'
   | 'interrupted'
@@ -84,6 +86,8 @@ export interface DeliveryAttempt {
     | 'review-failed'
     | 'coordinator-reviewing'
     | 'awaiting-acceptance'
+    | 'integration-queued'
+    | 'integration-failed'
     | 'returned'
     | 'accepted';
   feedback?: string;
@@ -257,24 +261,7 @@ export class DeliveryHarness {
           throw new Error('delivery is not ready for acceptance');
         }
         if (record.view.candidate.id !== decision.candidateId) throw new Error('candidate mismatch');
-        this.transition(record, 'integrating');
-        try {
-          record.view.integration = await this.deps.integrator.integrate(
-            cloneView(record.view), structuredClone(record.view.candidate),
-          );
-          const attempt = record.view.attempts.find(
-            (item) => item.attempt === record.view.candidate?.attempt,
-          );
-          if (attempt) {
-            attempt.outcome = 'accepted';
-            attempt.updatedAt = this.now();
-          }
-          this.transition(record, 'accepted', 'delivery.accepted');
-        } catch (error) {
-          record.view.error = error instanceof Error ? error.message : String(error);
-          this.transition(record, 'failed', 'delivery.failed', record.view.error);
-          throw error;
-        }
+        await this.integrateCandidate(record);
         break;
       }
       case 'return-delivery': {
@@ -290,7 +277,10 @@ export class DeliveryHarness {
             attempt.feedback = decision.feedback;
             attempt.updatedAt = this.now();
           }
-        } else if (record.view.status === 'reworking') {
+        } else if (
+          record.view.status === 'reworking'
+          || record.view.status === 'integration-conflict'
+        ) {
           const attempt = record.view.attempts.find((item) => item.attempt === record.view.attempt);
           if (attempt) {
             attempt.feedback = decision.feedback;
@@ -368,7 +358,7 @@ export class DeliveryHarness {
       findings: session.reviews.flatMap((item) => item.findings),
     };
     attempt.review = structuredClone(review);
-    attempt.outcome = 'awaiting-acceptance';
+    attempt.outcome = 'integration-queued';
     attempt.updatedAt = this.now();
     record.view.candidate = {
       id: session.candidate.id,
@@ -383,7 +373,8 @@ export class DeliveryHarness {
       },
     };
     record.view.error = undefined;
-    this.transition(record, 'awaiting-delivery-acceptance');
+    this.transition(record, 'integration-queued');
+    await this.integrateCandidate(record);
     return cloneView(record.view);
   }
 
@@ -547,7 +538,11 @@ export class DeliveryHarness {
       return;
     }
 
-    if (this.deps.candidatePreparer && this.deps.reviewDriver) {
+    if (
+      this.deps.candidatePreparer
+      && this.deps.reviewDriver
+      && order.sourceRevision !== 'non-git'
+    ) {
       let frozen: FrozenDeliveryCandidate;
       try {
         frozen = await this.deps.candidatePreparer.prepare(order, report, verification);
@@ -588,6 +583,42 @@ export class DeliveryHarness {
     attempt.outcome = 'awaiting-acceptance';
     attempt.updatedAt = this.now();
     this.transition(record, 'awaiting-delivery-acceptance');
+  }
+
+  private async integrateCandidate(record: DeliveryRecord): Promise<void> {
+    const candidate = record.view.candidate;
+    if (!candidate) throw new Error('delivery candidate is missing');
+    this.transition(record, 'integrating');
+    try {
+      record.view.integration = await this.deps.integrator.integrate(
+        cloneView(record.view),
+        structuredClone(candidate),
+      );
+      const attempt = record.view.attempts.find((item) => item.attempt === candidate.attempt);
+      if (attempt) {
+        attempt.outcome = 'accepted';
+        attempt.updatedAt = this.now();
+      }
+      record.view.error = undefined;
+      this.transition(record, 'accepted', 'delivery.accepted');
+    } catch (error) {
+      record.view.error = error instanceof Error ? error.message : String(error);
+      const conflict = error instanceof Error
+        && 'code' in error
+        && error.code === 'integration-conflict';
+      const attempt = record.view.attempts.find((item) => item.attempt === candidate.attempt);
+      if (attempt) {
+        attempt.outcome = 'integration-failed';
+        attempt.updatedAt = this.now();
+      }
+      this.transition(
+        record,
+        conflict ? 'integration-conflict' : 'failed',
+        'delivery.failed',
+        record.view.error,
+      );
+      throw error;
+    }
   }
 
   private toWorkOrder(view: DeliveryView): WorkOrder {

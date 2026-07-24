@@ -160,6 +160,7 @@ export interface WorkerSchedulerOpts {
   deliveryArtifactRoot?: string;
   /** Waits until previously emitted canonical events are durable. */
   flushEvents?: () => Promise<void>;
+  getIntegrationHead?: () => string | undefined;
   /** Durable structural plan version restored with the meeting snapshot. */
   initialPlanVersion?: number;
   /** Orchestrator-owned, read-only source of user-visible Meeting context. */
@@ -1675,6 +1676,9 @@ export class WorkerScheduler {
       reviewing: 'reviewing',
       'coordinator-reviewing': 'reviewing',
       'awaiting-delivery-acceptance': 'awaiting-acceptance',
+      'integration-queued': 'integration-queued',
+      integrating: 'integrating',
+      'integration-conflict': 'integration-conflict',
       reworking: 'reworking',
       accepted: 'accepted',
       interrupted: 'interrupted',
@@ -1698,6 +1702,8 @@ export class WorkerScheduler {
   private async emitDeliveryCandidate(handle: WorkerHandle, view: DeliveryView): Promise<void> {
     const report = view.candidate?.report;
     if (!report) return;
+    if (handle.emittedCandidateId === view.candidate?.id) return;
+    handle.emittedCandidateId = view.candidate?.id;
     const workerCwd = handle.workspace?.cwd ?? this.opts.cwd;
     const deliveredPaths = report.files
       .filter((file) => file.action !== 'deleted')
@@ -1733,6 +1739,15 @@ export class WorkerScheduler {
       for await (const _event of this.opts.deliveryHarness.observe(deliveryId)) {
         const view = await this.opts.deliveryHarness.inspect(deliveryId);
         this.applyDeliveryView(handle, view);
+        if (
+          view.candidate
+          && ['integration-queued', 'integrating', 'accepted'].includes(view.status)
+        ) {
+          await this.emitDeliveryCandidate(handle, view);
+        }
+        if (view.status === 'accepted') {
+          await this.finalizeAcceptedHandle(handle);
+        }
       }
     } catch (error) {
       console.warn('[scheduler] delivery observer stopped', {
@@ -1752,10 +1767,21 @@ export class WorkerScheduler {
       candidateId,
     });
     this.applyDeliveryView(handle, view);
-    // The accepted delivery must be durable before it can release DAG
-    // dependencies. Otherwise a crash can leave a downstream task running
-    // while recovery sees its prerequisite as unaccepted.
-    await this.opts.flushEvents?.();
+    await this.finalizeAcceptedHandle(handle);
+    return view;
+  }
+
+  private async finalizeAcceptedHandle(handle: WorkerHandle): Promise<void> {
+    if (handle.acceptedFinalized) return;
+    handle.acceptedFinalized = true;
+    // IntegrationQueue flushes its acceptance evidence before returning. Flush
+    // the projected delivery event too, then and only then release DAG deps.
+    try {
+      await this.opts.flushEvents?.();
+    } catch (error) {
+      handle.acceptedFinalized = false;
+      throw error;
+    }
     this.disposeWorker(handle, 'accepted', handle.summary);
     this.opts.workspaceManager?.release(handle.id, false);
     this.opts.emit({
@@ -1764,14 +1790,13 @@ export class WorkerScheduler {
     });
     this.emitCoordinatorBriefing({
       kind: 'accepted',
-      title: `${handle.title} 已接受`,
-      summary: handle.summary || 'Delivery accepted.',
+      title: `${handle.title} 已集成到 Meeting 分支`,
+      summary: handle.summary || 'Delivery integrated and accepted.',
       recommendedAction: 'continue',
       workerId: handle.id,
       taskId: handle.currentTaskId,
     });
     this.spawnReadyWorkers();
-    return view;
   }
 
   async returnDelivery(
@@ -1848,6 +1873,8 @@ export class WorkerScheduler {
     handle.report = null;
     handle.transportEnded = false;
     handle.deliveryId = null;
+    handle.emittedCandidateId = undefined;
+    handle.acceptedFinalized = false;
     handle.contextPackage = undefined;
     handle.contextPackageHash = undefined;
     handle.backendRuntime = undefined;
@@ -2092,6 +2119,8 @@ export class WorkerScheduler {
     handle.approvedPlanVersion = undefined;
     handle.transportEnded = false;
     handle.deliveryId = null;
+    handle.emittedCandidateId = undefined;
+    handle.acceptedFinalized = false;
     handle.backendSession = undefined;
     handle.attempt = 1;
     handle.eventSeq = 0;
@@ -2171,9 +2200,11 @@ export class WorkerScheduler {
         ? 'shared-locked'
         : 'git-worktree';
     }
+    const integrationHead = this.opts.getIntegrationHead?.();
     return {
       mode,
       writePaths: handle.writePaths ? [...handle.writePaths] : [],
+      ...(integrationHead ? { sourceRevision: integrationHead } : {}),
     };
   }
 

@@ -79,6 +79,9 @@ const taskStatusTone: Record<CurrentTaskStatus, 'idle' | 'waiting' | 'working' |
   verifying: 'working',
   reviewing: 'working',
   'awaiting-acceptance': 'waiting',
+  'integration-queued': 'waiting',
+  integrating: 'working',
+  'integration-conflict': 'failed',
   reworking: 'working',
   accepted: 'done',
   done: 'done',
@@ -94,6 +97,9 @@ const taskStatusLabel: Record<CurrentTaskStatus, string> = {
   verifying: '校验中',
   reviewing: '评审中',
   'awaiting-acceptance': '等待验收',
+  'integration-queued': '等待集成',
+  integrating: '集成中',
+  'integration-conflict': '集成冲突',
   reworking: '需要返工',
   accepted: '已接受',
   done: '已完成',
@@ -574,11 +580,23 @@ export const ClaudeWorkspace = memo(function ClaudeWorkspace({
               const isOpen = expanded.has(key);
               const isPending = d.status === 'awaiting-delivery-acceptance';
               const isReworking = d.status === 'reworking';
-              const statusPill = d.status === 'accepted' ? 'done' : isReworking ? 'working' : 'pending';
+              const isIntegrating = d.status === 'integration-queued' || d.status === 'integrating';
+              const isConflict = d.status === 'integration-conflict';
+              const statusPill = d.status === 'accepted'
+                ? 'done'
+                : isReworking || isIntegrating
+                  ? 'working'
+                  : 'pending';
               const statusLabel = d.status === 'accepted'
                 ? 'Accepted'
                 : isReworking
                   ? 'Needs rework'
+                  : isConflict
+                    ? 'Integration conflict'
+                    : d.status === 'integration-queued'
+                      ? 'Queued for integration'
+                      : d.status === 'integrating'
+                        ? 'Integrating'
                   : d.status === 'verifying'
                     ? 'Verifying'
                     : d.status === 'reviewing'
@@ -599,7 +617,16 @@ export const ClaudeWorkspace = memo(function ClaudeWorkspace({
                   }}
                   aria-expanded={isOpen}
                 >
-                  <span className="workspace-feed-dot" style={{ background: d.status === 'accepted' ? '#9ae29a' : isReworking ? '#f5c542' : '#7cc6ff' }} />
+                  <span
+                    className="workspace-feed-dot"
+                    style={{
+                      background: d.status === 'accepted'
+                        ? '#9ae29a'
+                        : isReworking || isConflict
+                          ? '#f5c542'
+                          : '#7cc6ff',
+                    }}
+                  />
                   <div className="workspace-feed-text">
                     <div className="workspace-feed-title">
                       <span className="workspace-feed-title-text">{d.title}</span>

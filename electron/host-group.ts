@@ -95,6 +95,9 @@ export interface HostGroupOpts {
   deliveryHarness: DeliveryHarness;
   deliveryArtifactRoot?: string;
   flushEvents?: () => Promise<void>;
+  /** Latest durably accepted Meeting integration head. New dependency-released
+   * task worktrees branch from this head rather than the unchanged user base. */
+  getIntegrationHead?: () => string | undefined;
   initialPlanVersion?: number;
   getAuthorizedTaskContextSource: (
     taskId: string,
@@ -216,6 +219,7 @@ export class HostGroup {
       deliveryHarness: opts.deliveryHarness,
       deliveryArtifactRoot: opts.deliveryArtifactRoot,
       flushEvents: opts.flushEvents,
+      getIntegrationHead: opts.getIntegrationHead,
       initialPlanVersion: opts.initialPlanVersion,
       getAuthorizedTaskContextSource: opts.getAuthorizedTaskContextSource,
       persistContextPackage: opts.persistContextPackage,

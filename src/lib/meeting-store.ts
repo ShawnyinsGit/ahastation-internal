@@ -1335,7 +1335,9 @@ class MeetingStore {
         verifying: 'verifying',
         reviewing: 'reviewing',
         'awaiting-delivery-acceptance': 'awaiting-acceptance',
-        integrating: 'reviewing',
+        'integration-queued': 'integration-queued',
+        integrating: 'integrating',
+        'integration-conflict': 'integration-conflict',
         reworking: 'reworking',
         accepted: 'accepted',
         interrupted: 'interrupted',
@@ -1380,7 +1382,15 @@ class MeetingStore {
         const deliveryHistory = prior
           ? s.deliveryHistory.map((item) => item.deliveryId === delivery.id ? snapshot : item)
           : [...s.deliveryHistory, snapshot].slice(-MAX_DELIVERY_HISTORY);
-        const visible = ['verifying', 'reviewing', 'awaiting-delivery-acceptance', 'reworking']
+        const visible = [
+          'verifying',
+          'reviewing',
+          'awaiting-delivery-acceptance',
+          'integration-queued',
+          'integrating',
+          'integration-conflict',
+          'reworking',
+        ]
           .includes(delivery.status);
         const currentDelivery = visible
           ? snapshot

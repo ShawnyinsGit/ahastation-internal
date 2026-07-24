@@ -38,6 +38,9 @@ export type WorkerStatusKind =
   | 'verifying'
   | 'reviewing'
   | 'awaiting-acceptance'
+  | 'integration-queued'
+  | 'integrating'
+  | 'integration-conflict'
   | 'reworking'
   | 'accepted'
   | 'interrupted'
@@ -216,6 +219,8 @@ export interface WorkerHandle {
   report: WorkReport | null;
   transportEnded: boolean;
   deliveryId: string | null;
+  emittedCandidateId?: string;
+  acceptedFinalized?: boolean;
   /** B1 stall watchdog: set true once a `worker-stalled` event has fired for
    *  the current idle stretch, cleared on the next activity (lastUpdateTs bump)
    *  so each distinct stall is announced exactly once, not every sweep tick. */

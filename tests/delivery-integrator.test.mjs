@@ -57,17 +57,18 @@ const candidate = {
   review: { passed: true, findings: [] },
 };
 
-test('accepted git worktree is committed and fast-forwarded into base', async (t) => {
+test('legacy per-task integration cannot publish a reviewed task to the user base', async (t) => {
   const f = await fixture(t);
   await writeFile(join(f.worktree, 'file.txt'), 'changed\n');
-  const result = await new WorkspaceDeliveryIntegrator(f.base).integrate(view(f), candidate);
-  assert.equal(result.kind, 'git-worktree');
-  assert.notEqual(result.resultRevision, f.sourceRevision);
-  assert.equal((await readFile(join(f.base, 'file.txt'), 'utf8')).trim(), 'changed');
-  assert.equal(git(f.base, ['rev-parse', 'HEAD']), result.resultRevision);
+  await assert.rejects(
+    new WorkspaceDeliveryIntegrator(f.base).integrate(view(f), candidate),
+    /legacy direct-base integration is disabled/,
+  );
+  assert.equal((await readFile(join(f.base, 'file.txt'), 'utf8')).trim(), 'base');
+  assert.equal(git(f.base, ['rev-parse', 'HEAD']), f.sourceRevision);
 });
 
-test('moved base refuses integration and preserves task worktree', async (t) => {
+test('legacy integration remains disabled when the user base moved', async (t) => {
   const f = await fixture(t);
   await writeFile(join(f.worktree, 'file.txt'), 'task\n');
   await writeFile(join(f.base, 'base-only.txt'), 'moved\n');
@@ -76,19 +77,19 @@ test('moved base refuses integration and preserves task worktree', async (t) => 
 
   await assert.rejects(
     new WorkspaceDeliveryIntegrator(f.base).integrate(view(f, 'delivery-2'), candidate),
-    /base revision moved/,
+    /legacy direct-base integration is disabled/,
   );
   assert.equal(await readFile(join(f.worktree, 'file.txt'), 'utf8'), 'task\n');
 });
 
-test('unreported worktree changes refuse integration and remain recoverable', async (t) => {
+test('legacy integration never stages unreported task worktree changes', async (t) => {
   const f = await fixture(t);
   await writeFile(join(f.worktree, 'file.txt'), 'reported\n');
   await writeFile(join(f.worktree, 'hidden.txt'), 'not in the report\n');
 
   await assert.rejects(
     new WorkspaceDeliveryIntegrator(f.base).integrate(view(f, 'delivery-3'), candidate),
-    /unreported changes \(hidden\.txt\)/,
+    /legacy direct-base integration is disabled/,
   );
   assert.equal(await readFile(join(f.base, 'file.txt'), 'utf8'), 'base\n');
   assert.equal(await readFile(join(f.worktree, 'hidden.txt'), 'utf8'), 'not in the report\n');

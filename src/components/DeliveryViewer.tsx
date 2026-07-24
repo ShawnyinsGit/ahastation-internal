@@ -142,6 +142,9 @@ export function DeliveryViewer({
     verifying: '正在校验',
     reviewing: '正在评审',
     'awaiting-delivery-acceptance': '等待验收',
+    'integration-queued': '等待自动集成',
+    integrating: '正在集成到 Meeting 分支',
+    'integration-conflict': '集成冲突',
     reworking: '需要返工',
     accepted: '已接受',
     failed: '失败',
@@ -368,7 +371,7 @@ export function DeliveryViewer({
 
       <footer className="delivery-viewer-footer">
         {toast && <div className="delivery-viewer-toast">{toast}</div>}
-        {!feedbackOpen ? (
+        {!feedbackOpen && canReturn ? (
           <div className="delivery-viewer-actions">
             <button
               type="button"
@@ -393,7 +396,7 @@ export function DeliveryViewer({
                     : '通过 · 验收'}
             </button>
           </div>
-        ) : (
+        ) : feedbackOpen ? (
           <div className="delivery-viewer-feedback">
             <textarea
               className="delivery-viewer-feedback-input"
@@ -425,6 +428,16 @@ export function DeliveryViewer({
                 {submitting ? '发送中…' : '把意见发回去'}
               </button>
             </div>
+          </div>
+        ) : (
+          <div className="delivery-viewer-actions" role="status">
+            <span className="delivery-viewer-toast">
+              {delivery.status === 'accepted'
+                ? 'Coordinator 已审查并自动集成到 Meeting 分支。'
+                : delivery.status === 'integration-conflict'
+                  ? '自动集成发生冲突，任务将按证据返工；不会修改用户主分支。'
+                  : 'Coordinator 正在审查或集成；单任务无需用户验收。'}
+            </span>
           </div>
         )}
       </footer>

@@ -24,6 +24,9 @@ const LABEL: Record<WorkerStatus, string> = {
   verifying: '校验中',
   reviewing: '评审中',
   'awaiting-acceptance': '等待验收',
+  'integration-queued': '等待集成',
+  integrating: '集成中',
+  'integration-conflict': '集成冲突',
   reworking: '需要返工',
   accepted: '已接受',
   interrupted: '已中断',
@@ -37,6 +40,9 @@ const PROGRESS: Record<WorkerStatus, number> = {
   verifying: 58,
   reviewing: 72,
   'awaiting-acceptance': 84,
+  'integration-queued': 88,
+  integrating: 94,
+  'integration-conflict': 94,
   reworking: 48,
   accepted: 100,
   interrupted: 45,
@@ -47,10 +53,16 @@ const PROGRESS: Record<WorkerStatus, number> = {
 function StatusIcon({ status, attention }: { status: WorkerStatus; attention: boolean }) {
   if (attention) return <ShieldAlert size={14} />;
   if (status === 'accepted' || status === 'done') return <CheckCircle2 size={14} />;
-  if (status === 'failed') return <AlertTriangle size={14} />;
+  if (status === 'failed' || status === 'integration-conflict') return <AlertTriangle size={14} />;
   if (status === 'reworking') return <RotateCcw size={14} />;
-  if (status === 'reviewing' || status === 'awaiting-acceptance') return <GitMerge size={14} />;
-  if (status === 'running' || status === 'verifying') return <LoaderCircle size={14} />;
+  if (
+    status === 'reviewing'
+    || status === 'awaiting-acceptance'
+    || status === 'integration-queued'
+  ) return <GitMerge size={14} />;
+  if (status === 'running' || status === 'verifying' || status === 'integrating') {
+    return <LoaderCircle size={14} />;
+  }
   if (status === 'interrupted') return <Clock3 size={14} />;
   return <CircleDashed size={14} />;
 }
