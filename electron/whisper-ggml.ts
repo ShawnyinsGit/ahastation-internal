@@ -26,6 +26,11 @@ export function chooseGgmlBackend(
   }
   if (platform === 'win32') {
     if (set.has('ggml-cpu.dll')) return 'ggml-cpu.dll';
+    // Official v1.9.1 win archive ships per-CPU variants, no plain
+    // ggml-cpu.dll — pin the generic baseline (x64) rather than whichever
+    // variant readdir happens to return first (could be an ISA the host
+    // CPU lacks, e.g. alderlake on older silicon).
+    if (set.has('ggml-cpu-x64.dll')) return 'ggml-cpu-x64.dll';
     const fallback = files.find((f) => /^ggml-cpu.*\.dll$/i.test(f));
     return fallback ?? null;
   }

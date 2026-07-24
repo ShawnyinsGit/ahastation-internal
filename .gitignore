@@ -12,3 +12,4 @@ audit/
 screenshot/
 deliveries/
 .vibe-materials/
+build/whisper-*/

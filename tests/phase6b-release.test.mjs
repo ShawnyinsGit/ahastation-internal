@@ -28,12 +28,15 @@ test('whisperArchiveFor maps x64 platforms to official v1.9.1 archives', () => {
     whisperArchiveFor('win32', 'x64'),
     'https://github.com/ggerganov/whisper.cpp/releases/download/v1.9.1/whisper-bin-x64.zip',
   );
+  assert.equal(
+    whisperArchiveFor('linux', 'arm64'),
+    'https://github.com/ggerganov/whisper.cpp/releases/download/v1.9.1/whisper-bin-ubuntu-arm64.tar.gz',
+  );
 });
 
 test('whisperArchiveFor returns null where no official prebuilt exists', () => {
   assert.equal(whisperArchiveFor('darwin', 'arm64'), null); // brew path
   assert.equal(whisperArchiveFor('darwin', 'x64'), null);
-  assert.equal(whisperArchiveFor('linux', 'arm64'), null); // self-build
   assert.equal(whisperArchiveFor('win32', 'arm64'), null);
 });
 
@@ -64,6 +67,15 @@ test('chooseGgmlBackend on linux/win prefers the generic plugin', () => {
   );
   assert.equal(chooseGgmlBackend(['libggml-cpu-sse42.so'], 'linux'), 'libggml-cpu-sse42.so');
   assert.equal(chooseGgmlBackend(['ggml-base.dll', 'ggml-cpu.dll'], 'win32'), 'ggml-cpu.dll');
+  // Official win archive has no plain ggml-cpu.dll — must pin the generic
+  // x64 baseline, never an ISA-specific variant (v1.9.1 real archive set).
+  assert.equal(
+    chooseGgmlBackend(
+      ['ggml-cpu-alderlake.dll', 'ggml-cpu-x64.dll', 'ggml-cpu-haswell.dll'],
+      'win32',
+    ),
+    'ggml-cpu-x64.dll',
+  );
   assert.equal(chooseGgmlBackend([], 'linux'), null);
   assert.equal(chooseGgmlBackend(['random.txt'], 'win32'), null);
 });

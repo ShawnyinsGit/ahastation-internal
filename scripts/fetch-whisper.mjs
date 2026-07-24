@@ -284,13 +284,12 @@ async function ensureBinary() {
     }
     const url = whisperArchiveFor(platform, arch);
     if (!url) {
-      // linux-arm64: no official prebuilt — the CI arm64 job self-builds
-      // into this directory BEFORE packaging (see build-matrix.yml). Any
-      // other platform/arch reaching here is unsupported.
+      // Only win32-arm64 reaches here (no official prebuilt). linux-arm64
+      // has an official ubuntu archive since v1.9.1 — see whisper-platforms.mjs.
       throw new Error(
         `No official whisper.cpp prebuilt for ${platform}-${arch}. ` +
-        'Build from source first (cmake; see .github/workflows/build-matrix.yml ' +
-        'linux-arm64 job) so build/whisper/ contains whisper-cli + ggml libs.',
+        'Build from source first (cmake) so build/whisper/ contains ' +
+        'whisper-cli + ggml libs.',
       );
     }
     const ext = url.endsWith('.zip') ? '.zip' : '.tar.gz';
