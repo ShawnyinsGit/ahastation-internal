@@ -3,6 +3,7 @@ import {
   RefObject,
   useState,
   useCallback,
+  useEffect,
   useMemo,
   useRef,
   cloneElement,
@@ -18,6 +19,7 @@ import { StageTabBar } from './StageTabBar';
 import { TerminalPanel } from './TerminalPanel';
 import { ActivityTabContent } from './ActivityTabContent';
 import { DeliveryViewer } from './DeliveryViewer';
+import { TaskInspector } from './TaskInspector';
 import { TaskRail } from './TaskRail';
 
 interface ScreenStageProps {
@@ -102,6 +104,7 @@ export function ScreenStage({
   customAvatars,
 }: ScreenStageProps) {
   const [selectedParticipantId, setSelectedParticipantId] = useState<string | null>(null);
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [inspectorHeight, setInspectorHeight] = useState(76);
   const [inspectorFullscreen, setInspectorFullscreen] = useState(false);
   const dragState = useRef<{ pointerId: number; startY: number } | null>(null);
@@ -109,13 +112,29 @@ export function ScreenStage({
 
   const handleSelectParticipant = useCallback((id: string) => {
     setSelectedParticipantId(id);
-    setInspectorHeight(76);
-    setInspectorFullscreen(false);
     // Auto-switch to activity tab so the selection is visible
     if (activeWindowId !== ACTIVITY_TAB_ID) {
       onSelectWindow(ACTIVITY_TAB_ID);
     }
   }, [activeWindowId, onSelectWindow]);
+
+  const handleSelectTask = useCallback((id: string) => {
+    setSelectedTaskId(id);
+    setInspectorHeight(76);
+    setInspectorFullscreen(false);
+    if (activeWindowId !== ACTIVITY_TAB_ID) {
+      onSelectWindow(ACTIVITY_TAB_ID);
+    }
+  }, [activeWindowId, onSelectWindow]);
+
+  useEffect(() => {
+    if (
+      selectedTaskId
+      && !(plan?.nodes ?? []).some((node) => node.id === selectedTaskId)
+    ) {
+      setSelectedTaskId(null);
+    }
+  }, [plan, selectedTaskId]);
 
   const handleInspectorPointerDown = useCallback((event: React.PointerEvent<HTMLButtonElement>) => {
     dragState.current = { pointerId: event.pointerId, startY: event.clientY };
@@ -158,10 +177,9 @@ export function ScreenStage({
 
   const activeWindow = stageWindows.find((w) => w.id === activeWindowId) ?? null;
   const isActivityTab = activeWindow?.type === 'activity' || activeWindowId === ACTIVITY_TAB_ID;
-  const selectedIsWorker = Boolean(
-    selectedParticipantId
-    && workers.some((worker) => worker.role !== 'talker' && worker.id === selectedParticipantId),
-  );
+  const selectedTaskWorker = selectedTaskId
+    ? workers.find((worker) => worker.role !== 'talker' && worker.id === selectedTaskId)
+    : undefined;
   const capacity = useMemo(() => {
     const nodes = plan?.nodes ?? [];
     const statusById = new Map(nodes.map((node) => [node.id, node.status]));
@@ -216,7 +234,7 @@ export function ScreenStage({
           : 'stage-default';
 
   return (
-    <div className={`stage ${stageClass}`}>
+    <div className={`stage ${stageClass}${selectedTaskId ? ' has-task-inspector' : ''}`}>
       {share.active && (
         <>
           <video
@@ -265,70 +283,11 @@ export function ScreenStage({
           <TaskRail
             plan={plan}
             workers={workers}
-            selectedId={selectedParticipantId}
-            onSelect={handleSelectParticipant}
+            selectedId={selectedTaskId}
+            onSelect={handleSelectTask}
           />
 
-          <div
-            className={`stage-content${selectedIsWorker && !delivery ? ' has-task-inspector' : ''}${inspectorFullscreen ? ' is-task-inspector-fullscreen' : ''}`}
-            style={selectedIsWorker && !delivery
-              ? { '--task-inspector-height': `${inspectorHeight}dvh` } as React.CSSProperties
-              : undefined}
-          >
-            {selectedIsWorker && !delivery && (
-              <>
-                <button
-                  type="button"
-                  className="task-inspector-drag-handle"
-                  onPointerDown={handleInspectorPointerDown}
-                  onPointerMove={handleInspectorPointerMove}
-                  onPointerUp={finishInspectorDrag}
-                  onPointerCancel={finishInspectorDrag}
-                  onClick={() => {
-                    if (suppressInspectorClick.current) {
-                      suppressInspectorClick.current = false;
-                      return;
-                    }
-                    toggleInspectorFullscreen();
-                  }}
-                  onKeyDown={(event) => {
-                    if (event.key === 'Enter' || event.key === ' ') {
-                      event.preventDefault();
-                      toggleInspectorFullscreen();
-                    } else if (event.key === 'ArrowUp') {
-                      event.preventDefault();
-                      setInspectorHeight((current) => Math.min(100, current + 12));
-                    } else if (event.key === 'ArrowDown') {
-                      event.preventDefault();
-                      setInspectorFullscreen(false);
-                      setInspectorHeight((current) => Math.max(44, current - 12));
-                    } else if (event.key === 'Home') {
-                      event.preventDefault();
-                      setInspectorFullscreen(true);
-                      setInspectorHeight(100);
-                    } else if (event.key === 'End') {
-                      event.preventDefault();
-                      setInspectorFullscreen(false);
-                      setInspectorHeight(52);
-                    }
-                  }}
-                  aria-label={inspectorFullscreen ? '收起任务检查器' : '展开任务检查器至全屏'}
-                  aria-valuemin={44}
-                  aria-valuemax={100}
-                  aria-valuenow={Math.round(inspectorHeight)}
-                >
-                  <span aria-hidden />
-                </button>
-                <button
-                  type="button"
-                  className="task-inspector-close"
-                  onClick={() => setSelectedParticipantId(null)}
-                  aria-label="关闭任务检查器"
-                >
-                  ×
-                </button>
-              </>
-            )}
+          <div className="stage-content">
             {delivery ? (
               <div className="stage-delivery-content">
                 <DeliveryViewer
@@ -350,8 +309,8 @@ export function ScreenStage({
                 onResolvePermission={onResolvePermission}
                 selectedId={selectedParticipantId}
                 onOpenInTerminal={(workerId) => onCreateWindow('terminal', { workerId })}
-          customAvatars={customAvatars}
-          sessionId={sessionId}
+                customAvatars={customAvatars}
+                sessionId={sessionId}
               />
             )}
 
@@ -391,6 +350,63 @@ export function ScreenStage({
               </div>
             )}
           </div>
+
+          {selectedTaskId && sessionId && (
+            <div
+              className={`task-inspector-dock${inspectorFullscreen ? ' is-task-inspector-fullscreen' : ''}`}
+              style={{ '--task-inspector-height': `${inspectorHeight}dvh` } as React.CSSProperties}
+            >
+              <button
+                type="button"
+                className="task-inspector-drag-handle"
+                onPointerDown={handleInspectorPointerDown}
+                onPointerMove={handleInspectorPointerMove}
+                onPointerUp={finishInspectorDrag}
+                onPointerCancel={finishInspectorDrag}
+                onClick={() => {
+                  if (suppressInspectorClick.current) {
+                    suppressInspectorClick.current = false;
+                    return;
+                  }
+                  toggleInspectorFullscreen();
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault();
+                    toggleInspectorFullscreen();
+                  } else if (event.key === 'ArrowUp') {
+                    event.preventDefault();
+                    setInspectorHeight((current) => Math.min(100, current + 12));
+                  } else if (event.key === 'ArrowDown') {
+                    event.preventDefault();
+                    setInspectorFullscreen(false);
+                    setInspectorHeight((current) => Math.max(44, current - 12));
+                  } else if (event.key === 'Home') {
+                    event.preventDefault();
+                    setInspectorFullscreen(true);
+                    setInspectorHeight(100);
+                  } else if (event.key === 'End') {
+                    event.preventDefault();
+                    setInspectorFullscreen(false);
+                    setInspectorHeight(52);
+                  }
+                }}
+                aria-label={inspectorFullscreen ? '收起任务检查器' : '展开任务检查器至全屏'}
+                aria-valuemin={44}
+                aria-valuemax={100}
+                aria-valuenow={Math.round(inspectorHeight)}
+              >
+                <span aria-hidden />
+              </button>
+              <TaskInspector
+                sessionId={sessionId}
+                taskId={selectedTaskId}
+                worker={selectedTaskWorker}
+                onClose={() => setSelectedTaskId(null)}
+                onResolvePermission={onResolvePermission}
+              />
+            </div>
+          )}
         </>
       )}
     </div>
