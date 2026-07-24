@@ -30,9 +30,13 @@ function checkFile(label, path, minBytes, { mandatory = true } = {}) {
 
 // Mandatory: whisper-cli + the model. whisper-server is an optimization
 // (per-call whisper-cli fallback exists) so it only warns.
-checkFile('whisper-cli', join(outDir, whisperBinaryName('whisper-cli', process.platform)), 1_000_000);
+// Size floor is 200 KB, not 1 MB: official v1.9.1 prebuilts are dynamically
+// linked — whisper-cli is ~944 KB (linux-arm64) / ~479 KB (win32) — while
+// the old 1 MB floor was calibrated for the Homebrew build. The floor still
+// catches empty/truncated downloads, which is what this gate exists for.
+checkFile('whisper-cli', join(outDir, whisperBinaryName('whisper-cli', process.platform)), 200_000);
 checkFile('model', join(outDir, MODEL_NAME), MODEL_MIN_SIZE);
-checkFile('whisper-server', join(outDir, whisperBinaryName('whisper-server', process.platform)), 1_000_000, { mandatory: false });
+checkFile('whisper-server', join(outDir, whisperBinaryName('whisper-server', process.platform)), 200_000, { mandatory: false });
 
 for (const w of warnings) process.stdout.write(`[assert-whisper] warn: ${w}\n`);
 if (failures.length > 0) {
