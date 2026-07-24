@@ -43,28 +43,111 @@ import {
   CodexAppServerTransport,
   extractCodexRuntimeVersion,
   type CodexAppServerNotification,
+  type CodexAppServerRequest,
   type CodexAppServerTransportOptions,
 } from './codex-app-server-transport.js';
 import type { Input as CodexInput, Thread as CodexThread, ThreadEvent, ThreadItem } from '@openai/codex-sdk';
 import { getBackendAuth } from '../store.js';
 import { normalizeBackendBaseUrl } from '../normalize-base-url.js';
+import {
+  extractWorkReportFrame,
+  type WorkerAdapterSignal,
+} from '../worker-protocol.js';
 
 const CODEX_CAPABILITIES: BackendCapabilities = {
   coordinate: true,
-  // This SDK path does not yet mount meeting-worker MCP or emit WorkReport.
-  executeTasks: false,
+  executeTasks: true,
   displayName: 'Codex',
   iconId: 'codex',
-  // The SDK can report MCP calls, but this adapter cannot mount AhaStation MCP
-  // servers or broker interactive approval requests yet.
+  // WorkReport is synthesized at the app-server boundary; MCP mounting is not
+  // required for the Worker contract.
   mcp: false,
-  permissions: false,
+  permissions: true,
   systemPrompt: true,
   skills: false,
   interrupt: true,
   npmPackage: '@openai/codex',
   installHint: 'npm install -g @openai/codex',
 };
+
+export function mapCodexItemToWorkerSignals(
+  item: Record<string, unknown>,
+  phase: 'started' | 'completed' = 'completed',
+): WorkerAdapterSignal[] {
+  const type = String(item.type ?? '');
+  if (type === 'agentMessage' || type === 'agent_message') {
+    const text = typeof item.text === 'string' ? item.text : '';
+    const visible = text.split(/```work-report/i, 1)[0].trim();
+    return visible ? [{ kind: 'progress', message: visible }] : [];
+  }
+  if (type === 'reasoning') {
+    const text = typeof item.text === 'string'
+      ? item.text
+      : Array.isArray(item.summary)
+        ? item.summary.map(String).join('\n')
+        : '';
+    return text.trim() ? [{ kind: 'progress', message: text.trim() }] : [];
+  }
+  if (type === 'todoList' || type === 'todo_list') {
+    return [{ kind: 'progress', message: 'Updated task checklist' }];
+  }
+
+  let toolName = '';
+  let failed = false;
+  let detail: string | undefined;
+  if (type === 'commandExecution' || type === 'command_execution') {
+    toolName = 'Bash';
+    detail = typeof item.command === 'string' ? item.command.slice(0, 4_000) : undefined;
+    failed = item.status === 'failed'
+      || (typeof item.exitCode === 'number' && item.exitCode !== 0)
+      || (typeof item.exit_code === 'number' && item.exit_code !== 0);
+  } else if (type === 'fileChange' || type === 'file_change') {
+    toolName = 'Write';
+    const changes = Array.isArray(item.changes) ? item.changes : [];
+    detail = changes.filter(isRecord).map((change) => String(change.path ?? '')).filter(Boolean)
+      .join(', ').slice(0, 4_000) || undefined;
+    failed = item.status === 'failed';
+  } else if (type === 'mcpToolCall' || type === 'mcp_tool_call') {
+    toolName = `mcp__${String(item.server ?? 'unknown')}__${String(item.tool ?? 'unknown')}`;
+    failed = Boolean(item.error);
+  } else if (type === 'webSearch' || type === 'web_search') {
+    toolName = 'WebSearch';
+    detail = typeof item.query === 'string' ? item.query.slice(0, 4_000) : undefined;
+  } else if (type === 'error') {
+    return [{
+      kind: 'failed',
+      code: 'codex-item-error',
+      message: typeof item.message === 'string' ? item.message : 'Codex item failed',
+      retryable: true,
+    }];
+  } else {
+    return [];
+  }
+  return [{
+    kind: 'tool',
+    toolName,
+    phase: failed ? 'failed' : phase,
+    ...(detail ? { detail } : {}),
+  }];
+}
+
+export function finalizeCodexWorkerText(text: string): WorkerAdapterSignal[] {
+  const extracted = extractWorkReportFrame(text);
+  if (extracted.report) {
+    return [
+      { kind: 'delivery', report: extracted.report },
+      { kind: 'ended', reason: 'completed' },
+    ];
+  }
+  return [{
+    kind: 'failed',
+    code: extracted.error ? 'invalid-work-report' : 'missing-work-report',
+    message: extracted.error
+      ? `Codex returned an invalid WorkReport: ${extracted.error}`
+      : 'Codex turn ended without a WorkReport',
+    retryable: true,
+  }, { kind: 'ended', reason: 'completed' }];
+}
 
 /** Only pass a model override when the user explicitly configured one. */
 function codexModelOverride(model: string | undefined): string | undefined {
@@ -96,6 +179,98 @@ async function loadCodexSdk(): Promise<CodexSdk | null> {
   }
 }
 
+export function mapCodexApprovalRequest(
+  request: CodexAppServerRequest,
+): { toolName: string; input: Record<string, unknown>; toolUseID: string } | null {
+  const params = isRecord(request.params) ? request.params : {};
+  const toolUseID = String(params.itemId ?? params.callId ?? request.id);
+  switch (request.method) {
+    case 'item/commandExecution/requestApproval':
+      return {
+        toolName: 'Bash',
+        input: {
+          command: String(params.command ?? ''),
+          cwd: String(params.cwd ?? ''),
+          reason: params.reason ?? null,
+          commandActions: Array.isArray(params.commandActions) ? params.commandActions : [],
+          additionalPermissions: params.additionalPermissions ?? null,
+        },
+        toolUseID,
+      };
+    case 'item/fileChange/requestApproval':
+      return {
+        toolName: 'Write',
+        input: {
+          reason: params.reason ?? null,
+          grantRoot: params.grantRoot ?? null,
+        },
+        toolUseID,
+      };
+    case 'item/permissions/requestApproval':
+      return {
+        toolName: 'RequestPermissions',
+        input: {
+          cwd: String(params.cwd ?? ''),
+          reason: params.reason ?? null,
+          permissions: isRecord(params.permissions) ? params.permissions : {},
+        },
+        toolUseID,
+      };
+    case 'execCommandApproval':
+      return {
+        toolName: 'Bash',
+        input: {
+          command: Array.isArray(params.command) ? params.command.map(String) : [],
+          cwd: String(params.cwd ?? ''),
+          reason: params.reason ?? null,
+          parsedCommand: Array.isArray(params.parsedCmd) ? params.parsedCmd : [],
+        },
+        toolUseID,
+      };
+    case 'applyPatchApproval':
+      return {
+        toolName: 'Write',
+        input: {
+          fileChanges: isRecord(params.fileChanges) ? params.fileChanges : {},
+          reason: params.reason ?? null,
+          grantRoot: params.grantRoot ?? null,
+        },
+        toolUseID,
+      };
+    default:
+      return null;
+  }
+}
+
+export function codexApprovalResponse(
+  request: CodexAppServerRequest,
+  decision: 'allow' | 'deny',
+): Record<string, unknown> {
+  switch (request.method) {
+    case 'item/commandExecution/requestApproval':
+    case 'item/fileChange/requestApproval':
+      return { decision: decision === 'allow' ? 'accept' : 'decline' };
+    case 'item/permissions/requestApproval': {
+      const params = isRecord(request.params) ? request.params : {};
+      const requested = isRecord(params.permissions) ? params.permissions : {};
+      return {
+        permissions: decision === 'allow'
+          ? {
+              ...(requested.network ? { network: requested.network } : {}),
+              ...(requested.fileSystem ? { fileSystem: requested.fileSystem } : {}),
+            }
+          : {},
+        scope: 'turn',
+      };
+    }
+    case 'execCommandApproval':
+    case 'applyPatchApproval':
+      return { decision: decision === 'allow' ? 'approved' : 'denied' };
+    default:
+      throw new Error(`Unsupported Codex approval method: ${request.method}`);
+  }
+}
+
 // ── Session implementation ─────────────────────────────────────────────────────
 
 class CodexAppServerSession implements BackendSession {
@@ -110,6 +285,14 @@ class CodexAppServerSession implements BackendSession {
   private authRequiredEmitted = false;
   private backendVersion: string | undefined;
   private meetingCommandHandler?: (command: unknown) => Promise<unknown> | unknown;
+  private readonly isWorker: boolean;
+  private workerText: string[] = [];
+  private suppressedWorkerTurns = new Set<string>();
+  private permissionSequence = 0;
+  private permissionResolvers = new Map<string, {
+    request: CodexAppServerRequest;
+    resolve: (value: unknown) => void;
+  }>();
 
   constructor(
     private readonly binaryPath: string | null,
@@ -118,6 +301,7 @@ class CodexAppServerSession implements BackendSession {
     private readonly createTransport: (options: CodexAppServerTransportOptions) => CodexAppServerTransport =
       (options) => new CodexAppServerTransport(options),
   ) {
+    this.isWorker = config.executionRole === 'worker';
     const handler = config.extra?.meetingCommandHandler;
     if (typeof handler === 'function') {
       this.meetingCommandHandler = handler as (command: unknown) => Promise<unknown> | unknown;
@@ -130,13 +314,26 @@ class CodexAppServerSession implements BackendSession {
       binaryPath: this.binaryPath,
       env: this.config.env ?? isolatedSubprocessEnv(),
       onNotification: (notification) => this.onNotification(notification),
+      onRequest: (request) => this.onRequest(request),
       onStderr: (line) => {
         if (isCodexAuthError(line)) this.emitAuthRequired();
       },
       onExit: (error) => {
         if (this.closed) return;
-        this.emit({ kind: 'error', error: `Codex app-server error: ${error.message}` });
-        this.emitEnded();
+        this.transport = null;
+        this.cancelPendingPermissions();
+        this.resolveTurnWaiters();
+        const message = `Codex app-server error: ${error.message}`;
+        if (this.isWorker) {
+          this.emit({
+            kind: 'worker-signal',
+            signal: { kind: 'failed', code: 'codex-app-server-exited', message, retryable: true },
+          });
+          this.emit({ kind: 'worker-signal', signal: { kind: 'ended', reason: 'crashed' } });
+        } else {
+          this.emit({ kind: 'error', error: message });
+          this.emitEnded();
+        }
       },
     });
     try {
@@ -162,6 +359,24 @@ class CodexAppServerSession implements BackendSession {
     }
   }
 
+  private onRequest(request: CodexAppServerRequest): Promise<unknown> {
+    const mapped = mapCodexApprovalRequest(request);
+    if (!mapped) {
+      return Promise.reject(new Error(`Unsupported Codex app-server request: ${request.method}`));
+    }
+    const id = `codex:${++this.permissionSequence}:${String(request.id)}`;
+    return new Promise((resolve) => {
+      this.permissionResolvers.set(id, { request, resolve });
+      this.emit({
+        kind: 'permission-request',
+        id,
+        toolName: mapped.toolName,
+        input: mapped.input,
+        toolUseID: mapped.toolUseID,
+      });
+    });
+  }
+
   sendUserText(text: string, _priority?: InputPriority): void {
     this.enqueueTurn([{ type: 'text', text, text_elements: [] }]);
   }
@@ -183,6 +398,7 @@ class CodexAppServerSession implements BackendSession {
       if (this.closed || this.authRequiredEmitted || !this.transport || !this.threadId) return;
       let turnId: string | null = null;
       try {
+        if (this.isWorker) this.workerText = [];
         turnId = await this.transport.startTurn(this.threadId, input);
         this.currentTurnId = turnId;
         await this.waitForTurn(turnId);
@@ -217,7 +433,23 @@ class CodexAppServerSession implements BackendSession {
 
   private onNotification(notification: CodexAppServerNotification): void {
     if (this.closed || !isRecord(notification.params)) return;
-    if (notification.method === 'item/completed' && isRecord(notification.params.item)) {
+    if (
+      (notification.method === 'item/started'
+        || notification.method === 'item/updated'
+        || notification.method === 'item/completed')
+      && isRecord(notification.params.item)
+    ) {
+      if (this.isWorker) {
+        const item = notification.params.item;
+        if (notification.method === 'item/completed' && item.type === 'agentMessage' && typeof item.text === 'string') {
+          this.workerText.push(item.text);
+        }
+        const phase = notification.method === 'item/completed' ? 'completed' : 'started';
+        for (const signal of mapCodexItemToWorkerSignals(item, phase)) {
+          this.emit({ kind: 'worker-signal', signal });
+        }
+        return;
+      }
       const message = this.normalizeAppServerItem(notification.params.item);
       if (message) this.emit({ kind: 'message', message });
       return;
@@ -225,10 +457,25 @@ class CodexAppServerSession implements BackendSession {
     if (notification.method === 'turn/completed' && isRecord(notification.params.turn)) {
       const turn = notification.params.turn;
       const turnId = typeof turn.id === 'string' ? turn.id : '';
+      const suppressed = turnId ? this.suppressedWorkerTurns.delete(turnId) : false;
       if (turn.status === 'failed') {
         const detail = isRecord(turn.error) ? String(turn.error.message ?? 'Turn failed') : 'Turn failed';
         if (isCodexAuthError(detail)) this.emitAuthRequired();
-        else this.emit({ kind: 'error', error: `Codex turn failed: ${detail}` });
+        else if (this.isWorker && !suppressed) {
+          this.emit({
+            kind: 'worker-signal',
+            signal: {
+              kind: 'failed',
+              code: 'codex-turn-failed',
+              message: `Codex turn failed: ${detail}`,
+              retryable: true,
+            },
+          });
+        } else if (!suppressed) this.emit({ kind: 'error', error: `Codex turn failed: ${detail}` });
+      } else if (this.isWorker && !suppressed) {
+        for (const signal of finalizeCodexWorkerText(this.workerText.join('\n'))) {
+          this.emit({ kind: 'worker-signal', signal });
+        }
       }
       if (turnId) this.completeTurn(turnId);
       return;
@@ -237,7 +484,14 @@ class CodexAppServerSession implements BackendSession {
       const error = isRecord(notification.params.error) ? notification.params.error : {};
       const detail = String(error.message ?? 'Codex app-server error');
       if (isCodexAuthError(detail)) this.emitAuthRequired();
-      else if (!notification.params.willRetry) this.emit({ kind: 'error', error: detail });
+      else if (!notification.params.willRetry) {
+        if (this.isWorker) {
+          this.emit({
+            kind: 'worker-signal',
+            signal: { kind: 'failed', code: 'codex-app-server-error', message: detail, retryable: true },
+          });
+        } else this.emit({ kind: 'error', error: detail });
+      }
     }
   }
 
@@ -302,13 +556,22 @@ class CodexAppServerSession implements BackendSession {
     }
   }
 
-  resolvePermission(_id: string, _decision: 'allow' | 'deny', _message?: string): void {}
+  resolvePermission(id: string, decision: 'allow' | 'deny', _message?: string): void {
+    const pending = this.permissionResolvers.get(id);
+    if (!pending) return;
+    this.permissionResolvers.delete(id);
+    pending.resolve(codexApprovalResponse(pending.request, decision));
+  }
 
-  async interrupt(): Promise<void> {
+  async interrupt(reason: 'steer' | 'user' | 'shutdown' = 'user'): Promise<void> {
     if (!this.transport || !this.threadId || !this.currentTurnId) return;
     const turnId = this.currentTurnId;
+    if (this.isWorker) this.suppressedWorkerTurns.add(turnId);
     await this.transport.interruptTurn(this.threadId, turnId);
     await withCodexTimeout(this.waitForTurn(turnId), 10_000, 'Codex interrupt timed out');
+    if (this.isWorker && reason !== 'steer') {
+      this.emit({ kind: 'worker-signal', signal: { kind: 'ended', reason: 'interrupted' } });
+    }
   }
 
   end(): void {
@@ -316,10 +579,23 @@ class CodexAppServerSession implements BackendSession {
     this.closed = true;
     this.transport?.close();
     this.transport = null;
-    for (const pending of this.turnWaiters.values()) pending.resolve();
-    this.turnWaiters.clear();
+    this.cancelPendingPermissions();
+    this.resolveTurnWaiters();
     this.emitEnded();
     this.emit = () => {};
+  }
+
+  private cancelPendingPermissions(): void {
+    for (const [id, pending] of this.permissionResolvers) {
+      this.permissionResolvers.delete(id);
+      pending.resolve(codexApprovalResponse(pending.request, 'deny'));
+      this.emit({ kind: 'permission-cancelled', id });
+    }
+  }
+
+  private resolveTurnWaiters(): void {
+    for (const pending of this.turnWaiters.values()) pending.resolve();
+    this.turnWaiters.clear();
   }
 
   snapshot(): { protocol: string; sessionId: string; protocolVersion: string; backendVersion?: string } | null {
@@ -332,13 +608,21 @@ class CodexAppServerSession implements BackendSession {
   private emitAuthRequired(): void {
     if (this.authRequiredEmitted) return;
     this.authRequiredEmitted = true;
-    this.emit({ kind: 'auth-required', error: 'Codex 登录已失效，请完成重新认证后重连 Host。' });
+    const message = 'Codex 登录已失效，请完成重新认证后重连 Host。';
+    if (this.isWorker) {
+      this.emit({
+        kind: 'worker-signal',
+        signal: { kind: 'failed', code: 'auth-required', message, retryable: false },
+      });
+    } else {
+      this.emit({ kind: 'auth-required', error: message });
+    }
   }
 
   private emitEnded(): void {
     if (this.endedEmitted) return;
     this.endedEmitted = true;
-    this.emit({ kind: 'ended' });
+    if (!this.isWorker) this.emit({ kind: 'ended' });
   }
 }
 

@@ -75,6 +75,10 @@ import {
   defaultServerSpawn,
   getOpencodeServerRegistry,
 } from '../ide/opencode/opencode-server-registry.js';
+import {
+  extractWorkReportFrame,
+  type WorkerAdapterSignal,
+} from '../worker-protocol.js';
 
 // ── SDK client (dynamic import so app startup isn't blocked) ────────────────
 
@@ -101,7 +105,9 @@ const OPENCODE_CAPABILITIES: BackendCapabilities = {
   executeTasks: true,
   displayName: 'OpenCode',
   iconId: 'opencode',
-  mcp: true,
+  // OpenCode uses its native tool/permission bridge. AhaStation MCP servers
+  // are not mounted into this adapter session.
+  mcp: false,
   permissions: true,
   systemPrompt: true,
   skills: false,
@@ -116,6 +122,51 @@ const OPENCODE_CAPABILITIES: BackendCapabilities = {
   npmPackage: 'opencode-ai',
   installHint: 'npm install opencode-ai',
 };
+
+function workerToolPhase(status: string): 'started' | 'completed' | 'failed' {
+  if (status === 'completed') return 'completed';
+  if (status === 'failed' || status === 'error') return 'failed';
+  return 'started';
+}
+
+/** Provider-specific OpenCode part translation stops at this boundary. */
+export function mapOpencodePartToWorkerSignal(part: unknown): WorkerAdapterSignal | null {
+  const p = (part ?? {}) as Record<string, unknown>;
+  if (p.type === 'text' && typeof p.text === 'string') {
+    const visible = p.text.split(/```work-report/i, 1)[0].trim();
+    return visible ? { kind: 'progress', message: visible } : null;
+  }
+  if (p.type !== 'tool') return null;
+
+  const state = (p.state ?? {}) as Record<string, unknown>;
+  const toolName = typeof p.tool === 'string' && p.tool.trim() ? p.tool.trim() : 'unknown';
+  const detailValue = state.error ?? state.output ?? state.title;
+  const detail = typeof detailValue === 'string'
+    ? detailValue.slice(0, 4_000)
+    : undefined;
+  return {
+    kind: 'tool',
+    toolName,
+    phase: workerToolPhase(typeof state.status === 'string' ? state.status : 'pending'),
+    ...(detail ? { detail } : {}),
+  };
+}
+
+export function finalizeOpencodeWorkerText(text: string): WorkerAdapterSignal[] {
+  const extracted = extractWorkReportFrame(text);
+  const terminal: WorkerAdapterSignal = { kind: 'ended', reason: 'completed' };
+  if (extracted.report) {
+    return [{ kind: 'delivery', report: extracted.report }, terminal];
+  }
+  return [{
+    kind: 'failed',
+    code: extracted.error ? 'invalid-work-report' : 'missing-work-report',
+    message: extracted.error
+      ? `OpenCode returned an invalid WorkReport: ${extracted.error}`
+      : 'OpenCode turn ended without a WorkReport',
+    retryable: true,
+  }, terminal];
+}
 
 /** Pinned server config (serialized into OPENCODE_CONFIG_CONTENT): every
  *  tool call asks for permission. Requests buffer in pendingPermissions
@@ -190,6 +241,16 @@ class OpenCodeSession implements BackendSession {
   // Phase 7: set when this session was RESUMED from a journal snapshot.
   // v1 resume is read-only — the first user prompt activates it.
   private resumedReadOnly = false;
+  // Worker turns never forward provider-native messages. Text parts are
+  // accumulated until session.idle, where exactly one strict WorkReport
+  // frame is parsed and emitted through the semantic worker signal channel.
+  private workerTurnGeneration = 0;
+  private workerReportedGeneration = 0;
+  private workerTextParts = new Map<string, string>();
+
+  private get isWorker(): boolean {
+    return this.config.executionRole === 'worker';
+  }
 
   constructor(
     private readonly config: BackendSessionConfig,
@@ -209,7 +270,7 @@ class OpenCodeSession implements BackendSession {
       const sdk = await loadOpencodeClientModule();
       if (!sdk) {
         handle.kill();
-        this.emit({ kind: 'error', error: 'OpenCode SDK client not available' });
+        this.emitFailure('opencode-sdk-unavailable', 'OpenCode SDK client not available', false);
         return;
       }
       this.client = sdk.createOpencodeClient({
@@ -264,29 +325,11 @@ class OpenCodeSession implements BackendSession {
           // activity) WITHOUT replaying history into the meeting chat —
           // the meeting transcript comes from the meeting's own journal.
           await this.resyncSnapshot(false);
-          this.emit({
-            kind: 'message',
-            message: {
-              type: 'system',
-              message: {
-                role: 'assistant',
-                content: [{ type: 'text', text: '已恢复 OpenCode 会话（只读查看历史）。发送消息即可激活继续。' }],
-              },
-            },
-          });
+          this.emitInformational('已恢复 OpenCode 会话（只读查看历史）。发送消息即可激活继续。');
           return;
         }
         if (plan.kind === 'expired') {
-          this.emit({
-            kind: 'message',
-            message: {
-              type: 'system',
-              message: {
-                role: 'assistant',
-                content: [{ type: 'text', text: '原 OpenCode 会话已过期（server 侧无此会话），已为你开启新会话。' }],
-              },
-            },
-          });
+          this.emitInformational('原 OpenCode 会话已过期（server 侧无此会话），已为你开启新会话。');
         }
       }
 
@@ -305,19 +348,40 @@ class OpenCodeSession implements BackendSession {
         bindEditorSession(this.config.hostId, this.sessionId);
       }
 
-      this.emit({
-        kind: 'message',
-        message: {
-          type: 'system',
-          message: {
-            role: 'assistant',
-            content: [{ type: 'text', text: 'OpenCode 会话已启动' }],
-          },
-        },
-      });
+      this.emitInformational('OpenCode 会话已启动');
     } catch (err) {
-      this.emit({ kind: 'error', error: `OpenCode start failed: ${String(err)}` });
+      this.emitFailure('opencode-start-failed', `OpenCode start failed: ${String(err)}`, true);
     }
+  }
+
+  private emitInformational(text: string): void {
+    if (this.isWorker) {
+      if (this.workerTurnGeneration > 0) {
+        this.emit({ kind: 'worker-signal', signal: { kind: 'progress', message: text } });
+      }
+      return;
+    }
+    this.emit({
+      kind: 'message',
+      message: {
+        type: 'system',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text }],
+        },
+      },
+    });
+  }
+
+  private emitFailure(code: string, message: string, retryable: boolean): void {
+    if (this.isWorker) {
+      this.emit({
+        kind: 'worker-signal',
+        signal: { kind: 'failed', code, message, retryable },
+      });
+      return;
+    }
+    this.emit({ kind: 'error', error: message });
   }
 
   /** Single seam for obtaining a server handle: the shared per-(meetingId,
@@ -486,9 +550,21 @@ class OpenCodeSession implements BackendSession {
       if (this.partRevisions.get(key) === json) return;
       this.partRevisions.set(key, json);
     }
-    const msg = mapPartToNormalizedMessage(part, part);
-    if (msg && emitChat) {
-      this.emit({ kind: 'message', message: msg });
+    if (this.isWorker && this.workerTurnGeneration > 0) {
+      const p = part as Record<string, unknown>;
+      if (p.type === 'text' && typeof p.text === 'string') {
+        const textKey = key ?? `text:${this.workerTextParts.size}`;
+        this.workerTextParts.set(textKey, p.text);
+      }
+      const signal = mapOpencodePartToWorkerSignal(part);
+      if (signal && emitChat) {
+        this.emit({ kind: 'worker-signal', signal });
+      }
+    } else {
+      const msg = mapPartToNormalizedMessage(part, part);
+      if (msg && emitChat) {
+        this.emit({ kind: 'message', message: msg });
+      }
     }
     this.feedPanelForPart(part);
   }
@@ -565,19 +641,28 @@ class OpenCodeSession implements BackendSession {
           const detail = info.error.data?.message ?? info.error.name ?? 'unknown';
           this.feedPanel(this.panel.setError(detail));
           if (info.error.name === 'ProviderAuthError') {
-            this.emit({ kind: 'auth-required', error: `OpenCode provider auth failed: ${detail}` });
+            if (this.isWorker) {
+              this.emitFailure('provider-auth-required', `OpenCode provider auth failed: ${detail}`, false);
+            } else {
+              this.emit({ kind: 'auth-required', error: `OpenCode provider auth failed: ${detail}` });
+            }
           } else {
-            this.emit({ kind: 'error', error: `OpenCode message error: ${detail}` });
+            this.emitFailure('opencode-message-error', `OpenCode message error: ${detail}`, true);
           }
         }
         return;
       }
-      case 'session.idle':
+      case 'session.idle': {
         // Turn finished — maps to the same 'result' semantic the worker
         // scheduler uses to clear busy state.
         this.feedPanel(this.panel.setStatus('idle'));
-        this.emit({ kind: 'message', message: { type: 'result', raw: properties } });
+        if (this.isWorker) {
+          this.finishWorkerTurn();
+        } else {
+          this.emit({ kind: 'message', message: { type: 'result', raw: properties } });
+        }
         return;
+      }
       case 'session.status': {
         const status = (properties as { status?: { type?: string; message?: string } }).status;
         if (status?.type === 'busy') {
@@ -604,9 +689,13 @@ class OpenCodeSession implements BackendSession {
         const detail = err?.data?.message ?? err?.name ?? 'unknown session error';
         this.feedPanel(this.panel.setError(detail));
         if (err?.name === 'ProviderAuthError') {
-          this.emit({ kind: 'auth-required', error: detail });
+          if (this.isWorker) {
+            this.emitFailure('provider-auth-required', detail, false);
+          } else {
+            this.emit({ kind: 'auth-required', error: detail });
+          }
         } else {
-          this.emit({ kind: 'error', error: detail });
+          this.emitFailure('opencode-session-error', detail, true);
         }
         return;
       }
@@ -657,27 +746,36 @@ class OpenCodeSession implements BackendSession {
 
   private onServerExit(code: number | null, signal: NodeJS.Signals | null): void {
     if (this.closed) return;
-    this.emit({ kind: 'error', error: `OpenCode server exited (code=${code} signal=${signal})` });
+    const message = `OpenCode server exited (code=${code} signal=${signal})`;
+    this.emitFailure('opencode-server-exited', message, true);
+    if (this.isWorker) {
+      this.emit({ kind: 'worker-signal', signal: { kind: 'ended', reason: 'crashed' } });
+    }
+  }
+
+  private finishWorkerTurn(): void {
+    const generation = this.workerTurnGeneration;
+    if (generation === 0 || generation <= this.workerReportedGeneration) return;
+    this.workerReportedGeneration = generation;
+    const combinedText = [...this.workerTextParts.values()].join('\n');
+    for (const signal of finalizeOpencodeWorkerText(combinedText)) {
+      this.emit({ kind: 'worker-signal', signal });
+    }
   }
 
   // ── BackendSession contract ─────────────────────────────────────────────
 
   sendUserText(text: string, _priority?: InputPriority): void {
     if (!this.client || !this.sessionId || this.closed || !this.ready) return;
+    if (this.isWorker) {
+      this.workerTurnGeneration += 1;
+      this.workerTextParts.clear();
+    }
     if (this.resumedReadOnly) {
       // v1 resume read-only → the first explicit user prompt activates the
       // resumed session (documented activation gesture, no extra UI).
       this.resumedReadOnly = false;
-      this.emit({
-        kind: 'message',
-        message: {
-          type: 'system',
-          message: {
-            role: 'assistant',
-            content: [{ type: 'text', text: '已激活恢复的 OpenCode 会话，继续对话。' }],
-          },
-        },
-      });
+      this.emitInformational('已激活恢复的 OpenCode 会话，继续对话。');
     }
     void this.client.session.prompt({
       path: { id: this.sessionId },
@@ -685,7 +783,7 @@ class OpenCodeSession implements BackendSession {
         parts: [{ type: 'text', text }],
       },
     }).catch((err) => {
-      this.emit({ kind: 'error', error: `OpenCode prompt failed: ${String(err)}` });
+      this.emitFailure('opencode-prompt-failed', `OpenCode prompt failed: ${String(err)}`, true);
     });
   }
 
@@ -728,14 +826,22 @@ class OpenCodeSession implements BackendSession {
     this.broker?.resolveUi(id, decision);
   }
 
-  async interrupt(): Promise<void> {
+  async interrupt(reason: 'steer' | 'user' | 'shutdown' = 'user'): Promise<void> {
     if (!this.client || !this.sessionId || this.closed) return;
+    if (this.isWorker && reason === 'steer') {
+      this.workerReportedGeneration = this.workerTurnGeneration;
+    }
     try {
       await this.client.session.abort({
         path: { id: this.sessionId },
       });
+      if (this.isWorker && reason !== 'steer') {
+        this.workerReportedGeneration = this.workerTurnGeneration;
+        this.emit({ kind: 'worker-signal', signal: { kind: 'ended', reason: 'interrupted' } });
+      }
     } catch (err) {
       console.warn('[opencode] interrupt failed:', err);
+      this.emitFailure('opencode-interrupt-failed', `OpenCode interrupt failed: ${String(err)}`, true);
     }
   }
 

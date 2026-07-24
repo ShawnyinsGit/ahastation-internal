@@ -13,6 +13,7 @@
 // `BackendSession` + `NormalizedMessage` instead of Claude-specific types.
 
 import type { AutoApproveScope } from '../auto-approve-policy.js';
+import type { WorkerAdapterSignal } from '../worker-protocol.js';
 
 // ── Input priority ────────────────────────────────────────────────────────────
 // Re-exported from claude-session semantics: high = user, normal = system,
@@ -93,6 +94,7 @@ export interface NormalizedMessage {
 
 export type BackendSessionEvent =
   | { kind: 'message'; message: NormalizedMessage }
+  | { kind: 'worker-signal'; signal: WorkerAdapterSignal }
   | { kind: 'permission-request'; id: string; toolName: string; input: Record<string, unknown>; toolUseID: string }
   | { kind: 'permission-cancelled'; id: string }
   | { kind: 'auth-required'; error: string }
@@ -212,7 +214,7 @@ export interface BackendSession {
   /** Resolve a pending tool permission request. */
   resolvePermission(id: string, decision: 'allow' | 'deny', message?: string): void;
   /** Interrupt the current generation/stream. */
-  interrupt(): Promise<void>;
+  interrupt(reason?: 'steer' | 'user' | 'shutdown'): Promise<void>;
   /** Set the auto-approve scope for tool permissions. */
   setAutoApproveScope?(scope: AutoApproveScope): void;
   /** Set the permission mode (backend-specific). */

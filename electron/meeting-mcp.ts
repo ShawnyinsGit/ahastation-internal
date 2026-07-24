@@ -12,11 +12,13 @@ import {
   planMeetingArgsSchema,
   delegateToArgsSchema,
   taskDoneArgsSchema,
+  submitWorkReportArgsSchema,
   submitDeliveryArgsSchema,
   requestDecisionArgsSchema,
   askHostArgsSchema,
   type PlanMeetingTask,
 } from './meeting-tools.js';
+import type { WorkReport } from './worker-protocol.js';
 import type { CreateDecisionPayload } from './decisions.js';
 import type { MemoryCategory } from './memory.js';
 import type { WorkerSpecialtyKind } from './orchestrator-types.js';
@@ -68,6 +70,7 @@ export interface OrchestratorBridge {
 
   // Worker tools
   markWorkerTaskDone(workerId: string, summary: string): void;
+  submitWorkerReport(workerId: string, report: WorkReport): void;
   submitWorkerDelivery(workerId: string, files: string[]): void;
 }
 
@@ -261,11 +264,20 @@ export function buildWorkerMcp(bridge: OrchestratorBridge, workerId: string, cwd
     tools: [
       tool(
         MEETING_TOOLS.TASK_DONE,
-        'Signal that your assigned task is complete. Pass a one-line summary of what changed (no code, no file path dumps). The orchestrator releases any workers waiting on you.',
+        'Deprecated compatibility hint. This does not complete the task or release dependencies. Submit a full WorkReport with submit_work_report.',
         taskDoneArgsSchema,
         async ({ summary }) => {
           bridge.markWorkerTaskDone(workerId, summary);
-          return { content: [{ type: 'text', text: 'recorded' }] };
+          return { content: [{ type: 'text', text: 'summary recorded; submit_work_report is still required' }] };
+        },
+      ),
+      tool(
+        MEETING_TOOLS.SUBMIT_WORK_REPORT,
+        'Submit the authoritative WorkReport. The task will then be verified and reviewed; dependencies release only after user acceptance.',
+        submitWorkReportArgsSchema,
+        async ({ report }) => {
+          bridge.submitWorkerReport(workerId, report);
+          return { content: [{ type: 'text', text: 'work report submitted for verification' }] };
         },
       ),
       tool(

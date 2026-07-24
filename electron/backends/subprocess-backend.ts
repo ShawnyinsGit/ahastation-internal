@@ -367,6 +367,10 @@ export function resolveBinaryFromPath(binaryName: string): string | null {
       // Scoop shims
       `${home}\\scoop\\shims\\${binaryName}.exe`,
       `${home}\\scoop\\apps\\${binaryName}\\current\\${binaryName}.exe`,
+      // Kimi installer canonical location (also used by WSL-compatible
+      // Windows developer installs which may ship an extensionless shim).
+      `${home}\\.kimi-code\\bin\\${binaryName}`,
+      `${home}\\.kimi-code\\bin\\${binaryName}.exe`,
       // Chocolatey
       `C:\\ProgramData\\chocolatey\\bin\\${binaryName}.exe`,
     ];

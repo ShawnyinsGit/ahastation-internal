@@ -46,3 +46,33 @@ test('Claude adapter carries the universal session configuration into the offici
   assert.deepEqual(session.snapshot(), { protocol: 'claude-agent-sdk', sessionId: 'claude-session-1' });
   session.end();
 });
+
+test('Claude worker messages translate to provider-neutral semantic signals', async () => {
+  const { mapClaudeMessageToWorkerSignals } = await import(
+    '../dist-electron/backends/claude-code-adapter.js'
+  );
+  const tools = new Map();
+  assert.deepEqual(mapClaudeMessageToWorkerSignals({
+    type: 'assistant',
+    message: {
+      content: [
+        { type: 'text', text: 'working' },
+        { type: 'tool_use', id: 'tool-1', name: 'Write', input: {} },
+      ],
+    },
+  }, tools), [
+    { kind: 'progress', message: 'working' },
+    { kind: 'tool', toolName: 'Write', phase: 'started' },
+  ]);
+  assert.deepEqual(mapClaudeMessageToWorkerSignals({
+    type: 'user',
+    message: {
+      content: [{ type: 'tool_result', tool_use_id: 'tool-1', content: 'ok' }],
+    },
+  }, tools), [
+    { kind: 'tool', toolName: 'Write', phase: 'completed', detail: 'ok' },
+  ]);
+  assert.deepEqual(mapClaudeMessageToWorkerSignals({ type: 'result', subtype: 'success' }), [
+    { kind: 'ended', reason: 'completed' },
+  ]);
+});

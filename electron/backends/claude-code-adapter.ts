@@ -28,6 +28,8 @@ import type { AutoApproveScope } from '../auto-approve-policy.js';
 import type { ConfirmDestructive } from '../claude-session.js';
 import { runTerminalLogin } from './terminal-login.js';
 import { isolatedSubprocessEnv } from './backend-environment.js';
+import type { WorkerAdapterSignal } from '../worker-protocol.js';
+import { dirname, join } from 'node:path';
 
 const require_ = createRequire(import.meta.url);
 
@@ -43,6 +45,14 @@ export function resolveClaudeBinary(): string | undefined {
   const platform = process.platform;
   const arch = process.arch === 'x64' ? `${platform}-x64` : `${platform}-arm64`;
   const subpkg = `@anthropic-ai/claude-agent-sdk-${arch}/claude`;
+  const packageName = `@anthropic-ai/claude-agent-sdk-${arch}`;
+  const executableName = platform === 'win32' ? 'claude.exe' : 'claude';
+
+  try {
+    const packageJson = require_.resolve(`${packageName}/package.json`);
+    const p = unpackify(join(dirname(packageJson), executableName));
+    if (existsSync(p)) return p;
+  } catch { /* fall through */ }
 
   try {
     const sdkPkg = require_.resolve('@anthropic-ai/claude-agent-sdk/package.json');
@@ -69,8 +79,64 @@ export function resolveClaudeBinary(): string | undefined {
 // ── Session adapter ────────────────────────────────────────────────────────────
 // Wraps a ClaudeSession instance and exposes the BackendSession interface.
 
+export function mapClaudeMessageToWorkerSignals(
+  message: unknown,
+  toolNames: Map<string, string> = new Map(),
+): WorkerAdapterSignal[] {
+  const msg = (message ?? {}) as Record<string, unknown>;
+  const type = typeof msg.type === 'string' ? msg.type : '';
+  if (type === 'result') {
+    const failed = msg.is_error === true || msg.subtype === 'error';
+    return failed
+      ? [{
+          kind: 'failed',
+          code: 'claude-turn-failed',
+          message: typeof msg.result === 'string' ? msg.result : 'Claude worker turn failed',
+          retryable: true,
+        }, { kind: 'ended', reason: 'completed' }]
+      : [{ kind: 'ended', reason: 'completed' }];
+  }
+
+  const body = (msg.message ?? {}) as Record<string, unknown>;
+  const content = body.content;
+  if (!Array.isArray(content)) return [];
+  const signals: WorkerAdapterSignal[] = [];
+  for (const rawBlock of content) {
+    const block = (rawBlock ?? {}) as Record<string, unknown>;
+    if (block.type === 'text' && typeof block.text === 'string') {
+      const visible = block.text.split(/```work-report/i, 1)[0].trim();
+      if (visible) signals.push({ kind: 'progress', message: visible });
+    } else if (block.type === 'tool_use') {
+      const name = typeof block.name === 'string' && block.name.trim()
+        ? block.name.trim()
+        : 'unknown';
+      if (typeof block.id === 'string') toolNames.set(block.id, name);
+      signals.push({ kind: 'tool', toolName: name, phase: 'started' });
+    } else if (block.type === 'tool_result') {
+      const id = typeof block.tool_use_id === 'string' ? block.tool_use_id : '';
+      const name = toolNames.get(id) ?? 'unknown';
+      const failed = block.is_error === true;
+      signals.push({
+        kind: 'tool',
+        toolName: name,
+        phase: failed ? 'failed' : 'completed',
+        ...(typeof block.content === 'string'
+          ? { detail: block.content.slice(0, 4_000) }
+          : {}),
+      });
+      if (id) toolNames.delete(id);
+    }
+  }
+  return signals;
+}
+
 class ClaudeCodeSession implements BackendSession {
   private inner: ClaudeSession;
+  private readonly isWorker: boolean;
+  private readonly workerTools = new Map<string, string>();
+  private workerTurnTerminal = false;
+  private closed = false;
+  private readonly emit: (event: BackendSessionEvent) => void;
 
   constructor(
     config: BackendSessionConfig,
@@ -78,14 +144,53 @@ class ClaudeCodeSession implements BackendSession {
     confirmDestructive?: ConfirmDestructive,
     queryFactory?: typeof import('@anthropic-ai/claude-agent-sdk').query,
   ) {
+    this.emit = emit;
+    this.isWorker = config.executionRole === 'worker';
     // Translate BackendSessionConfig → ClaudeSession constructor options.
     // The NormalizedMessage shape is SDKMessage-compatible, so we can pass
     // the session events through with minimal wrapping.
     this.inner = new ClaudeSession({
       emit: (event: SessionEvent) => {
-        // SessionEvent.message is already SDKMessage-shaped, which is
-        // NormalizedMessage-compatible. Pass through directly.
-        emit(event as BackendSessionEvent);
+        if (!this.isWorker) {
+          emit(event as BackendSessionEvent);
+          return;
+        }
+        if (this.closed) return;
+        if (event.kind === 'message') {
+          for (const signal of mapClaudeMessageToWorkerSignals(event.message, this.workerTools)) {
+            if (signal.kind === 'ended') this.workerTurnTerminal = true;
+            emit({ kind: 'worker-signal', signal });
+          }
+        } else if (event.kind === 'auth-required') {
+          emit({
+            kind: 'worker-signal',
+            signal: {
+              kind: 'failed',
+              code: 'auth-required',
+              message: event.error,
+              retryable: false,
+            },
+          });
+        } else if (event.kind === 'error') {
+          emit({
+            kind: 'worker-signal',
+            signal: {
+              kind: 'failed',
+              code: 'claude-runtime-error',
+              message: event.error,
+              retryable: true,
+            },
+          });
+        } else if (event.kind === 'ended') {
+          if (!this.workerTurnTerminal) {
+            emit({ kind: 'worker-signal', signal: { kind: 'ended', reason: 'crashed' } });
+            this.workerTurnTerminal = true;
+          }
+        } else {
+          // Permission requests are already provider-neutral security events
+          // and remain outside the worker progress protocol.
+          emit(event as BackendSessionEvent);
+        }
       },
       cwd: config.cwd,
       sessionOptions: buildClaudeSessionOptions(config),
@@ -101,14 +206,17 @@ class ClaudeCodeSession implements BackendSession {
   }
 
   end(): void {
+    this.closed = true;
     this.inner.end();
   }
 
   sendUserText(text: string, priority?: InputPriority): void {
+    if (this.isWorker) this.workerTurnTerminal = false;
     this.inner.sendUserText(text, (priority ?? 'normal') as CSInputPriority);
   }
 
   sendUserContent(content: UserContentBlock[], priority?: InputPriority): void {
+    if (this.isWorker) this.workerTurnTerminal = false;
     // UserContentBlock is compatible with SDKUserMessage content blocks
     // (same { type: 'text', text } and { type: 'image', source } shapes).
     this.inner.sendUserContent(
@@ -121,8 +229,15 @@ class ClaudeCodeSession implements BackendSession {
     this.inner.resolvePermission(id, decision, message);
   }
 
-  async interrupt(): Promise<void> {
+  async interrupt(reason: 'steer' | 'user' | 'shutdown' = 'user'): Promise<void> {
     await this.inner.interrupt();
+    if (reason !== 'steer' && this.isWorker && !this.workerTurnTerminal && !this.closed) {
+      this.workerTurnTerminal = true;
+      // The wrapper owns this semantic turn boundary; ClaudeSession's native
+      // interrupt only stops the SDK turn and does not close the session.
+      // Scheduler uses this to preserve interrupted recovery state.
+      this.emit({ kind: 'worker-signal', signal: { kind: 'ended', reason: 'interrupted' } });
+    }
   }
 
   setAutoApproveScope(scope: AutoApproveScope): void {

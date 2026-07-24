@@ -4,7 +4,7 @@
 
 import { spawn, type ChildProcess } from 'node:child_process';
 import { accessSync, constants as fsConstants, readFileSync, realpathSync } from 'node:fs';
-import { readFile, realpath } from 'node:fs/promises';
+import { lstat, readFile, realpath, writeFile as writeTextFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, delimiter, isAbsolute, join, relative, resolve } from 'node:path';
 import { SubprocessBackend } from './subprocess-backend.js';
@@ -15,10 +15,14 @@ import type {
   BackendCapabilities, NormalizedMessage, UserContentBlock, InputPriority,
 } from './cli-backend.js';
 import { KimiAcpTransport, type KimiAcpNotification, type KimiAcpRequest } from './kimi-acp-transport.js';
+import {
+  extractWorkReportFrame,
+  type WorkerAdapterSignal,
+} from '../worker-protocol.js';
 
 const KIMI_CAPABILITIES: BackendCapabilities = {
-  coordinate: false, executeTasks: false,
-  displayName: 'Kimi', iconId: 'kimi', mcp: false, permissions: false,
+  coordinate: false, executeTasks: true,
+  displayName: 'Kimi', iconId: 'kimi', mcp: false, permissions: true,
   systemPrompt: true, skills: false, interrupt: true,
   defaultModel: 'kimi-latest',
   installHint: process.platform === 'win32'
@@ -26,6 +30,50 @@ const KIMI_CAPABILITIES: BackendCapabilities = {
     : 'curl -LsSf https://code.kimi.com/install.sh | bash',
 };
 const SUPPORTED_KIMI_ACP_VERSION = '0.24.1';
+
+export function mapKimiAcpUpdateToWorkerSignal(
+  update: Record<string, unknown>,
+): WorkerAdapterSignal | null {
+  if (update.sessionUpdate === 'agent_message_chunk' && isRecord(update.content)) {
+    if (update.content.type !== 'text' || typeof update.content.text !== 'string') return null;
+    const visible = update.content.text.split(/```work-report/i, 1)[0].trim();
+    return visible ? { kind: 'progress', message: visible } : null;
+  }
+  if (update.sessionUpdate !== 'tool_call' && update.sessionUpdate !== 'tool_call_update') {
+    return null;
+  }
+  const status = String(update.status ?? 'pending');
+  const phase = status === 'completed'
+    ? 'completed'
+    : status === 'failed'
+      ? 'failed'
+      : 'started';
+  const detailValue = update.title ?? update.rawOutput;
+  return {
+    kind: 'tool',
+    toolName: String(update.title ?? update.kind ?? 'Kimi tool'),
+    phase,
+    ...(typeof detailValue === 'string' ? { detail: detailValue.slice(0, 4_000) } : {}),
+  };
+}
+
+export function finalizeKimiWorkerText(text: string): WorkerAdapterSignal[] {
+  const extracted = extractWorkReportFrame(text);
+  if (extracted.report) {
+    return [
+      { kind: 'delivery', report: extracted.report },
+      { kind: 'ended', reason: 'completed' },
+    ];
+  }
+  return [{
+    kind: 'failed',
+    code: extracted.error ? 'invalid-work-report' : 'missing-work-report',
+    message: extracted.error
+      ? `Kimi returned an invalid WorkReport: ${extracted.error}`
+      : 'Kimi turn ended without a WorkReport',
+    retryable: true,
+  }, { kind: 'ended', reason: 'completed' }];
+}
 
 interface KimiStreamEvent {
   role?: string;
@@ -100,6 +148,10 @@ class KimiAcpSession implements BackendSession {
   private currentText = '';
   private authRequiredEmitted = false;
   private backendVersion: string | undefined;
+  private readonly isWorker: boolean;
+  private workerTurnGeneration = 0;
+  private activeWorkerGeneration = 0;
+  private suppressedWorkerGenerations = new Set<number>();
   private permissionResolvers = new Map<string, {
     options: Array<Record<string, unknown>>;
     resolve: (result: unknown) => void;
@@ -109,17 +161,33 @@ class KimiAcpSession implements BackendSession {
     private readonly binary: string,
     private readonly config: BackendSessionConfig,
     private emit: (event: BackendSessionEvent) => void,
-  ) {}
+    private readonly createTransport:
+      (options: ConstructorParameters<typeof KimiAcpTransport>[0]) => KimiAcpTransport =
+        (options) => new KimiAcpTransport(options),
+  ) {
+    this.isWorker = config.executionRole === 'worker';
+  }
 
   async start(): Promise<void> {
-    this.transport = new KimiAcpTransport({
+    this.transport = this.createTransport({
       binaryPath: this.binary,
       cwd: this.config.cwd,
       env: this.config.env ?? isolatedSubprocessEnv(),
+      allowWriteTextFile: this.isWorker,
       onNotification: (notification) => this.onNotification(notification),
       onRequest: (request) => this.onRequest(request),
       onExit: (error) => {
-        if (!this.closed) this.emit({ kind: 'error', error: `Kimi ACP error: ${error.message}` });
+        if (this.closed) return;
+        const message = `Kimi ACP error: ${error.message}`;
+        if (this.isWorker) {
+          this.emit({
+            kind: 'worker-signal',
+            signal: { kind: 'failed', code: 'kimi-acp-exited', message, retryable: true },
+          });
+          this.emit({ kind: 'worker-signal', signal: { kind: 'ended', reason: 'crashed' } });
+        } else {
+          this.emit({ kind: 'error', error: message });
+        }
       },
     });
     try {
@@ -138,9 +206,7 @@ class KimiAcpSession implements BackendSession {
       this.sessionId = this.config.resumeSessionId
         ? await this.transport.resumeSession(this.config.resumeSessionId, this.config.cwd)
         : await this.transport.newSession(this.config.cwd);
-      // Kimi remains Expert-only in phase one. Enforce its native read-only
-      // plan mode in addition to the scheduler capability gate.
-      await this.transport.setMode(this.sessionId, 'plan');
+      await this.transport.setMode(this.sessionId, this.isWorker ? 'default' : 'plan');
     } catch (error) {
       if (isKimiAuthError(String(error))) this.emitAuthRequired();
       this.transport.close();
@@ -156,7 +222,7 @@ class KimiAcpSession implements BackendSession {
       this.firstTurn,
     );
     this.firstTurn = false;
-    this.enqueuePrompt(prompt);
+    this.enqueuePrompt(prompt, this.isWorker ? ++this.workerTurnGeneration : 0);
   }
 
   sendUserContent(content: string | UserContentBlock[], _priority?: InputPriority): void {
@@ -166,26 +232,46 @@ class KimiAcpSession implements BackendSession {
       : { type: 'image', data: block.source.data, mimeType: block.source.media_type }),
     this.config.systemPrompt, this.firstTurn);
     this.firstTurn = false;
-    this.enqueuePrompt(prompt);
+    this.enqueuePrompt(prompt, this.isWorker ? ++this.workerTurnGeneration : 0);
   }
 
-  private enqueuePrompt(prompt: unknown[]): void {
+  private enqueuePrompt(prompt: unknown[], generation: number): void {
     if (this.closed || this.authRequiredEmitted || !this.transport || !this.sessionId) return;
     this.queue = this.queue.then(async () => {
       if (this.closed || !this.transport || !this.sessionId) return;
       this.currentText = '';
+      this.activeWorkerGeneration = generation;
       try {
         await this.transport.prompt(this.sessionId, prompt);
         const text = this.currentText.trim();
-        if (text && !this.closed) {
+        const suppressed = generation > 0 && this.suppressedWorkerGenerations.delete(generation);
+        if (this.isWorker && !this.closed && !suppressed) {
+          for (const signal of finalizeKimiWorkerText(text)) {
+            this.emit({ kind: 'worker-signal', signal });
+          }
+        } else if (text && !this.closed && !suppressed) {
           this.emit({ kind: 'message', message: {
             type: 'assistant',
             message: { role: 'assistant', content: [{ type: 'text', text }] },
           } });
         }
       } catch (error) {
+        const suppressed = generation > 0 && this.suppressedWorkerGenerations.delete(generation);
+        if (suppressed) return;
         if (isKimiAuthError(String(error))) this.emitAuthRequired();
-        else if (!this.closed) this.emit({ kind: 'error', error: `Kimi ACP prompt failed: ${String(error)}` });
+        else if (!this.closed && this.isWorker) {
+          this.emit({
+            kind: 'worker-signal',
+            signal: {
+              kind: 'failed',
+              code: 'kimi-prompt-failed',
+              message: `Kimi ACP prompt failed: ${String(error)}`,
+              retryable: true,
+            },
+          });
+        } else if (!this.closed) this.emit({ kind: 'error', error: `Kimi ACP prompt failed: ${String(error)}` });
+      } finally {
+        if (this.activeWorkerGeneration === generation) this.activeWorkerGeneration = 0;
       }
     });
   }
@@ -199,6 +285,12 @@ class KimiAcpSession implements BackendSession {
         this.currentText += update.content.text;
       }
     }
+    if (this.isWorker) {
+      const signal = mapKimiAcpUpdateToWorkerSignal(update);
+      if (signal && !this.currentText.includes('```work-report')) {
+        this.emit({ kind: 'worker-signal', signal });
+      }
+    }
   }
 
   private async onRequest(request: KimiAcpRequest): Promise<unknown> {
@@ -209,7 +301,17 @@ class KimiAcpSession implements BackendSession {
       if (content.length > 2_000_000) throw new Error('File exceeds the 2 MB ACP read limit');
       return { content };
     }
-    if (request.method === 'fs/write_text_file') throw new Error('Kimi Expert sessions are read-only');
+    if (request.method === 'fs/write_text_file' && isRecord(request.params)) {
+      if (!this.isWorker) throw new Error('Kimi Expert sessions are read-only');
+      const requestedPath = String(request.params.path ?? '');
+      const content = String(request.params.content ?? '');
+      if (Buffer.byteLength(content, 'utf8') > 2_000_000) {
+        throw new Error('File exceeds the 2 MB ACP write limit');
+      }
+      const path = await resolveKimiWritePath(this.config.cwd, requestedPath);
+      await writeTextFile(path, content, { encoding: 'utf8', mode: 0o600 });
+      return {};
+    }
     if (request.method === 'session/request_permission' && isRecord(request.params)) {
       const params = request.params;
       const id = String(request.id);
@@ -242,8 +344,14 @@ class KimiAcpSession implements BackendSession {
       : { outcome: { outcome: 'cancelled' } });
   }
 
-  async interrupt(): Promise<void> {
+  async interrupt(reason: 'steer' | 'user' | 'shutdown' = 'user'): Promise<void> {
+    if (this.isWorker && this.activeWorkerGeneration > 0) {
+      this.suppressedWorkerGenerations.add(this.activeWorkerGeneration);
+    }
     if (this.transport && this.sessionId) this.transport.cancel(this.sessionId);
+    if (this.isWorker && reason !== 'steer') {
+      this.emit({ kind: 'worker-signal', signal: { kind: 'ended', reason: 'interrupted' } });
+    }
   }
 
   end(): void {
@@ -255,7 +363,7 @@ class KimiAcpSession implements BackendSession {
     this.permissionResolvers.clear();
     this.transport?.close();
     this.transport = null;
-    this.emit({ kind: 'ended' });
+    if (!this.isWorker) this.emit({ kind: 'ended' });
     this.emit = () => undefined;
   }
 
@@ -269,7 +377,15 @@ class KimiAcpSession implements BackendSession {
   private emitAuthRequired(): void {
     if (this.authRequiredEmitted) return;
     this.authRequiredEmitted = true;
-    this.emit({ kind: 'auth-required', error: 'Kimi 登录已失效，请完成重新认证后重连。' });
+    const message = 'Kimi 登录已失效，请完成重新认证后重连。';
+    if (this.isWorker) {
+      this.emit({
+        kind: 'worker-signal',
+        signal: { kind: 'failed', code: 'auth-required', message, retryable: false },
+      });
+    } else {
+      this.emit({ kind: 'auth-required', error: message });
+    }
   }
 }
 
@@ -408,6 +524,14 @@ export class KimiBackend extends SubprocessBackend {
   readonly capabilities = KIMI_CAPABILITIES;
   readonly binaryName = 'kimi';
 
+  constructor(private readonly deps: {
+    createAcpTransport?: (
+      options: ConstructorParameters<typeof KimiAcpTransport>[0],
+    ) => KimiAcpTransport;
+  } = {}) {
+    super();
+  }
+
   resolveBinary(): string | null {
     const canonical = join(homedir(), '.kimi-code', 'bin', 'kimi');
     try {
@@ -426,7 +550,12 @@ export class KimiBackend extends SubprocessBackend {
       return createNoopSession();
     }
     return config.extra?.kimiTransport === 'acp'
-      ? new KimiAcpSession(binary, config, emit)
+      ? new KimiAcpSession(
+          binary,
+          config,
+          emit,
+          this.deps.createAcpTransport,
+        )
       : new KimiSession(binary, config, emit);
   }
 
@@ -496,6 +625,39 @@ export async function resolveKimiReadPath(cwd: string, requestedPath: string): P
     throw new Error('Path is outside the Meeting workspace');
   }
   return realTarget;
+}
+
+export async function resolveKimiWritePath(cwd: string, requestedPath: string): Promise<string> {
+  if (!requestedPath || requestedPath.includes('\0')) throw new Error('Invalid Kimi write path');
+  const lexicalRoot = resolve(cwd);
+  const lexicalTarget = resolve(lexicalRoot, requestedPath);
+  const lexicalRelative = relative(lexicalRoot, lexicalTarget);
+  if (lexicalRelative.startsWith('..') || isAbsolute(lexicalRelative)) {
+    throw new Error('Path is outside the Meeting workspace');
+  }
+
+  const realRoot = await realpath(lexicalRoot);
+  try {
+    await lstat(lexicalTarget);
+    const realTarget = await realpath(lexicalTarget);
+    const rel = relative(realRoot, realTarget);
+    if (rel.startsWith('..') || isAbsolute(rel)) {
+      throw new Error('Path is outside the Meeting workspace');
+    }
+    return realTarget;
+  } catch (error) {
+    if (!(isRecord(error) && error.code === 'ENOENT')) throw error;
+  }
+
+  // New files are allowed only when their existing parent resolves inside
+  // the real workspace. This closes both lexical traversal and symlink-parent
+  // escapes without creating directories on the agent's behalf.
+  const realParent = await realpath(dirname(lexicalTarget));
+  const parentRel = relative(realRoot, realParent);
+  if (parentRel.startsWith('..') || isAbsolute(parentRel)) {
+    throw new Error('Path is outside the Meeting workspace');
+  }
+  return join(realParent, lexicalTarget.slice(dirname(lexicalTarget).length + 1));
 }
 
 

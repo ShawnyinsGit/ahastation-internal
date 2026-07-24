@@ -3,6 +3,7 @@
 // (electron) and the renderer filters them out of the user-facing activity
 // feed (src/hooks/useClaude.ts).
 import { z } from 'zod';
+import { acceptanceCriterionSchema, workReportSchema } from './worker-protocol.js';
 
 export const MEETING_TOOLS = {
   DELEGATE: 'delegate_task',
@@ -12,6 +13,7 @@ export const MEETING_TOOLS = {
   PLAN_MEETING: 'plan_meeting',
   DELEGATE_TO: 'delegate_to',
   TASK_DONE: 'task_done',
+  SUBMIT_WORK_REPORT: 'submit_work_report',
   SUBMIT_DELIVERY: 'submit_delivery',
   REQUEST_DECISION: 'request_user_decision',
   ASK_HOST: 'ask_host',
@@ -31,6 +33,10 @@ export const planMeetingTaskSchema = z.object({
   deps: z.array(z.string()).optional().describe('IDs of tasks that must finish before this one starts.'),
   executorBackendId: z.string().min(1).optional().describe('CLI backend that should execute this task. Defaults to the meeting coordinator backend.'),
   writePaths: z.array(z.string().min(1)).max(100).optional().describe('Expected output paths, used for non-Git workspace locking.'),
+  acceptanceCriteria: z.array(acceptanceCriterionSchema).max(100).optional()
+    .describe('User-approved verification criteria. Legacy tasks without criteria receive one explicit manual criterion.'),
+  requiresDecision: z.boolean().optional()
+    .describe('Whether the Coordinator expects this task may need a user decision before completion.'),
 });
 
 export type PlanMeetingTask = z.infer<typeof planMeetingTaskSchema>;
@@ -51,6 +57,10 @@ export const askHostArgsSchema = {
 
 export const taskDoneArgsSchema = {
   summary: z.string().min(1).describe('One-line summary of what changed; surfaced to Talker context.'),
+};
+
+export const submitWorkReportArgsSchema = {
+  report: workReportSchema.describe('Complete, provider-neutral WorkReport for the current task.'),
 };
 
 export const submitDeliveryArgsSchema = {

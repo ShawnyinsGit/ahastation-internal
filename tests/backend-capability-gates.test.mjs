@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { Orchestrator } from '../dist-electron/orchestrator.js';
+import { getBackendRegistry } from '../dist-electron/backends/registry.js';
 
 function fakeSessionFactory() {
   return {
@@ -9,6 +10,16 @@ function fakeSessionFactory() {
     resolvePermission() {}, async interrupt() {},
   };
 }
+
+test('the four release backends expose the tested Worker implementation contract', () => {
+  const registry = getBackendRegistry();
+  for (const backendId of ['claude-code', 'opencode', 'codex', 'kimi']) {
+    const backend = registry.get(backendId);
+    assert.equal(backend?.capabilities.executeTasks, true, `${backendId} Worker implementation`);
+    assert.equal(backend?.capabilities.interrupt, true, `${backendId} interrupt contract`);
+  }
+  assert.equal(registry.get('qoder')?.capabilities.executeTasks, false);
+});
 
 test('a backend without coordinator capability cannot become the default coordinator', () => {
   assert.throws(() => new Orchestrator({
@@ -31,11 +42,11 @@ test('a plan cannot select a backend that cannot execute delivery tasks', async 
       id: 'unsupported-worker',
       title: 'Unsupported worker',
       prompt: 'Do the task',
-      executorBackendId: 'kimi',
+      executorBackendId: 'qoder',
     }]);
     assert.deepEqual(result, {
       ok: false,
-      error: "backend 'kimi' cannot execute delivery tasks",
+      error: "backend 'qoder' cannot execute delivery tasks",
     });
   } finally {
     await orchestrator.end();
@@ -64,7 +75,7 @@ test('unknown executor backends fail instead of silently falling back to Claude'
   }
 });
 
-test('single-task delegation respects the coordinator backend worker capability', async () => {
+test('Codex coordinator can delegate through its verified Worker contract', async () => {
   const orchestrator = new Orchestrator({
     emit() {},
     cwd: process.cwd(),
@@ -72,10 +83,9 @@ test('single-task delegation respects the coordinator backend worker capability'
     defaultBackendId: 'codex',
   });
   try {
-    assert.throws(
-      () => orchestrator.delegateSingleTask('change the code'),
-      /backend 'codex' cannot execute delivery tasks/i,
-    );
+    const delegated = orchestrator.delegateSingleTask('change the code');
+    assert.match(delegated.workerId, /^task-/);
+    assert.equal(delegated.reused, false);
   } finally {
     await orchestrator.end();
   }
@@ -108,6 +118,28 @@ test('a connecting host cannot take over coordination before readiness', async (
     releaseSecond();
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(orchestrator.setCoordinator('connecting-codex').ok, true);
+  } finally {
+    await orchestrator.end();
+  }
+});
+
+test('a meeting admits at most three hosts including the default coordinator', async () => {
+  const orchestrator = new Orchestrator({
+    emit() {},
+    cwd: process.cwd(),
+    sessionFactory: () => ({
+      async start() {}, end() {}, sendUserText() {}, sendUserContent() {},
+      resolvePermission() {}, async interrupt() {},
+    }),
+  });
+  try {
+    await orchestrator.start();
+    assert.equal(orchestrator.addHost('codex', 'host-two').ok, true);
+    assert.equal(orchestrator.addHost('codex', 'host-three').ok, true);
+    assert.deepEqual(orchestrator.addHost('codex', 'host-four'), {
+      ok: false,
+      error: 'host capacity reached (3/3)',
+    });
   } finally {
     await orchestrator.end();
   }
