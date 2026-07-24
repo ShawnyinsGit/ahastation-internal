@@ -1,11 +1,11 @@
 # build-matrix.yml — Phase 6b CI matrix (supersedes build.yml).
 #
-# x64 three runners (mac/win/ubuntu) build on push/PR; linux-arm64 is
-# MANUAL (workflow_dispatch) because this repo is private and arm runners
-# burn paid minutes. Every job runs both typechecks + the full node --test
-# suite + the whisper asset assertion (no more silently whisper-less
-# packages). Tag pushes (v*) additionally create a GitHub Release with all
-# artifacts + latest*.yml via GITHUB_TOKEN.
+# x64 three runners (mac/win/ubuntu) build on push/PR; linux-arm64 runs on
+# workflow_dispatch AND tag pushes (private repo: arm runners burn paid
+# minutes). Every job runs both typechecks + the full node --test suite +
+# the whisper asset assertion (no more silently whisper-less packages).
+# Tag pushes (v*) additionally create a GitHub Release with ALL artifacts
+# (x64 + arm64) + latest*.yml via GITHUB_TOKEN.
 #
 # Update-feed note (private-repo downgrade, docs §3.5-5): latest*.yml is
 # uploaded for the day the repo goes public; electron-updater itself is
@@ -115,9 +115,10 @@ jobs:
           retention-days: 30
 
   linux-arm64:
-    name: ubuntu-24.04-arm (manual)
-    # Private repo: arm runners consume paid minutes — manual trigger only.
-    if: github.event_name == 'workflow_dispatch'
+    name: ubuntu-24.04-arm
+    # Private repo: arm runners consume paid minutes — manual trigger and
+    # tag pushes only (tags need the arm64 deb/AppImage for the release).
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 90
     steps:
@@ -128,30 +129,15 @@ jobs:
           node-version: 22
           cache: npm
 
-      - name: Build whisper.cpp v1.9.1 from source (NEON self-build)
-        # Official prebuilts are x64-only; arm64 must compile. Produces
-        # build/whisper/{whisper-cli,whisper-server,libggml*.so}.
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends build-essential cmake git ca-certificates
-          mkdir -p build
-          if [ ! -d build/whisper.cpp-src ]; then
-            git clone --depth 1 --branch v1.9.1 https://github.com/ggerganov/whisper.cpp.git build/whisper.cpp-src
-          fi
-          cmake -S build/whisper.cpp-src -B build/whisper.cpp-src/build \
-            -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=ON -DBUILD_SHARED_LIBS=ON
-          cmake --build build/whisper.cpp-src/build --config Release -j --target whisper-cli whisper-server
-          mkdir -p build/whisper
-          cp build/whisper.cpp-src/build/bin/whisper-* build/whisper/ || true
-          find build/whisper.cpp-src/build -name 'libggml*.so' -exec cp {} build/whisper/ \;
-          chmod +x build/whisper/whisper-* || true
+      - name: Prebuild — whisper binaries (official v1.9.1 ubuntu-arm64 prebuilt)
+        # The official prebuilt is linked against ubuntu-22.04 glibc 2.35, so
+        # packages run on Debian 12 / Ubuntu 22.04+ — a 24.04 self-build would
+        # require glibc 2.39 and break Debian 12. fetch-whisper.mjs downloads
+        # the archive, flattens the top-level dir, and fetches the model.
+        run: node scripts/fetch-whisper.mjs
 
       - name: npm install
         run: npm ci
-
-      - name: Prebuild — whisper model only (binaries self-built above)
-        run: node scripts/fetch-whisper.mjs
 
       - name: Prebuild — speaker model
         run: node scripts/fetch-speaker-model.mjs
@@ -189,7 +175,7 @@ jobs:
   release:
     name: GitHub Release
     runs-on: ubuntu-latest
-    needs: [build]
+    needs: [build, linux-arm64]
     if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-test')
     permissions:
       contents: write
@@ -204,7 +190,7 @@ jobs:
       - name: Create / update release
         uses: softprops/action-gh-release@v2
         with:
-          name: AhaMeet ${{ github.ref_name }}
+          name: AhaStation ${{ github.ref_name }}
           # Draft=false but prerelease honored for tags like v1.2.0-beta.
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
@@ -217,5 +203,7 @@ jobs:
             artifacts/pkg-ubuntu-latest/*.AppImage
             artifacts/pkg-ubuntu-latest/*.deb
             artifacts/pkg-ubuntu-latest/latest*.yml
+            artifacts/pkg-linux-arm64/*.AppImage
+            artifacts/pkg-linux-arm64/*.deb
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -4,7 +4,7 @@
 // plausible size. Designed to tolerate flaky CN networks.
 
 import { spawn, spawnSync } from 'node:child_process';
-import { createWriteStream, existsSync, mkdirSync, statSync, copyFileSync, chmodSync, readdirSync, renameSync, unlinkSync } from 'node:fs';
+import { createWriteStream, existsSync, mkdirSync, statSync, copyFileSync, chmodSync, readdirSync, renameSync, rmSync, unlinkSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -312,6 +312,17 @@ async function ensureBinary() {
       if (r.status !== 0) throw new Error(`tar failed: ${r.stderr}`);
     }
     try { unlinkSync(archive); } catch { /* ignore */ }
+    // Official archives nest everything under one top-level dir (Release/ in
+    // the win32 zip, whisper-bin-<name>/ in the linux tarballs) — flatten
+    // into outDir so the binary checks below can find them.
+    if (!existsSync(cliBin)) {
+      for (const entry of readdirSync(outDir)) {
+        const sub = join(outDir, entry);
+        if (entry === MODEL_NAME || !statSync(sub).isDirectory()) continue;
+        for (const f of readdirSync(sub)) renameSync(join(sub, f), join(outDir, f));
+        rmSync(sub, { recursive: true, force: true });
+      }
+    }
     for (const name of targets) {
       const bin = join(outDir, whisperBinaryName(name, platform));
       if (existsSync(bin)) chmodSync(bin, 0o755);
