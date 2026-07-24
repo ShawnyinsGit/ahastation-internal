@@ -10853,3 +10853,159 @@ html.handheld { --density-scale: 1.2; }
   display: block;
   outline: none;
 }
+.final-meeting-delivery {
+  align-self: stretch;
+  overflow: auto;
+  padding: 24px;
+  color: var(--text-primary, #f4f4f5);
+  background: linear-gradient(145deg, rgba(37, 38, 47, .96), rgba(20, 21, 27, .98));
+}
+
+.final-meeting-delivery > header,
+.final-meeting-delivery > footer,
+.final-meeting-delivery-facts,
+.final-meeting-delivery-grid {
+  display: flex;
+  gap: 16px;
+}
+
+.final-meeting-delivery > header {
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.final-meeting-delivery-kicker {
+  margin: 0 0 4px;
+  color: #8b7cff;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.final-meeting-delivery h2,
+.final-meeting-delivery h3 {
+  margin: 0 0 12px;
+}
+
+.final-meeting-delivery-state {
+  padding: 7px 10px;
+  border: 1px solid rgba(139, 124, 255, .45);
+  border-radius: 999px;
+  color: #c8c0ff;
+  white-space: nowrap;
+}
+
+.final-meeting-delivery-state.is-published {
+  border-color: rgba(52, 211, 153, .45);
+  color: #6ee7b7;
+}
+
+.final-meeting-delivery-facts {
+  margin: 20px 0;
+  flex-wrap: wrap;
+}
+
+.final-meeting-delivery-facts > div {
+  min-width: 140px;
+  padding: 12px;
+  border: 1px solid rgba(255, 255, 255, .08);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, .035);
+}
+
+.final-meeting-delivery-facts dt {
+  color: #9ca3af;
+  font-size: 12px;
+}
+
+.final-meeting-delivery-facts dd {
+  margin: 6px 0 0;
+}
+
+.final-meeting-delivery-grid > section {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.final-meeting-task-evidence,
+.final-meeting-file-list li {
+  display: grid;
+  gap: 5px;
+  margin-bottom: 8px;
+  padding: 11px 12px;
+  border: 1px solid rgba(255, 255, 255, .08);
+  border-radius: 9px;
+  background: rgba(0, 0, 0, .14);
+}
+
+.final-meeting-task-evidence small,
+.final-meeting-file-list span,
+.final-meeting-delivery > footer small {
+  color: #9ca3af;
+}
+
+.final-meeting-task-evidence p {
+  margin: 0;
+  color: #6ee7b7;
+}
+
+.final-meeting-task-evidence .is-limitation {
+  color: #fbbf24;
+}
+
+.final-meeting-file-list {
+  max-height: 320px;
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  list-style: none;
+}
+
+.final-meeting-delivery > footer {
+  margin-top: 20px;
+  flex-wrap: wrap;
+  align-items: flex-end;
+}
+
+.final-meeting-delivery > footer label {
+  display: grid;
+  flex: 1 1 320px;
+  gap: 6px;
+}
+
+.final-meeting-delivery textarea {
+  min-height: 72px;
+  resize: vertical;
+}
+
+.final-meeting-delivery button,
+.final-meeting-delivery textarea {
+  border: 1px solid rgba(139, 124, 255, .55);
+  border-radius: 8px;
+  padding: 10px 12px;
+  color: inherit;
+  background: rgba(139, 124, 255, .18);
+}
+
+.final-meeting-delivery button:disabled {
+  cursor: not-allowed;
+  opacity: .5;
+}
+
+.final-meeting-delivery button.is-secondary {
+  background: transparent;
+}
+
+.final-meeting-delivery-error {
+  color: #fca5a5;
+}
+
+@media (max-width: 900px) {
+  .final-meeting-delivery-grid {
+    flex-direction: column;
+  }
+  .final-meeting-delivery > header {
+    flex-direction: column;
+  }
+}

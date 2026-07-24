@@ -371,6 +371,7 @@ export class WorkerScheduler {
     prompt: string;
     status: WorkerStatusKind | 'interrupted';
     deps: string[];
+    supersedesTaskId?: string;
     executorBackendId?: string;
     writePaths?: string[];
     executionProfile?: PlanMeetingTask['executionProfile'];
@@ -402,6 +403,7 @@ export class WorkerScheduler {
       prompt: handle.prompt,
       status: handle.status,
       deps: [...handle.deps],
+      supersedesTaskId: handle.supersedesTaskId,
       executorBackendId: handle.executorBackendId,
       writePaths: handle.writePaths ? [...handle.writePaths] : undefined,
       executionProfile: handle.executionProfile ? structuredClone(handle.executionProfile) : undefined,
@@ -440,6 +442,71 @@ export class WorkerScheduler {
 
   getPlanVersion(): number {
     return this.planVersion;
+  }
+
+  /** Create immutable, versioned replacements for already accepted tasks.
+   * Existing accepted handles and their integrated commits are never reset.
+   * Replacement tasks keep the exact approved execution/authority envelope
+   * and start from the queue's current accepted integration head. */
+  createFinalDeliveryRework(
+    reason: string,
+    deliveryHash: string,
+  ): { planVersion: number; taskIds: string[] } {
+    const normalizedReason = boundedTaskText(reason, 'final delivery rework reason', 20_000);
+    if (!/^[0-9a-f]{64}$/u.test(deliveryHash)) {
+      throw new Error('final delivery hash is invalid');
+    }
+    const accepted = Array.from(this.workers.values())
+      .filter((handle) => handle.status === 'accepted')
+      .sort((left, right) => left.id.localeCompare(right.id));
+    if (accepted.length === 0) throw new Error('final delivery has no accepted tasks to rework');
+
+    const nextPlanVersion = this.planVersion + 1;
+    const taskIds: string[] = [];
+    for (const original of accepted) {
+      const baseId = `${original.id}-rework-v${nextPlanVersion}`;
+      let id = baseId;
+      let suffix = 2;
+      while (this.workers.has(id)) id = `${baseId}-${suffix++}`;
+      this.registerHandle({
+        id,
+        title: `${original.title} · 返工 v${nextPlanVersion}`,
+        prompt: [
+          `This is a user-requested replacement for immutable accepted task ${original.id}.`,
+          `The rejected final Meeting delivery hash is ${deliveryHash}.`,
+          `Reason: ${normalizedReason}`,
+          'Start from the current accepted Meeting integration head. Do not reset, revert, or rewrite prior accepted commits.',
+          '',
+          original.prompt,
+        ].join('\n'),
+        deps: [],
+        supersedesTaskId: original.id,
+        specialty: original.specialty,
+        executorBackendId: original.executorBackendId,
+        writePaths: original.writePaths ? [...original.writePaths] : undefined,
+        executionProfile: original.executionProfile
+          ? structuredClone(original.executionProfile)
+          : undefined,
+        contextSelection: original.contextSelection
+          ? structuredClone(original.contextSelection)
+          : undefined,
+        workspaceMode: original.workspaceMode,
+        authorityRequest: original.authorityRequest
+          ? structuredClone(original.authorityRequest)
+          : undefined,
+        approvalDecisionId: original.approvalDecisionId,
+        approvalRecordedAt: original.approvalRecordedAt,
+        approvedPlanVersion: nextPlanVersion,
+        acceptanceCriteria: original.acceptanceCriteria
+          ? structuredClone(original.acceptanceCriteria)
+          : undefined,
+      });
+      taskIds.push(id);
+    }
+    this.planVersion = nextPlanVersion;
+    this.emitPlanUpdate();
+    this.spawnReadyWorkers();
+    return { planVersion: nextPlanVersion, taskIds };
   }
 
   getAcceptedDependencyReports(taskId: string): Array<{
@@ -496,6 +563,9 @@ export class WorkerScheduler {
         title: normalized.title,
         prompt: normalized.prompt,
         deps: normalized.deps ?? [],
+        supersedesTaskId: typeof task.supersedesTaskId === 'string'
+          ? task.supersedesTaskId
+          : undefined,
         specialty: inferSpecialty(`${String(task.title ?? id)} ${prompt}`),
         executorBackendId: normalized.executorBackendId,
         writePaths: normalized.writePaths,
@@ -1993,6 +2063,7 @@ export class WorkerScheduler {
     title: string;
     prompt: string;
     deps: string[];
+    supersedesTaskId?: string;
     specialty: WorkerSpecialtyKind;
     executorBackendId?: string;
     writePaths?: string[];
@@ -2010,6 +2081,7 @@ export class WorkerScheduler {
       title: spec.title,
       prompt: spec.prompt,
       deps: spec.deps,
+      supersedesTaskId: spec.supersedesTaskId,
       executorBackendId: spec.executorBackendId,
       writePaths: spec.writePaths,
       executionProfile: spec.executionProfile,
@@ -2598,6 +2670,7 @@ export class WorkerScheduler {
       title: h.title,
       status: h.status,
       deps: h.deps,
+      supersedesTaskId: h.supersedesTaskId,
       executorBackendId: h.executorBackendId,
       writePaths: h.writePaths ? [...h.writePaths] : undefined,
       executionProfile: h.executionProfile ? structuredClone(h.executionProfile) : undefined,

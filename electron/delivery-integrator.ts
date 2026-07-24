@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
@@ -51,11 +51,27 @@ export interface WorkspaceIntegration {
   reviewHash?: string;
 }
 
+export interface PublishedMeetingIntegration {
+  schemaVersion: 1;
+  expectedUserBaseRevision: string;
+  integrationHead: string;
+  publishedHead: string;
+  alreadyPublished: boolean;
+}
+
 export class IntegrationConflictError extends Error {
   readonly code = 'integration-conflict' as const;
   constructor(message: string) {
     super(message);
     this.name = 'IntegrationConflictError';
+  }
+}
+
+export class PublicationPausedError extends Error {
+  readonly code = 'publication-paused' as const;
+  constructor(message: string) {
+    super(message);
+    this.name = 'PublicationPausedError';
   }
 }
 
@@ -235,6 +251,84 @@ export class GitDeliveryIntegrator {
     }
     await git(staged.workspace, ['reset', '--hard', staged.priorIntegrationHead]);
   }
+
+  /** The sole operation allowed to publish a complete Meeting result into the
+   * user's selected base worktree. It never stages files or resolves
+   * conflicts; a dirty/moved base pauses without mutation. */
+  async publishUserBase(
+    state: IntegrationState,
+    expectedUserBaseRevision: string,
+    integrationHead: string,
+  ): Promise<PublishedMeetingIntegration> {
+    const expected = await git(this.baseCwd, [
+      'rev-parse',
+      '--verify',
+      `${expectedUserBaseRevision}^{commit}`,
+    ]);
+    const target = await git(state.workspace, [
+      'rev-parse',
+      '--verify',
+      `${integrationHead}^{commit}`,
+    ]);
+    const integrationBranchHead = await git(state.workspace, ['rev-parse', 'HEAD']);
+    if (target !== state.durableHead || integrationBranchHead !== target) {
+      throw new PublicationPausedError('verified Meeting integration head changed before publication');
+    }
+    const dirty = await git(this.baseCwd, [
+      'status',
+      '--porcelain=v1',
+      '-z',
+      '--untracked-files=all',
+    ]);
+    if (dirty) {
+      throw new PublicationPausedError('user base is dirty; publication is paused without mutation');
+    }
+    const current = await git(this.baseCwd, ['rev-parse', 'HEAD']);
+    if (current === target) {
+      return {
+        schemaVersion: 1,
+        expectedUserBaseRevision: expected,
+        integrationHead: target,
+        publishedHead: current,
+        alreadyPublished: true,
+      };
+    }
+    if (current !== expected) {
+      throw new PublicationPausedError(
+        `user base moved from ${expected} to ${current}; publication is paused`,
+      );
+    }
+    if (!await gitExitOk(this.baseCwd, ['merge-base', '--is-ancestor', current, target])) {
+      throw new PublicationPausedError('Meeting integration head cannot fast-forward the user base');
+    }
+    await git(this.baseCwd, ['merge', '--ff-only', target]);
+    const publishedHead = await git(this.baseCwd, ['rev-parse', 'HEAD']);
+    if (publishedHead !== target) {
+      throw new Error('published user base does not match the verified Meeting integration head');
+    }
+    return {
+      schemaVersion: 1,
+      expectedUserBaseRevision: expected,
+      integrationHead: target,
+      publishedHead,
+      alreadyPublished: false,
+    };
+  }
+
+  cleanupPublishedIntegration(state: IntegrationState, publishedHead: string): void {
+    const baseHead = gitSync(this.baseCwd, ['rev-parse', 'HEAD']);
+    if (baseHead !== publishedHead || state.durableHead !== publishedHead) {
+      throw new Error('cannot clean up an unpublished Meeting integration workspace');
+    }
+    try {
+      gitSync(this.baseCwd, ['worktree', 'remove', state.workspace]);
+    } catch (error) {
+      console.warn('[delivery-integrator] published but integration worktree cleanup failed', {
+        workspace: state.workspace,
+        error: safeError(error),
+      });
+    }
+  }
 }
 
 /** Legacy direct-base integrator retained only for old persisted deliveries.
@@ -326,6 +420,16 @@ async function gitExitOk(cwd: string, args: string[]): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+function gitSync(cwd: string, args: string[]): string {
+  return execFileSync('git', args, {
+    cwd,
+    encoding: 'utf8',
+    timeout: 30_000,
+    maxBuffer: 32 * 1024 * 1024,
+    windowsHide: true,
+  }).trim();
 }
 
 function safeSegment(value: string): string {

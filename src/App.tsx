@@ -569,9 +569,13 @@ ${trimmed}`
               />
             }
             delivery={workers.currentDelivery}
+            finalMeetingDelivery={workers.finalMeetingDelivery}
+            finalMeetingDecision={workers.finalMeetingDecision}
             sessionId={activeTab?.id ?? null}
             onAcceptDelivery={() => workers.acceptDelivery()}
             onReviseDelivery={(fb: string) => workers.reviseDelivery(fb)}
+            onAcceptFinalMeetingDelivery={() => workers.acceptFinalMeetingDelivery()}
+            onRequestFinalMeetingRework={(reason: string) => workers.requestFinalMeetingRework(reason)}
             viewingFile={viewingFile}
             onCloseFileView={() => setViewingFile(null)}
             stageWindows={stageWindows.windows}

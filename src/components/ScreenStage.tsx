@@ -11,7 +11,14 @@ import {
 } from 'react';
 import type { ScreenShareState } from '../hooks/useScreenShare';
 import type { DeliverySnapshot, HostGroupState, WorkerState } from '../lib/meeting-store';
-import type { ActivityEntry, BrowserTabInfo, CoordinatorBriefing, MeetingPlan } from '../types';
+import type {
+  ActivityEntry,
+  BrowserTabInfo,
+  CoordinatorBriefing,
+  FinalMeetingDecision,
+  MeetingDelivery,
+  MeetingPlan,
+} from '../types';
 import type { StageWindow, StageWindowType } from '../lib/stage-window-store';
 import { FileViewer } from './FileViewer';
 import { BrowserStage } from './BrowserStage';
@@ -21,6 +28,7 @@ import { ActivityTabContent } from './ActivityTabContent';
 import { DeliveryViewer } from './DeliveryViewer';
 import { TaskInspector } from './TaskInspector';
 import { TaskRail } from './TaskRail';
+import { FinalMeetingDelivery } from './FinalMeetingDelivery';
 
 interface ScreenStageProps {
   share: ScreenShareState;
@@ -35,12 +43,16 @@ interface ScreenStageProps {
   aiSpeaking: boolean;
   galleryContent: ReactNode;
   delivery: DeliverySnapshot | null;
+  finalMeetingDelivery: MeetingDelivery | null;
+  finalMeetingDecision: FinalMeetingDecision | null;
   sessionId: string | null;
   onAcceptDelivery: () => Promise<{ ok: true } | { ok: false; error: string }>;
   onReviseDelivery: (feedback: string) => Promise<
     | { ok: true; route: 'worker' | 'talker'; queued?: boolean }
     | { ok: false; error: string }
   >;
+  onAcceptFinalMeetingDelivery: () => Promise<{ ok: true } | { ok: false; error: string }>;
+  onRequestFinalMeetingRework: (reason: string) => Promise<{ ok: true } | { ok: false; error: string }>;
   viewingFile?: { relativePath: string } | null;
   onCloseFileView?: () => void;
   stageWindows: StageWindow[];
@@ -79,9 +91,13 @@ export function ScreenStage({
   aiSpeaking = false,
   galleryContent,
   delivery,
+  finalMeetingDelivery,
+  finalMeetingDecision,
   sessionId,
   onAcceptDelivery,
   onReviseDelivery,
+  onAcceptFinalMeetingDelivery,
+  onRequestFinalMeetingRework,
   viewingFile,
   onCloseFileView,
   stageWindows,
@@ -288,7 +304,14 @@ export function ScreenStage({
           />
 
           <div className="stage-content">
-            {delivery ? (
+            {finalMeetingDelivery ? (
+              <FinalMeetingDelivery
+                delivery={finalMeetingDelivery}
+                decision={finalMeetingDecision}
+                onAccept={onAcceptFinalMeetingDelivery}
+                onRequestRework={onRequestFinalMeetingRework}
+              />
+            ) : delivery ? (
               <div className="stage-delivery-content">
                 <DeliveryViewer
                   delivery={delivery}
@@ -314,7 +337,7 @@ export function ScreenStage({
               />
             )}
 
-            {!delivery && activeWindow?.type === 'browser' && browserViewportRef && onBrowserOpenTab && onBrowserCloseTab && onBrowserSetActive && onBrowserNavigate && onBrowserBack && onBrowserForward && onBrowserReload && (
+            {!delivery && !finalMeetingDelivery && activeWindow?.type === 'browser' && browserViewportRef && onBrowserOpenTab && onBrowserCloseTab && onBrowserSetActive && onBrowserNavigate && onBrowserBack && onBrowserForward && onBrowserReload && (
               <div className="stage-browser-content">
                 <BrowserStage
                   tabs={browserTabs}
@@ -331,13 +354,13 @@ export function ScreenStage({
               </div>
             )}
 
-            {!delivery && activeWindow?.type === 'terminal' && (
+            {!delivery && !finalMeetingDelivery && activeWindow?.type === 'terminal' && (
               <div className="stage-terminal-content">
                 <TerminalPanel activity={terminalActivity} />
               </div>
             )}
 
-            {!delivery && activeWindow?.type === 'file' && activeWindow.filePath && (
+            {!delivery && !finalMeetingDelivery && activeWindow?.type === 'file' && activeWindow.filePath && (
               <div className="stage-file-content">
                 <FileViewer
                   relativePath={activeWindow.filePath}

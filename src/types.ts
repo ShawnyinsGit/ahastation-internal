@@ -425,6 +425,7 @@ export interface MeetingPlanNode {
   title: string;
   status: WorkerStatus;
   deps: string[];
+  supersedesTaskId?: string;
   executorBackendId?: string;
   writePaths?: string[];
   executionProfile?: TaskExecutionProfile;
@@ -625,6 +626,67 @@ export interface DeliveryView {
   updatedAt: number;
 }
 
+export interface MeetingDelivery {
+  schemaVersion: 1;
+  id: string;
+  meetingId: string;
+  planVersion: number;
+  integrationHead: string;
+  expectedUserBaseRevision: string;
+  publicationState: 'meeting-branch-only' | 'published';
+  tasks: Array<{
+    taskId: string;
+    title: string;
+    attempt: number;
+    deliveryId: string;
+    candidateId: string;
+    candidateCommit: string;
+    integratedCommit: string;
+    reviewHash: string;
+    verification: { passed: true; checks: Array<{ summary: string }> };
+    review: { passed: true; findings: Array<{ summary: string }> };
+    approvalDecisionId?: string;
+    limitations: string[];
+  }>;
+  changedFiles: Array<{
+    taskId: string;
+    commit: string;
+    path: string;
+    previousPath?: string;
+    status: string;
+    evidenceKind: string;
+    additions: number | null;
+    deletions: number | null;
+    requiresUserConfirmation: boolean;
+  }>;
+  approvals: Array<{ taskId: string; decisionId: string }>;
+  unresolvedWork: Array<{ taskId: string; title: string; status: string; reason: string }>;
+  meetingVerification: {
+    passed: true;
+    integrationHead: string;
+    checks: Array<{ taskId: string; summary: string }>;
+  };
+  contentHash: string;
+}
+
+export type FinalMeetingDecision =
+  | {
+      kind: 'accept';
+      deliveryId: string;
+      contentHash: string;
+      integrationHead: string;
+      decidedAt: number;
+    }
+  | {
+      kind: 'rework';
+      deliveryId: string;
+      contentHash: string;
+      reason: string;
+      planVersion: number;
+      taskIds: string[];
+      decidedAt: number;
+    };
+
 /** Every event from main is tagged with the sessionId of the slot that
  *  emitted it. Renderer's multi-slot store routes the event to the right
  *  MeetingState by id; absent or unknown ids are dropped. */
@@ -641,6 +703,7 @@ export type RendererEvent =
   | { kind: 'worker-delivery'; workerId: string; title: string; summary: string; taskId: string; deliveryId: string; files: WorkerDeliveryFile[]; source?: AgentSource; sessionId?: string; hostId?: string }
   | { kind: 'worker-event'; event: WorkerEventV2; source?: AgentSource; sessionId?: string; hostId?: string }
   | { kind: 'delivery-status'; workerId: string; taskId: string; delivery: DeliveryView; source?: AgentSource; sessionId?: string; hostId?: string }
+  | { kind: 'meeting-delivery-updated'; delivery: MeetingDelivery | null; decision: FinalMeetingDecision | null; source?: AgentSource; sessionId?: string; hostId?: string }
   | { kind: 'coordinator-briefing'; briefing: CoordinatorBriefing; source?: AgentSource; sessionId?: string; hostId?: string }
   | { kind: 'plan-updated'; plan: MeetingPlan; source?: AgentSource; sessionId?: string; hostId?: string }
   | { kind: 'plan-proposed'; tasks: PlanMeetingTaskInput[]; source?: AgentSource; sessionId?: string; hostId?: string }
@@ -976,6 +1039,22 @@ export interface VibeMeetApi {
     candidateId: string | undefined,
     feedback: string,
   ) => Promise<{ ok: true; delivery: DeliveryView } | { ok: false; error: string }>;
+  meetingDelivery: {
+    get: (
+      sessionId: string | null,
+    ) => Promise<{ ok: true; delivery: MeetingDelivery | null; decision: FinalMeetingDecision | null } | { ok: false; error: string }>;
+    accept: (
+      sessionId: string | null,
+      deliveryId: string,
+      contentHash: string,
+    ) => Promise<{ ok: true; delivery: MeetingDelivery } | { ok: false; error: string }>;
+    requestRework: (
+      sessionId: string | null,
+      deliveryId: string,
+      contentHash: string,
+      reason: string,
+    ) => Promise<{ ok: true; planVersion: number; taskIds: string[] } | { ok: false; error: string }>;
+  };
   endSession: (sessionId: string | null) => Promise<{ ok: boolean }>;
   pickCwd: () => Promise<string | null>;
   getVoiceConfig: () => Promise<{ enabled: boolean; voicePrint: VoicePrint | null }>;

@@ -41,6 +41,19 @@ export const planRevisionOperationSchema = z.discriminatedUnion('kind', [
   ), 'update-task requires at least one field'),
 ]);
 
+/** A user-owned final-delivery decision. It is intentionally not part of the
+ * Coordinator command union: the Coordinator cannot reject its own accepted
+ * work or mint replacement authority without an explicit renderer command. */
+export const finalDeliveryReworkOperationSchema = z.object({
+  kind: z.literal('add-rework-task'),
+  taskId: actorId,
+  supersedesTaskId: actorId,
+  deliveryHash: z.string().regex(/^[0-9a-f]{64}$/),
+  reason: z.string().trim().min(1).max(20_000),
+}).strict();
+
+export type FinalDeliveryReworkOperation = z.infer<typeof finalDeliveryReworkOperationSchema>;
+
 export const meetingCommandSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('propose-plan'), tasks: z.array(planMeetingTaskSchema).min(1).max(100) }).strict(),
   z.object({

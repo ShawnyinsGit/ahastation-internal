@@ -75,6 +75,14 @@ import { CommandDeliveryVerifier } from './delivery-verifier.js';
 import { DeterministicDeliveryReviewer } from './delivery-reviewer.js';
 import { GitDeliveryIntegrator } from './delivery-integrator.js';
 import { IntegrationQueue } from './integration-queue.js';
+import {
+  buildMeetingDelivery,
+  MeetingDeliveryNotReadyError,
+  parseMeetingDelivery,
+  publishedMeetingDelivery,
+  type FinalMeetingDecision,
+  type MeetingDelivery,
+} from './meeting-delivery.js';
 import { prepareFrozenDeliveryCandidate } from './delivery-candidate.js';
 import {
   CoordinatorReviewDriver,
@@ -195,6 +203,11 @@ export class Orchestrator implements OrchestratorBridge {
   private deliveryHarness: DeliveryHarness;
   private coordinatorReviewDriver: CoordinatorReviewDriver;
   private integrationQueue: IntegrationQueue;
+  private deliveryVerifier: CommandDeliveryVerifier;
+  private expectedUserBaseRevision: string;
+  private finalMeetingDelivery: MeetingDelivery | null = null;
+  private finalMeetingDecision: FinalMeetingDecision | null = null;
+  private finalDeliveryBuild?: Promise<MeetingDelivery | null>;
   private workspaceManager: TaskWorkspaceManager;
   private customWorkspaceManager: boolean;
   private diagnostics: DiagnosticLogger;
@@ -274,6 +287,8 @@ export class Orchestrator implements OrchestratorBridge {
       ?? new TaskWorkspaceManager(this.meetingId, this.cwd);
     const baseline = this.workspaceManager.inspectBaseline();
     const deliveryVerifier = new CommandDeliveryVerifier();
+    this.deliveryVerifier = deliveryVerifier;
+    this.expectedUserBaseRevision = baseline.revision;
     this.integrationQueue = new IntegrationQueue({
       meetingId: this.meetingId,
       expectedUserBaseRevision: baseline.revision,
@@ -892,6 +907,7 @@ export class Orchestrator implements OrchestratorBridge {
       || e.event.kind === 'worker-event'
       || e.event.kind === 'delivery-status'
       || e.event.kind === 'worker-delivery'
+      || e.event.kind === 'meeting-delivery-updated'
     );
     // Every renderer-visible orchestration event is emitted only after its
     // journal line is durable. If one write fails, MeetingRepository faults
@@ -903,6 +919,16 @@ export class Orchestrator implements OrchestratorBridge {
         void this.snapshotActiveMeeting().catch((error) => {
           console.error('[orchestrator] rebuildable Meeting snapshot write failed', {
             kind: e.event.kind,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        });
+      }
+      if (
+        e.event.kind === 'delivery-status'
+        && e.event.delivery.status === 'accepted'
+      ) {
+        void this.prepareFinalMeetingDelivery().catch((error) => {
+          console.error('[orchestrator] final Meeting delivery preparation failed', {
             error: error instanceof Error ? error.message : String(error),
           });
         });
@@ -920,11 +946,26 @@ export class Orchestrator implements OrchestratorBridge {
     this.repository.assertWritable();
     const journal = await MeetingRepository.replay(this.meetingId);
     this.integrationQueue.restore(journal);
+    this.restoreFinalMeetingDelivery(journal);
     this.taskMailbox.restore(journal);
     this.taskProjection = projectMeetingTasks(journal);
     await this.defaultHost().start(greeting);
     if (this.recoveredTasks.length > 0) {
       this.meetingScheduler.emitRecoveredState();
+    }
+    if (this.finalMeetingDelivery || this.finalMeetingDecision) {
+      this.safeEmit({
+        source: 'system',
+        event: {
+          kind: 'meeting-delivery-updated',
+          delivery: this.finalMeetingDelivery
+            ? structuredClone(this.finalMeetingDelivery)
+            : null,
+          decision: this.finalMeetingDecision
+            ? structuredClone(this.finalMeetingDecision)
+            : null,
+        },
+      });
     }
     // Persist the native backend handle before the renderer is told the Host
     // is ready. A crash after readiness can then recover the exact thread.
@@ -1002,6 +1043,12 @@ export class Orchestrator implements OrchestratorBridge {
       tasks: liveTasks.length > 0 ? liveTasks : this.recoveredTasks,
       planVersion: this.meetingScheduler.getPlanVersion(),
       autoOrchestration: this.autoOrchestration,
+      finalMeetingDelivery: this.finalMeetingDelivery
+        ? structuredClone(this.finalMeetingDelivery)
+        : null,
+      finalMeetingDecision: this.finalMeetingDecision
+        ? structuredClone(this.finalMeetingDecision)
+        : null,
     });
   }
 
@@ -1670,6 +1717,282 @@ export class Orchestrator implements OrchestratorBridge {
     this.meetingScheduler.markTaskDone(workerId, summary);
   }
 
+  /** Build and durably expose the sole final Meeting delivery. Per-task
+   * acceptance only advances the private integration branch; this method
+   * additionally re-verifies every accepted task on the exact final head. */
+  async prepareFinalMeetingDelivery(): Promise<MeetingDelivery | null> {
+    if (this.finalDeliveryBuild) return this.finalDeliveryBuild;
+    this.finalDeliveryBuild = this.buildFinalMeetingDelivery().finally(() => {
+      this.finalDeliveryBuild = undefined;
+    });
+    return this.finalDeliveryBuild;
+  }
+
+  getMeetingDelivery(): Promise<MeetingDelivery | null> {
+    return this.prepareFinalMeetingDelivery();
+  }
+
+  getFinalMeetingDecision(): FinalMeetingDecision | null {
+    return this.finalMeetingDecision
+      ? structuredClone(this.finalMeetingDecision)
+      : null;
+  }
+
+  async acceptMeetingDelivery(
+    deliveryId: string,
+    contentHash: string,
+  ): Promise<MeetingDelivery> {
+    const delivery = await this.requireCurrentMeetingDelivery(deliveryId, contentHash);
+    if (this.finalMeetingDecision) {
+      if (
+        this.finalMeetingDecision.kind === 'accept'
+        && this.finalMeetingDecision.deliveryId === deliveryId
+        && this.finalMeetingDecision.contentHash === contentHash
+      ) return structuredClone(this.finalMeetingDelivery ?? delivery);
+      throw new Error('final Meeting delivery already has a conflicting decision');
+    }
+    const intent = {
+      schemaVersion: 1,
+      deliveryId,
+      contentHash,
+      integrationHead: delivery.integrationHead,
+      decidedAt: Date.now(),
+    };
+    await this.repository.append('meeting-delivery-accept-intent', intent);
+    await this.repository.flush();
+    const publication = await this.integrationQueue.publishFinalDelivery({
+      deliveryId,
+      contentHash,
+      integrationHead: delivery.integrationHead,
+      expectedUserBaseRevision: delivery.expectedUserBaseRevision,
+    });
+    const published = publishedMeetingDelivery(delivery);
+    const decision: FinalMeetingDecision = {
+      kind: 'accept',
+      deliveryId,
+      contentHash,
+      integrationHead: publication.publishedHead,
+      decidedAt: intent.decidedAt,
+    };
+    await this.repository.append('meeting-delivery-accepted', {
+      schemaVersion: 1,
+      delivery: published,
+      decision,
+      publication,
+    });
+    await this.repository.flush();
+    this.finalMeetingDelivery = published;
+    this.finalMeetingDecision = decision;
+    this.safeEmit({
+      source: 'system',
+      event: {
+        kind: 'meeting-delivery-updated',
+        delivery: structuredClone(published),
+        decision: structuredClone(decision),
+      },
+    });
+    await this.snapshotActiveMeeting();
+    await this.integrationQueue.cleanupPublishedIntegration(publication.publishedHead);
+    return structuredClone(published);
+  }
+
+  async requestMeetingDeliveryRework(
+    deliveryId: string,
+    contentHash: string,
+    reason: string,
+  ): Promise<{ planVersion: number; taskIds: string[] }> {
+    const delivery = await this.requireCurrentMeetingDelivery(deliveryId, contentHash);
+    const normalizedReason = reason.trim();
+    if (!normalizedReason || normalizedReason.length > 20_000) {
+      throw new Error('final Meeting rework reason must contain 1-20000 characters');
+    }
+    if (this.finalMeetingDecision) {
+      if (
+        this.finalMeetingDecision.kind === 'rework'
+        && this.finalMeetingDecision.deliveryId === deliveryId
+        && this.finalMeetingDecision.contentHash === contentHash
+        && this.finalMeetingDecision.reason === normalizedReason
+      ) {
+        return {
+          planVersion: this.finalMeetingDecision.planVersion,
+          taskIds: [...this.finalMeetingDecision.taskIds],
+        };
+      }
+      throw new Error('final Meeting delivery already has a conflicting decision');
+    }
+    await this.repository.append('meeting-delivery-rework-intent', {
+      schemaVersion: 1,
+      deliveryId,
+      contentHash,
+      integrationHead: delivery.integrationHead,
+      reason: normalizedReason,
+    });
+    await this.repository.flush();
+    const replacement = this.meetingScheduler.createFinalDeliveryRework(
+      normalizedReason,
+      contentHash,
+    );
+    const decision: FinalMeetingDecision = {
+      kind: 'rework',
+      deliveryId,
+      contentHash,
+      reason: normalizedReason,
+      planVersion: replacement.planVersion,
+      taskIds: [...replacement.taskIds],
+      decidedAt: Date.now(),
+    };
+    await this.repository.append('meeting-delivery-rework-created', {
+      schemaVersion: 1,
+      decision,
+      operations: replacement.taskIds.map((taskId, index) => ({
+        kind: 'add-rework-task',
+        taskId,
+        supersedesTaskId: delivery.tasks[index]?.taskId,
+        deliveryHash: contentHash,
+        reason: normalizedReason,
+      })),
+    });
+    await this.repository.flush();
+    this.finalMeetingDecision = decision;
+    this.safeEmit({
+      source: 'system',
+      event: {
+        kind: 'meeting-delivery-updated',
+        delivery: structuredClone(delivery),
+        decision: structuredClone(decision),
+      },
+    });
+    await this.snapshotActiveMeeting();
+    return replacement;
+  }
+
+  private async buildFinalMeetingDelivery(): Promise<MeetingDelivery | null> {
+    const tasks = this.meetingScheduler.snapshot();
+    const integration = await this.integrationQueue.inspectState();
+    if (
+      this.finalMeetingDelivery
+      && this.finalMeetingDelivery.planVersion === this.meetingScheduler.getPlanVersion()
+      && this.finalMeetingDelivery.integrationHead === integration.durableHead
+    ) return structuredClone(this.finalMeetingDelivery);
+
+    const meetingChecks: Array<{ taskId: string; summary: string }> = [];
+    try {
+      for (const task of tasks) {
+        if (task.status !== 'accepted') continue;
+        const delivery = task.delivery;
+        const candidate = delivery?.candidate;
+        if (!delivery || !candidate) {
+          throw new MeetingDeliveryNotReadyError([`${task.id}:missing accepted candidate`]);
+        }
+        const verification = await this.deliveryVerifier.verify({
+          deliveryId: delivery.id,
+          taskId: task.id,
+          attempt: candidate.attempt,
+          meetingId: this.meetingId,
+          goal: delivery.spec.objective,
+          acceptanceCriteria: structuredClone(delivery.spec.acceptanceCriteria),
+          workspace: integration.workspace,
+          sourceRevision: integration.durableHead,
+        }, candidate.report);
+        if (!verification.passed) {
+          throw new MeetingDeliveryNotReadyError([
+            `${task.id}:${verification.error ?? 'full Meeting verification failed'}`,
+          ]);
+        }
+        const summaries = verification.checks.map((check) => {
+          if (typeof check === 'string') return check;
+          if (check && typeof check === 'object') {
+            const record = check as Record<string, unknown>;
+            return String(record.summary ?? record.description ?? record.status ?? 'passed');
+          }
+          return String(check);
+        });
+        meetingChecks.push({
+          taskId: task.id,
+          summary: summaries.join('; ') || 'verification passed on final integration head',
+        });
+      }
+      const delivery = buildMeetingDelivery({
+        meetingId: this.meetingId,
+        planVersion: this.meetingScheduler.getPlanVersion(),
+        tasks,
+        integrationHead: integration.durableHead,
+        expectedUserBaseRevision: this.expectedUserBaseRevision,
+        meetingVerification: {
+          integrationHead: integration.durableHead,
+          checks: meetingChecks,
+        },
+      });
+      await this.repository.append('meeting-delivery-ready', {
+        schemaVersion: 1,
+        delivery,
+      });
+      await this.repository.flush();
+      this.finalMeetingDelivery = delivery;
+      this.finalMeetingDecision = null;
+      this.safeEmit({
+        source: 'system',
+        event: {
+          kind: 'meeting-delivery-updated',
+          delivery: structuredClone(delivery),
+          decision: null,
+        },
+      });
+      await this.snapshotActiveMeeting();
+      return structuredClone(delivery);
+    } catch (error) {
+      if (error instanceof MeetingDeliveryNotReadyError) return null;
+      throw error;
+    }
+  }
+
+  private async requireCurrentMeetingDelivery(
+    deliveryId: string,
+    contentHash: string,
+  ): Promise<MeetingDelivery> {
+    if (
+      !deliveryId
+      || !/^[0-9a-f]{64}$/u.test(contentHash)
+    ) throw new Error('final Meeting delivery identity is invalid');
+    const delivery = await this.prepareFinalMeetingDelivery();
+    if (
+      !delivery
+      || delivery.id !== deliveryId
+      || delivery.contentHash !== contentHash
+    ) throw new Error('final Meeting delivery is stale or no longer ready');
+    return delivery;
+  }
+
+  private restoreFinalMeetingDelivery(events: PersistedMeetingEvent[]): void {
+    this.finalMeetingDelivery = null;
+    this.finalMeetingDecision = null;
+    for (const event of events) {
+      if (event.type === 'meeting-delivery-ready') {
+        const record = objectRecord(event.payload);
+        const delivery = parseMeetingDelivery(record.delivery);
+        if (delivery) {
+          this.finalMeetingDelivery = delivery;
+          this.finalMeetingDecision = null;
+        }
+        continue;
+      }
+      if (event.type === 'meeting-delivery-accepted') {
+        const record = objectRecord(event.payload);
+        const delivery = parseMeetingDelivery(record.delivery);
+        const decision = parseFinalMeetingDecision(record.decision);
+        if (delivery && decision?.kind === 'accept') {
+          this.finalMeetingDelivery = delivery;
+          this.finalMeetingDecision = decision;
+        }
+        continue;
+      }
+      if (event.type === 'meeting-delivery-rework-created') {
+        const decision = parseFinalMeetingDecision(objectRecord(event.payload).decision);
+        if (decision?.kind === 'rework') this.finalMeetingDecision = decision;
+      }
+    }
+  }
+
   async acceptDelivery(deliveryId: string, candidateId: string) {
     const view = await this.meetingScheduler.acceptDelivery(deliveryId, candidateId);
     await this.repository.append('delivery-user-accepted', {
@@ -1822,4 +2145,38 @@ export class Orchestrator implements OrchestratorBridge {
       });
     }
   }
+}
+
+function objectRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function parseFinalMeetingDecision(value: unknown): FinalMeetingDecision | null {
+  const record = objectRecord(value);
+  const common = (
+    typeof record.deliveryId === 'string'
+    && typeof record.contentHash === 'string'
+    && /^[0-9a-f]{64}$/u.test(record.contentHash)
+    && typeof record.decidedAt === 'number'
+    && Number.isFinite(record.decidedAt)
+  );
+  if (!common) return null;
+  if (
+    record.kind === 'accept'
+    && typeof record.integrationHead === 'string'
+    && /^[0-9a-f]{40,64}$/u.test(record.integrationHead)
+  ) return structuredClone(record as unknown as FinalMeetingDecision);
+  if (
+    record.kind === 'rework'
+    && typeof record.reason === 'string'
+    && record.reason.trim().length > 0
+    && record.reason.length <= 20_000
+    && typeof record.planVersion === 'number'
+    && Number.isSafeInteger(record.planVersion)
+    && Array.isArray(record.taskIds)
+    && record.taskIds.every((entry) => typeof entry === 'string')
+  ) return structuredClone(record as unknown as FinalMeetingDecision);
+  return null;
 }

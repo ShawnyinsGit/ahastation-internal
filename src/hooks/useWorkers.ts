@@ -1,7 +1,14 @@
 import { useCallback, useMemo, useSyncExternalStore } from 'react';
 import { meetingStore, type DeliverySnapshot, type HostGroupState, type WorkerState } from '../lib/meeting-store';
 import type { SpeakHandle } from '../lib/speech-session';
-import type { CoordinatorBriefing, MeetingPlan, PlanMeetingTaskInput, StagedAttachment } from '../types';
+import type {
+  CoordinatorBriefing,
+  FinalMeetingDecision,
+  MeetingDelivery,
+  MeetingPlan,
+  PlanMeetingTaskInput,
+  StagedAttachment,
+} from '../types';
 
 export interface UseWorkersResult {
   workers: Map<string, WorkerState>;
@@ -15,6 +22,8 @@ export interface UseWorkersResult {
   lastError: string | null;
   currentDelivery: DeliverySnapshot | null;
   deliveryHistory: DeliverySnapshot[];
+  finalMeetingDelivery: MeetingDelivery | null;
+  finalMeetingDecision: FinalMeetingDecision | null;
   coordinatorBriefings: CoordinatorBriefing[];
   savedDocuments: string[];
   restartSession: () => Promise<void>;
@@ -32,6 +41,8 @@ export interface UseWorkersResult {
     | { ok: true; route: 'worker' | 'talker'; queued?: boolean }
     | { ok: false; error: string }
   >;
+  acceptFinalMeetingDelivery: () => Promise<{ ok: true } | { ok: false; error: string }>;
+  requestFinalMeetingRework: (reason: string) => Promise<{ ok: true } | { ok: false; error: string }>;
   decidePendingPlan: (
     approved: boolean,
     tasks?: PlanMeetingTaskInput[],
@@ -80,6 +91,14 @@ export function useWorkers(): UseWorkersResult {
     (feedback: string) => meetingStore.reviseDelivery(feedback),
     [],
   );
+  const acceptFinalMeetingDelivery = useCallback(
+    () => meetingStore.acceptFinalMeetingDelivery(),
+    [],
+  );
+  const requestFinalMeetingRework = useCallback(
+    (reason: string) => meetingStore.requestFinalMeetingRework(reason),
+    [],
+  );
   const decidePendingPlan = useCallback(
     (approved: boolean, tasks?: PlanMeetingTaskInput[]) =>
       meetingStore.decidePendingPlan(approved, tasks),
@@ -116,6 +135,8 @@ export function useWorkers(): UseWorkersResult {
     lastError: state.lastError,
     currentDelivery: state.currentDelivery,
     deliveryHistory: state.deliveryHistory,
+    finalMeetingDelivery: state.finalMeetingDelivery,
+    finalMeetingDecision: state.finalMeetingDecision,
     coordinatorBriefings: state.coordinatorBriefings,
     savedDocuments: state.savedDocuments,
     restartSession,
@@ -130,6 +151,8 @@ export function useWorkers(): UseWorkersResult {
     setSpeakCallback,
     acceptDelivery,
     reviseDelivery,
+    acceptFinalMeetingDelivery,
+    requestFinalMeetingRework,
     decidePendingPlan,
     toggleHostGroupCollapsed,
     addHostGroup,

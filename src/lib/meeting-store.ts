@@ -14,6 +14,8 @@ import type {
   StagedAttachment,
   TranscriptEntry,
   DeliveryView,
+  FinalMeetingDecision,
+  MeetingDelivery,
   WorkReport,
   WorkerEventV2,
   WorkerDeliveryFile,
@@ -172,6 +174,8 @@ export interface MeetingState {
    *  freshest one. */
   currentDelivery: DeliverySnapshot | null;
   deliveryHistory: DeliverySnapshot[];
+  finalMeetingDelivery: MeetingDelivery | null;
+  finalMeetingDecision: FinalMeetingDecision | null;
   coordinatorBriefings: CoordinatorBriefing[];
   /** Paths of documents saved via the save_document MCP tool. The renderer
    *  watches this array and auto-opens each new path as a file tab. */
@@ -344,6 +348,8 @@ function emptyState(defaultBackendId: string = 'claude-code'): MeetingState {
     lastError: null,
     currentDelivery: null,
     deliveryHistory: [],
+    finalMeetingDelivery: null,
+    finalMeetingDecision: null,
     coordinatorBriefings: [],
     savedDocuments: [],
     hostGroups,
@@ -1401,6 +1407,15 @@ class MeetingStore {
       });
       return;
     }
+    if (e.kind === 'meeting-delivery-updated') {
+      this.mutateSlot(slot.id, (s) => ({
+        ...s,
+        finalMeetingDelivery: e.delivery ? structuredClone(e.delivery) : null,
+        finalMeetingDecision: e.decision ? structuredClone(e.decision) : null,
+      }));
+      this.bumpUnread(slot);
+      return;
+    }
     if (e.kind === 'plan-updated') {
       this.mutateSlot(slot.id, (s) => ({ ...s, plan: e.plan }));
       return;
@@ -2325,6 +2340,44 @@ class MeetingStore {
     return result.ok
       ? { ok: true, route: 'worker' }
       : { ok: false, error: result.error };
+  }
+
+  async acceptFinalMeetingDelivery(): Promise<{ ok: true } | { ok: false; error: string }> {
+    const id = this.effectiveSessionId();
+    if (!id) return { ok: false, error: 'No active session' };
+    const delivery = this.slots.get(id)?.state.finalMeetingDelivery;
+    if (!delivery || delivery.publicationState !== 'meeting-branch-only') {
+      return { ok: false, error: 'Final Meeting delivery is not ready' };
+    }
+    const result = await window.vibeMeet.meetingDelivery.accept(
+      id,
+      delivery.id,
+      delivery.contentHash,
+    );
+    if (!result.ok) return result;
+    this.mutateSlot(id, (state) => ({
+      ...state,
+      finalMeetingDelivery: result.delivery,
+    }));
+    return { ok: true };
+  }
+
+  async requestFinalMeetingRework(
+    reason: string,
+  ): Promise<{ ok: true } | { ok: false; error: string }> {
+    const id = this.effectiveSessionId();
+    if (!id) return { ok: false, error: 'No active session' };
+    const delivery = this.slots.get(id)?.state.finalMeetingDelivery;
+    const normalized = reason.trim();
+    if (!delivery) return { ok: false, error: 'Final Meeting delivery is not ready' };
+    if (!normalized) return { ok: false, error: 'Rework reason is required' };
+    const result = await window.vibeMeet.meetingDelivery.requestRework(
+      id,
+      delivery.id,
+      delivery.contentHash,
+      normalized,
+    );
+    return result.ok ? { ok: true } : result;
   }
 
   async decidePendingPlan(

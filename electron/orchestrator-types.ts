@@ -15,6 +15,7 @@ import type { PlanMeetingTask } from './meeting-tools.js';
 import type { TaskWorkspace } from './task-workspace.js';
 import type { WorkspaceBlockedDiagnostic } from './task-workspace.js';
 import type { DeliveryView } from './delivery-harness.js';
+import type { MeetingDelivery, FinalMeetingDecision } from './meeting-delivery.js';
 import type { WorkReport, WorkerEvent } from './worker-protocol.js';
 
 export type {
@@ -63,6 +64,8 @@ export interface MeetingPlanNode {
   title: string;
   status: WorkerStatusKind;
   deps: string[];
+  /** Immutable accepted task replaced by this versioned rework node. */
+  supersedesTaskId?: string;
   executorBackendId?: string;
   writePaths?: string[];
   executionProfile?: PlanMeetingTask['executionProfile'];
@@ -121,6 +124,7 @@ export type OrchestratorOnlyEvent =
   | { kind: 'permission-cancelled'; id: string }
   | { kind: 'worker-event'; event: WorkerEvent }
   | { kind: 'delivery-status'; workerId: string; taskId: string; delivery: DeliveryView }
+  | { kind: 'meeting-delivery-updated'; delivery: MeetingDelivery | null; decision: FinalMeetingDecision | null }
   | { kind: 'coordinator-briefing'; briefing: CoordinatorBriefing }
   | { kind: 'plan-updated'; plan: MeetingPlan }
   | { kind: 'plan-proposed'; tasks: PlanMeetingTask[] }
@@ -171,6 +175,7 @@ export interface WorkerHandle {
   title: string;
   prompt: string;
   deps: string[];
+  supersedesTaskId?: string;
   executorBackendId?: string;
   writePaths?: string[];
   executionProfile?: PlanMeetingTask['executionProfile'];

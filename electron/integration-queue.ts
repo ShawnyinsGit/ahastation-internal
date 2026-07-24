@@ -6,6 +6,7 @@ import type {
 import {
   GitDeliveryIntegrator,
   type IntegrationState,
+  type PublishedMeetingIntegration,
   type StagedIntegration,
   type WorkspaceIntegration,
 } from './delivery-integrator.js';
@@ -23,6 +24,13 @@ export interface IntegrationQueueOptions {
   ) => Promise<VerificationEvidence>;
   append: (type: string, payload: unknown) => Promise<unknown>;
   flush: () => Promise<void>;
+}
+
+export interface MeetingPublicationRequest {
+  deliveryId: string;
+  contentHash: string;
+  integrationHead: string;
+  expectedUserBaseRevision: string;
 }
 
 export class IntegrationQueue {
@@ -82,6 +90,19 @@ export class IntegrationQueue {
     return operation;
   }
 
+  publishFinalDelivery(
+    request: MeetingPublicationRequest,
+  ): Promise<PublishedMeetingIntegration> {
+    const operation = this.tail.then(() => this.publish(request));
+    this.tail = operation.catch(() => undefined);
+    return operation;
+  }
+
+  async cleanupPublishedIntegration(publishedHead: string): Promise<void> {
+    const state = await this.state();
+    this.options.integrator.cleanupPublishedIntegration(state, publishedHead);
+  }
+
   private async process(
     key: string,
     view: DeliveryView,
@@ -127,6 +148,45 @@ export class IntegrationQueue {
     }
   }
 
+  private async publish(
+    request: MeetingPublicationRequest,
+  ): Promise<PublishedMeetingIntegration> {
+    if (
+      !request.deliveryId
+      || !/^[0-9a-f]{64}$/u.test(request.contentHash)
+      || !/^[0-9a-f]{40,64}$/u.test(request.integrationHead)
+    ) {
+      throw new Error('Meeting publication request is invalid');
+    }
+    const state = await this.state();
+    if (
+      state.durableHead !== request.integrationHead
+      || this.durableHead !== request.integrationHead
+    ) {
+      throw new Error('Meeting publication does not match the durable integration head');
+    }
+    await this.persistMeeting('meeting-publication-started', request, {
+      durableHead: state.durableHead,
+      branch: state.branch,
+      workspace: state.workspace,
+    });
+    try {
+      const publication = await this.options.integrator.publishUserBase(
+        state,
+        request.expectedUserBaseRevision,
+        request.integrationHead,
+      );
+      await this.persistMeeting('meeting-publication-completed', request, { publication });
+      return publication;
+    } catch (error) {
+      await this.persistMeeting('meeting-publication-paused', request, {
+        code: error instanceof Error && 'code' in error ? String(error.code) : 'publication-failed',
+        message: redactSecrets(error instanceof Error ? error.message : String(error)).slice(0, 2_000),
+      });
+      throw error;
+    }
+  }
+
   private state(): Promise<IntegrationState> {
     if (!this.statePromise) {
       this.statePromise = this.options.integrator.initialize(
@@ -154,6 +214,23 @@ export class IntegrationQueue {
       candidateId: candidate.id,
       candidateCommit: candidate.frozen?.commit,
       reviewHash: candidate.reviewSession?.reviewHash,
+      data,
+    });
+    await this.options.flush();
+  }
+
+  private async persistMeeting(
+    type: string,
+    request: MeetingPublicationRequest,
+    data: unknown,
+  ): Promise<void> {
+    await this.options.append(type, {
+      schemaVersion: 1,
+      taskId: 'meeting-publication',
+      deliveryId: request.deliveryId,
+      contentHash: request.contentHash,
+      integrationHead: request.integrationHead,
+      expectedUserBaseRevision: request.expectedUserBaseRevision,
       data,
     });
     await this.options.flush();

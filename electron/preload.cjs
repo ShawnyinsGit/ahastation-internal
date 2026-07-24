@@ -50,6 +50,19 @@ const api = {
       candidateId,
       feedback,
     }),
+  meetingDelivery: {
+    get: (sessionId) =>
+      ipcRenderer.invoke('meeting-delivery:get', { sessionId }),
+    accept: (sessionId, deliveryId, contentHash) =>
+      ipcRenderer.invoke('meeting-delivery:accept', { sessionId, deliveryId, contentHash }),
+    requestRework: (sessionId, deliveryId, contentHash, reason) =>
+      ipcRenderer.invoke('meeting-delivery:request-rework', {
+        sessionId,
+        deliveryId,
+        contentHash,
+        reason,
+      }),
+  },
   endSession: (sessionId) => ipcRenderer.invoke('session:end', { sessionId }),
   pickCwd: () => ipcRenderer.invoke('dialog:pick-cwd'),
   getVoiceConfig: () => ipcRenderer.invoke('settings:get-voice-config'),
