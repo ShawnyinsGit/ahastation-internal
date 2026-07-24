@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 
 import { ChevronDown, Clock, DownloadCloud, FolderOpen, KeyRound, LogIn, Mic, MonitorUp } from 'lucide-react';
 import { meetingStore } from '../lib/meeting-store';
 import type { BackendInfo } from '../types';
+import { usePickCwd } from './DirPickerModal';
 
 interface LobbyProps {
   lastError?: string | null;
@@ -58,6 +59,7 @@ export function Lobby({ lastError }: LobbyProps) {
   const [opening, setOpening] = useState(false);
   const [openError, setOpenError] = useState<string | null>(null);
   const [recoverable, setRecoverable] = useState<RecoverableMeeting[]>([]);
+  const { pickCwd, pickerModal } = usePickCwd();
 
   // Install state — one backend at a time; log accumulates streamed output.
   const [installing, setInstalling] = useState<string | null>(null);
@@ -113,10 +115,10 @@ export function Lobby({ lastError }: LobbyProps) {
   }, [opening]);
 
   const pickAndOpen = useCallback(async () => {
-    const dir = await window.vibeMeet.pickCwd();
+    const dir = await pickCwd();
     if (!dir) return;
     await openCwd(dir);
-  }, [openCwd]);
+  }, [openCwd, pickCwd]);
 
   const recoverMeeting = useCallback(async (meeting: RecoverableMeeting) => {
     if (opening) return;
@@ -524,6 +526,7 @@ export function Lobby({ lastError }: LobbyProps) {
           <span className="join-hint-item">⌥ Interrupt anytime</span>
         </div>
       </div>
+      {pickerModal}
     </div>
   );
 }

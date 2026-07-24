@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ChevronDown, FolderOpen, KeyRound, LogIn, Mic, MonitorUp } from 'lucide-react';
+import { usePickCwd } from './DirPickerModal';
 
 interface JoinScreenProps {
   onJoin: (cwd: string) => void;
@@ -11,6 +12,7 @@ type AuthMode = 'apikey' | 'subscription' | null;
 
 export function JoinScreen({ onJoin, defaultCwd, lastError }: JoinScreenProps) {
   const [cwd, setCwd] = useState<string>(defaultCwd ?? '');
+  const { pickCwd, pickerModal } = usePickCwd();
 
   // Auth state
   const [authMode, setAuthMode] = useState<AuthMode>(null);
@@ -39,20 +41,20 @@ export function JoinScreen({ onJoin, defaultCwd, lastError }: JoinScreenProps) {
   }, []);
 
   const pick = useCallback(async () => {
-    const dir = await window.vibeMeet.pickCwd();
+    const dir = await pickCwd(cwd || undefined);
     if (dir) setCwd(dir);
-  }, []);
+  }, [pickCwd, cwd]);
 
   const join = useCallback(async () => {
     let target = cwd;
     if (!target) {
-      const dir = await window.vibeMeet.pickCwd();
+      const dir = await pickCwd();
       if (!dir) return;
       setCwd(dir);
       target = dir;
     }
     onJoin(target);
-  }, [cwd, onJoin]);
+  }, [cwd, onJoin, pickCwd]);
 
   const saveApiKey = useCallback(async () => {
     setApiKeyStatus('saving');
@@ -215,6 +217,7 @@ export function JoinScreen({ onJoin, defaultCwd, lastError }: JoinScreenProps) {
           <span className="join-hint-item">⌥ Interrupt anytime</span>
         </div>
       </div>
+      {pickerModal}
     </div>
   );
 }

@@ -9058,3 +9058,157 @@ html.handheld { --density-scale: 1.2; }
   display: block;
   outline: none;
 }
+
+/* ----- In-app directory picker (handheld mode) -----
+   Replaces the native GTK open-directory dialog, which overflows 800px-tall
+   handheld screens and clips its Open/Cancel buttons. Only the browsing half
+   is in-app — selection still ends at the native grant-confirmation
+   messagebox (dialog:confirm-cwd). */
+
+.dirpicker-backdrop {
+  position: fixed; inset: 0;
+  background: rgba(8, 9, 13, 0.65);
+  backdrop-filter: blur(8px);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 110;
+}
+
+.dirpicker {
+  width: min(560px, 92vw);
+  height: min(520px, 86vh);
+  background: var(--bg-tile);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  display: flex; flex-direction: column;
+  box-shadow: var(--shadow-card);
+  overflow: hidden;
+}
+
+.dirpicker-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border-soft);
+}
+.dirpicker-title { font-weight: 600; font-size: 14px; color: var(--text-primary); }
+
+.dirpicker-close {
+  width: 32px; height: 32px;
+  display: flex; align-items: center; justify-content: center;
+  border: none; border-radius: 8px; background: transparent;
+  color: var(--text-secondary); cursor: pointer;
+}
+.dirpicker-close:hover { background: var(--bg-elevated); color: var(--text-primary); }
+
+.dirpicker-nav {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.dirpicker-up {
+  display: flex; align-items: center; gap: 6px;
+  padding: 6px 10px;
+  border: 1px solid var(--border-soft); border-radius: var(--radius-sm);
+  background: transparent; color: var(--text-secondary);
+  font-size: 12px; cursor: pointer;
+  flex-shrink: 0;
+}
+.dirpicker-up:hover:not(:disabled) { background: var(--bg-elevated); color: var(--text-primary); }
+.dirpicker-up:disabled { opacity: 0.4; cursor: default; }
+
+.dirpicker-crumbs {
+  flex: 1; min-width: 0;
+  display: flex; align-items: center; flex-wrap: nowrap;
+  overflow-x: auto;
+  font-size: 12px;
+}
+.dirpicker-crumb-wrap { display: flex; align-items: center; flex-shrink: 0; }
+.dirpicker-crumb-sep { color: var(--text-muted); margin: 0 2px; }
+.dirpicker-crumb {
+  border: none; background: transparent;
+  color: var(--text-secondary);
+  padding: 4px 6px; border-radius: var(--radius-xs);
+  font-size: 12px; cursor: pointer;
+  max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.dirpicker-crumb:hover:not(:disabled) { background: var(--bg-elevated); color: var(--text-primary); }
+.dirpicker-crumb-current { color: var(--text-primary); font-weight: 600; }
+
+.dirpicker-hidden-toggle {
+  flex-shrink: 0;
+  padding: 6px 10px;
+  border: 1px solid var(--border-soft); border-radius: var(--radius-sm);
+  background: transparent; color: var(--text-secondary);
+  font-size: 12px; cursor: pointer;
+}
+.dirpicker-hidden-toggle:hover { background: var(--bg-elevated); color: var(--text-primary); }
+.dirpicker-hidden-toggle-on {
+  background: var(--accent-soft); border-color: var(--accent);
+  color: var(--accent);
+}
+
+.dirpicker-list {
+  flex: 1; min-height: 0;
+  overflow-y: auto;
+  padding: 6px;
+}
+
+.dirpicker-status {
+  padding: 24px; text-align: center;
+  color: var(--text-secondary); font-size: 13px;
+}
+.dirpicker-error { color: var(--danger); }
+
+.dirpicker-row {
+  display: flex; align-items: center; gap: 10px;
+  width: 100%;
+  padding: 10px 12px;
+  border: none; border-radius: var(--radius-sm);
+  background: transparent; color: var(--text-primary);
+  font-size: 13px; text-align: left; cursor: pointer;
+}
+.dirpicker-row:hover { background: var(--bg-elevated); }
+.dirpicker-row-name {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+.dirpicker-foot {
+  display: flex; justify-content: flex-end; gap: 10px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--border-soft);
+}
+
+.dirpicker-btn {
+  padding: 8px 18px;
+  border-radius: var(--radius-sm);
+  font-size: 13px; cursor: pointer;
+  border: 1px solid var(--border-strong);
+}
+.dirpicker-btn-cancel {
+  background: var(--bg-stage); color: var(--text-secondary);
+}
+.dirpicker-btn-cancel:hover { background: var(--bg-tile); color: var(--text-primary); }
+.dirpicker-btn-primary {
+  background: var(--accent); border-color: var(--accent); color: #fff;
+}
+.dirpicker-btn-primary:hover:not(:disabled) { background: #4583ff; }
+.dirpicker-btn-primary:disabled { opacity: 0.45; cursor: default; }
+
+/* Handheld: near-fullscreen so 800px-tall panels (800×1280 portrait and
+   1280×800 landscape) keep every control reachable, with ≥44px touch
+   targets on every row and button. */
+.handheld .dirpicker-backdrop { padding: 12px; }
+.handheld .dirpicker {
+  width: 100%;
+  height: 100%;
+  max-height: none;
+}
+.handheld .dirpicker-head { padding: 10px 12px; }
+.handheld .dirpicker-close { width: 44px; height: 44px; }
+.handheld .dirpicker-nav { flex-wrap: wrap; padding: 8px 12px; }
+.handheld .dirpicker-up { min-height: 44px; padding: 8px 14px; font-size: 13px; }
+.handheld .dirpicker-crumb { min-height: 44px; padding: 8px 10px; font-size: 13px; }
+.handheld .dirpicker-hidden-toggle { min-height: 44px; padding: 8px 14px; font-size: 13px; }
+.handheld .dirpicker-row { min-height: 48px; font-size: 14px; }
+.handheld .dirpicker-foot { padding: 10px 12px; }
+.handheld .dirpicker-btn { min-height: 48px; min-width: 96px; font-size: 14px; }

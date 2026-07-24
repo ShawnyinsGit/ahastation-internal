@@ -1,6 +1,7 @@
 import { useCallback } from 'react';
 import { Plus, RotateCw, X, SquareArrowOutUpRight } from 'lucide-react';
 import { meetingStore, type TabMeta } from '../lib/meeting-store';
+import { usePickCwd } from './DirPickerModal';
 
 interface TabStripProps {
   tabs: TabMeta[];
@@ -12,11 +13,13 @@ function shortPath(cwd: string): string {
 }
 
 export function TabStrip({ tabs }: TabStripProps) {
+  const { pickCwd, pickerModal } = usePickCwd();
+
   const handleAdd = useCallback(async () => {
-    const dir = await window.vibeMeet.pickCwd();
+    const dir = await pickCwd();
     if (!dir) return;
     await meetingStore.openSession(dir);
-  }, []);
+  }, [pickCwd]);
 
   const handleSelect = useCallback(async (tab: TabMeta) => {
     if (tab.placeholder) {
@@ -44,7 +47,8 @@ export function TabStrip({ tabs }: TabStripProps) {
   }, []);
 
   return (
-    <div className="tab-strip" role="tablist" aria-label="Open meetings">
+    <>
+      <div className="tab-strip" role="tablist" aria-label="Open meetings">
       <div className="tab-strip-list">
         {tabs.map((tab) => {
           const label = shortPath(tab.cwd);
@@ -106,5 +110,7 @@ export function TabStrip({ tabs }: TabStripProps) {
         <Plus size={14} aria-hidden="true" />
       </button>
     </div>
+    {pickerModal}
+    </>
   );
 }

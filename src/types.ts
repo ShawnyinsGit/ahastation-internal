@@ -477,6 +477,17 @@ export interface BrowserApi {
   onStateUpdate: (cb: (state: BrowserStateSnapshot) => void) => () => void;
 }
 
+export interface DirListEntry {
+  name: string;
+  path: string;
+}
+
+/** Result of the in-app directory picker's dialog:list-dir IPC. `parent` is
+ *  null at the filesystem root (no further "up"). */
+export type ListDirResult =
+  | { ok: true; path: string; parent: string | null; entries: DirListEntry[] }
+  | { ok: false; error: string };
+
 export interface VibeMeetApi {
   sessions: SessionsApi;
   sendUserText: (sessionId: string | null, text: string) => Promise<{ ok: boolean; error?: string }>;
@@ -494,6 +505,8 @@ export interface VibeMeetApi {
   approvePlan: (sessionId: string | null, approved: boolean) => Promise<{ ok: boolean; error?: string }>;
   endSession: (sessionId: string | null) => Promise<{ ok: boolean }>;
   pickCwd: () => Promise<string | null>;
+  listDir: (path: string | null, showHidden?: boolean) => Promise<ListDirResult>;
+  confirmCwd: (path: string) => Promise<string | null>;
   getVoiceConfig: () => Promise<{ enabled: boolean; voicePrint: VoicePrint | null }>;
   setVoiceLockEnabled: (on: boolean) => Promise<{ ok: boolean }>;
   setVoicePrint: (vp: VoicePrint | null) => Promise<{ ok: boolean }>;
