@@ -34,7 +34,7 @@ const FORBIDDEN_NATIVE_PAYLOAD_KEYS = new Set([
   'rawresponse',
   'tooluseresult',
   'apikey',
-  'access_token',
+  'accesstoken',
   'authorization',
   'credential',
 ]);
@@ -117,7 +117,9 @@ export class TaskMailbox {
       } else if (event.type === 'task-message-acknowledged') {
         this.messagesById.set(current.id, { ...current, status: 'acknowledged' });
       } else if (event.type === 'task-message-failed' && current.status !== 'acknowledged') {
-        this.messagesById.set(current.id, { ...current, status: 'failed' });
+        // Delivery failure is evidence about an attempt, not permission to
+        // drop the semantic instruction. Keep it queued for an explicit retry.
+        this.messagesById.set(current.id, { ...current, status: 'queued' });
       }
     }
     // A durable "delivered" event proves dispatch was attempted, not that the
@@ -214,9 +216,13 @@ export class TaskMailbox {
     if (message.status === 'acknowledged') {
       throw new Error(`acknowledged task message ${messageId} cannot fail`);
     }
-    if (message.status === 'failed') return structuredClone(message);
     await this.appendStatus('task-message-failed', message);
-    return this.updateStatus(message, 'failed');
+    return this.updateStatus(message, 'queued');
+  }
+
+  get(taskId: string, messageId: string): TaskMessage | undefined {
+    const message = this.messagesById.get(messageId);
+    return message?.taskId === taskId ? structuredClone(message) : undefined;
   }
 
   list(taskId: string, afterSeq = 0): TaskMessage[] {

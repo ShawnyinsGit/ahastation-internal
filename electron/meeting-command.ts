@@ -8,6 +8,7 @@ import {
 
 const boundedText = z.string().trim().min(1).max(100_000);
 const actorId = z.string().min(1).max(64).regex(/^[a-zA-Z0-9._-]+$/);
+const messageId = z.string().trim().min(1).max(500);
 
 export const planRevisionOperationSchema = z.discriminatedUnion('kind', [
   z.object({
@@ -51,6 +52,20 @@ export const meetingCommandSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('ask-host'), hostId: actorId, question: boundedText }).strict(),
   z.object({ kind: z.literal('broadcast-hosts'), question: boundedText }).strict(),
   z.object({ kind: z.literal('steer-worker'), workerId: actorId, addendum: boundedText }).strict(),
+  z.object({ kind: z.literal('send-task-message'), taskId: actorId, message: boundedText }).strict(),
+  z.object({ kind: z.literal('follow-up-task'), taskId: actorId, message: boundedText }).strict(),
+  z.object({ kind: z.literal('steer-task'), taskId: actorId, message: boundedText }).strict(),
+  z.object({
+    kind: z.literal('interrupt-task'),
+    taskId: actorId,
+    reason: z.string().trim().min(1).max(20_000).optional(),
+  }).strict(),
+  z.object({
+    kind: z.literal('forward-task-message'),
+    fromTaskId: actorId,
+    toTaskId: actorId,
+    messageId,
+  }).strict(),
   z.object({
     kind: z.literal('request-decision'),
     question: boundedText,
@@ -140,6 +155,11 @@ export function authorizeMeetingCommand(
   const coordinatorOnly = command.kind === 'propose-plan'
     || command.kind === 'revise-plan'
     || command.kind === 'steer-worker'
+    || command.kind === 'send-task-message'
+    || command.kind === 'follow-up-task'
+    || command.kind === 'steer-task'
+    || command.kind === 'interrupt-task'
+    || command.kind === 'forward-task-message'
     || command.kind === 'request-decision'
     || command.kind === 'save-memory'
     || command.kind === 'speak';

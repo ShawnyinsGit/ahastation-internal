@@ -451,14 +451,14 @@ export function registerDocumentsIpc(ctx: IpcContext): void {
     return { ok: true };
   });
 
-  ipcMain.handle('session:steer-worker', (_e, payload: RawSteerPayload) => {
+  ipcMain.handle('session:steer-worker', async (_e, payload: RawSteerPayload) => {
     const slot = ctx.registry.resolve(pickSessionId(payload));
     if (!slot) return { ok: false, error: 'No active session' };
     const workerId = typeof payload?.workerId === 'string' ? payload.workerId : '';
     const addendum = typeof payload?.addendum === 'string' ? payload.addendum : '';
     if (!workerId) return { ok: false, error: 'Missing workerId' };
     if (!addendum.trim()) return { ok: false, error: 'Empty addendum' };
-    const result = slot.orchestrator.steerWorker(workerId, addendum.trim());
+    const result = await slot.orchestrator.steerWorker(workerId, addendum.trim());
     ctx.registry.touch(slot.id);
     if (!result.ok) {
       return { ok: false, error: `steer-worker failed: ${result.reason}`, reason: result.reason };

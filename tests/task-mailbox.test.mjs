@@ -133,7 +133,7 @@ test('failed delivery can retry without another semantic instruction', async (t)
   const { meetingRoot, repository } = await fixture(t);
   const mailbox = new TaskMailbox(repository);
   await mailbox.enqueue(message());
-  assert.equal((await mailbox.markFailed('task-a', 'message-1')).status, 'failed');
+  assert.equal((await mailbox.markFailed('task-a', 'message-1')).status, 'queued');
   assert.equal((await mailbox.markDelivered('task-a', 'message-1')).status, 'delivered');
   const events = await MeetingRepository.replay('meeting', meetingRoot);
   assert.equal(events.filter((event) => event.type === 'task-message-enqueued').length, 1);

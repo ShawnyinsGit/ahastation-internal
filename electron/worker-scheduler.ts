@@ -12,7 +12,7 @@
 // `isClosed`, `emit`, `buildWorkerMcp` — so the scheduler never imports the
 // orchestrator class directly. The bridge interface in meeting-mcp.ts is
 // still implemented by the orchestrator; the scheduler just receives a
-// pre-bound `buildWorkerMcp(workerId)` factory.
+// pre-bound `buildWorkerMcp(workerId, attempt)` factory.
 //
 // The dispose / endAll path is idempotent: every native handle (SDK session,
 // flush timer, recent-edit pointer) is released exactly once, even if the
@@ -22,6 +22,7 @@ import type { ClaudeSession } from './claude-session.js';
 import type {
   BackendSession,
   BackendSessionEvent,
+  BackendSessionSnapshot,
 } from './backends/cli-backend.js';
 import type {
   NativePermissionRequest,
@@ -74,7 +75,9 @@ import {
   type ContextPackage,
   type TaskAuthorityGrant,
   type TaskExecutionProfile,
+  type TaskMessage,
 } from './task-collaboration.js';
+import type { TaskMailbox } from './task-mailbox.js';
 import {
   backendRuntimeSchema,
   type BackendRuntime,
@@ -127,7 +130,7 @@ export interface WorkerSchedulerOpts {
   /** Pre-bound `buildWorkerMcp(bridge, workerId)` from meeting-mcp.ts.
    *  Owned by the orchestrator because the MCP factory needs the bridge;
    *  the scheduler treats the returned object as opaque mcpServer config. */
-  buildWorkerMcp: (workerId: string) => unknown;
+  buildWorkerMcp: (workerId: string, attempt: number) => unknown;
   /** Optional computer-use MCP builder. When provided, workers with specialty
    *  'computer-use' get this MCP server mounted alongside the standard
    *  meeting-worker MCP, giving them screenshot/click/type/scroll tools. */
@@ -221,6 +224,9 @@ export interface WorkerSchedulerOpts {
   }) => Promise<void>;
   /** Production Meeting plans require an approved grant before tool sessions. */
   taskAuthorityCompilerRequired?: boolean;
+  /** Shared durable task mailbox. Production collaboration routing refuses to
+   * bypass this seam; narrow legacy tests may omit it when no message is sent. */
+  taskMailbox?: TaskMailbox;
 }
 
 const COMPUTER_USE_WORKER_PROMPT = `
@@ -252,6 +258,20 @@ const QUEUED_UPDATE_MAX = 8;
 const STALL_THRESHOLD_MS = 45_000;
 const STALL_SWEEP_MS = 15_000;
 const TASK_HISTORY_MAX = 50;
+const TASK_MESSAGE_MAX_CHARS = 100_000;
+
+function boundedTaskText(
+  value: string,
+  label: string,
+  maxChars = TASK_MESSAGE_MAX_CHARS,
+): string {
+  const normalized = value.trim();
+  if (!normalized) throw new Error(`${label} is required`);
+  if (normalized.length > maxChars) {
+    throw new Error(`${label} exceeds ${maxChars} characters`);
+  }
+  return normalized;
+}
 
 class TaskProfileCompilationError extends Error {
   constructor(message: string, options?: ErrorOptions) {
@@ -273,6 +293,9 @@ export class WorkerScheduler {
   private planVersion: number;
   private readonly opts: WorkerSchedulerOpts;
   private talkerProvider: () => BackendSession | null;
+  private readonly steeringMessageByWorker = new Map<string, string>();
+  private readonly pendingMailboxAckByWorker = new Map<string, string>();
+  private readonly mailboxAckInFlightByWorker = new Map<string, Promise<void>>();
 
   constructor(opts: WorkerSchedulerOpts) {
     this.opts = opts;
@@ -364,6 +387,7 @@ export class WorkerScheduler {
     acceptanceCriteria?: AcceptanceCriterion[];
     workspace?: TaskWorkspace;
     workspaceDiagnostic?: WorkerHandle['workspaceDiagnostic'];
+    backendSession?: BackendSessionSnapshot;
     deliveryId?: string;
     delivery?: DeliveryView;
     attempt?: number;
@@ -398,6 +422,8 @@ export class WorkerScheduler {
       workspaceDiagnostic: handle.workspaceDiagnostic
         ? structuredClone(handle.workspaceDiagnostic)
         : undefined,
+      backendSession: handle.session?.snapshot?.()
+        ?? (handle.backendSession ? structuredClone(handle.backendSession) : undefined),
       deliveryId: handle.deliveryId ?? undefined,
       delivery: handle.deliveryId
         ? this.opts.deliveryHarness?.snapshot(handle.deliveryId)
@@ -512,6 +538,17 @@ export class WorkerScheduler {
         handle.approvalDecisionId = recoveredAuthority.data.approvalDecisionId;
         handle.approvalRecordedAt = recoveredAuthority.data.approvedAt;
       }
+      const backendSession = task.backendSession;
+      if (
+        backendSession
+        && typeof backendSession === 'object'
+        && typeof (backendSession as BackendSessionSnapshot).protocol === 'string'
+        && typeof (backendSession as BackendSessionSnapshot).sessionId === 'string'
+        && (backendSession as BackendSessionSnapshot).protocol.length <= 100
+        && (backendSession as BackendSessionSnapshot).sessionId.length <= 1_000
+      ) {
+        handle.backendSession = structuredClone(backendSession as BackendSessionSnapshot);
+      }
       const rawStatus = typeof task.status === 'string' ? task.status : 'interrupted';
       handle.status = (
         rawStatus === 'accepted' || rawStatus === 'failed' || rawStatus === 'done'
@@ -588,6 +625,7 @@ export class WorkerScheduler {
       handle.deliveryId = null;
     }
     handle.report = null;
+    if (action === 'retry') handle.backendSession = undefined;
     handle.backendRuntime = undefined;
     handle.effectiveProfile = undefined;
     handle.authorityGrant = undefined;
@@ -651,22 +689,49 @@ export class WorkerScheduler {
     return tasks;
   }
 
-  async interruptWorker(workerId: string): Promise<{ ok: true } | { ok: false; error: string }> {
-    const handle = this.workers.get(workerId);
+  async interruptTask(
+    taskId: string,
+    reason = 'Interrupted by the user.',
+  ): Promise<{ ok: true; message: TaskMessage } | { ok: false; error: string }> {
+    const handle = this.workers.get(taskId);
     if (!handle) return { ok: false, error: 'worker not found' };
     if (!handle.session || handle.status !== 'running') {
       return { ok: false, error: `worker cannot be interrupted in ${handle.status}` };
     }
+    const normalizedReason = boundedTaskText(reason, 'interrupt reason', 20_000);
+    const mailbox = this.requireTaskMailbox();
+    const message = await mailbox.enqueue({
+      taskId: handle.id,
+      attempt: handle.attempt,
+      sender: 'coordinator',
+      kind: 'interrupt',
+      payload: { reason: normalizedReason },
+    });
     const session = handle.session;
     try {
+      handle.backendSession = session.snapshot?.() ?? handle.backendSession;
       await session.interrupt('user');
+      await mailbox.markDelivered(handle.id, message.id);
+      await mailbox.acknowledge(handle.id, message.id);
+      handle.backendSession = session.snapshot?.() ?? handle.backendSession;
       if (handle.session === session && handle.status === 'running') {
-        await this.handleWorkerSignal(handle, { kind: 'ended', reason: 'interrupted' });
+        handle.status = 'interrupted';
+        this.disposeWorker(handle, 'interrupted', reason);
+        this.emitPlanUpdate();
       }
-      return { ok: true };
+      return { ok: true, message: mailbox.get(handle.id, message.id)! };
     } catch (error) {
+      await mailbox.markFailed(handle.id, message.id).catch(() => undefined);
       return { ok: false, error: error instanceof Error ? error.message : String(error) };
     }
+  }
+
+  /** Compatibility entry point used by the existing IPC. It is deliberately
+   * routed through the same durable mailbox as the typed Task command. */
+  interruptWorker(workerId: string, reason?: string): Promise<{ ok: true } | { ok: false; error: string }> {
+    return this.interruptTask(workerId, reason).then((result) => (
+      result.ok ? { ok: true as const } : result
+    ));
   }
 
   setPermissionModeAll(
@@ -747,10 +812,10 @@ export class WorkerScheduler {
     return { ok: true };
   }
 
-  revisePlan(
+  async revisePlan(
     expectedPlanVersion: number,
     operations: PlanRevisionOperation[],
-  ): { ok: true; planVersion: number } | { ok: false; error: string } {
+  ): Promise<{ ok: true; planVersion: number } | { ok: false; error: string }> {
     if (expectedPlanVersion !== this.planVersion) {
       return {
         ok: false,
@@ -868,10 +933,37 @@ export class WorkerScheduler {
           error: `task ${operation.taskId} cannot be steered while ${handle.status}`,
         };
       }
+      if (!this.opts.taskMailbox) {
+        return { ok: false, error: 'durable task mailbox is unavailable' };
+      }
     }
 
     const graphError = validatePlan(Array.from(projected.values()));
     if (graphError) return { ok: false, error: graphError.message };
+
+    // Steering is the only operation with an asynchronous durable boundary.
+    // Complete it before mutating the in-memory graph so a mailbox failure
+    // cannot leave an add/cancel/update revision half-applied.
+    for (const operation of operations) {
+      if (operation.kind !== 'steer-running-task') continue;
+      let result: SteerResult;
+      try {
+        result = await this.steerTask(operation.taskId, operation.addendum);
+      } catch (error) {
+        return {
+          ok: false,
+          error: `validated steer failed for ${operation.taskId}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        };
+      }
+      if (!result.ok) {
+        return {
+          ok: false,
+          error: `validated steer failed for ${operation.taskId}: ${result.reason}`,
+        };
+      }
+    }
 
     for (const operation of operations) {
       if (operation.kind === 'add-task') {
@@ -893,12 +985,7 @@ export class WorkerScheduler {
         const handle = this.workers.get(operation.taskId)!;
         if (handle.flushTimer) clearTimeout(handle.flushTimer);
         this.workers.delete(operation.taskId);
-      } else if (operation.kind === 'steer-running-task') {
-        const result = this.steerWorker(operation.taskId, operation.addendum);
-        if (!result.ok) {
-          throw new Error(`validated steer failed for ${operation.taskId}: ${result.reason}`);
-        }
-      } else {
+      } else if (operation.kind !== 'steer-running-task') {
         const handle = this.workers.get(operation.taskId)!;
         if (operation.deps !== undefined) handle.deps = [...operation.deps];
         if (operation.executionProfile !== undefined) {
@@ -924,37 +1011,165 @@ export class WorkerScheduler {
     return { ok: true, planVersion: this.planVersion };
   }
 
-  steerWorker(workerId: string, addendum: string): SteerResult {
-    const handle = this.workers.get(workerId);
+  async queueFollowUp(taskId: string, text: string): Promise<TaskMessage> {
+    const handle = this.workers.get(taskId);
+    if (!handle) throw new Error(`unknown task: ${taskId}`);
+    const normalized = boundedTaskText(text, 'follow-up message');
+    const freshAttempt = this.requiresFreshAttempt(handle.status);
+    const message = await this.requireTaskMailbox().enqueue({
+      taskId: handle.id,
+      attempt: freshAttempt ? handle.attempt + 1 : handle.attempt,
+      sender: 'coordinator',
+      kind: 'follow-up',
+      payload: { text: normalized },
+    });
+    if (freshAttempt) this.beginFollowUpAttempt(handle);
+    // A follow-up never interrupts a turn. Pending/running messages are
+    // delivered one-at-a-time from a provider result boundary.
+    if (handle.status === 'pending') this.spawnReadyWorkers();
+    return message;
+  }
+
+  async sendTaskMessage(taskId: string, text: string): Promise<TaskMessage> {
+    const handle = this.workers.get(taskId);
+    if (!handle) throw new Error(`unknown task: ${taskId}`);
+    const normalized = boundedTaskText(text, 'task message');
+    const freshAttempt = this.requiresFreshAttempt(handle.status);
+    const message = await this.requireTaskMailbox().enqueue({
+      taskId: handle.id,
+      attempt: freshAttempt ? handle.attempt + 1 : handle.attempt,
+      sender: 'coordinator',
+      kind: 'instruction',
+      payload: { text: normalized },
+    });
+    if (freshAttempt) this.beginFollowUpAttempt(handle);
+    if (handle.status === 'pending') this.spawnReadyWorkers();
+    return message;
+  }
+
+  async steerTask(taskId: string, text: string): Promise<SteerResult> {
+    const handle = this.workers.get(taskId);
     if (!handle) return { ok: false, reason: 'unknown' };
-    // B7: addenda for a worker the user can no longer steer used to vanish
-    // silently. Surface the actual state so the MCP tool can tell Talker to
-    // re-dispatch instead of pretending it landed.
-    if (handle.status === 'done') return { ok: false, reason: 'done' };
+    if (handle.status === 'done' || handle.status === 'accepted') return { ok: false, reason: 'done' };
     if (handle.status === 'failed') return { ok: false, reason: 'failed' };
     if (!handle.session) return { ok: false, reason: 'no-session' };
-    if (handle.pendingDelegateAck) {
-      handle.queuedAddenda.push(addendum);
+    let normalized: string;
+    try {
+      normalized = boundedTaskText(text, 'steering message');
+    } catch {
+      return { ok: false, reason: 'invalid-message' };
+    }
+    const mailbox = this.requireTaskMailbox();
+    const message = await mailbox.enqueue({
+      taskId: handle.id,
+      attempt: handle.attempt,
+      sender: 'coordinator',
+      kind: 'steer',
+      payload: { text: normalized },
+    });
+    if (handle.pendingDelegateAck) return { ok: true, queued: true };
+    const session = handle.session;
+    this.steeringMessageByWorker.set(handle.id, message.id);
+    try {
+      await session.interrupt('steer');
+      if (handle.session !== session || handle.status !== 'running') {
+        this.steeringMessageByWorker.delete(handle.id);
+        await mailbox.markFailed(handle.id, message.id);
+        return { ok: true, queued: true };
+      }
+      session.sendUserText(`(plan update) ${normalized}`);
+      await mailbox.markDelivered(handle.id, message.id);
+      this.pendingMailboxAckByWorker.set(handle.id, message.id);
+    } catch (error) {
+      this.steeringMessageByWorker.delete(handle.id);
+      await mailbox.markFailed(handle.id, message.id).catch(() => undefined);
+      console.error(`[scheduler] steerTask delivery failed for ${taskId}:`, error);
       return { ok: true, queued: true };
     }
-    void (async () => {
-      try {
-        await handle.session?.interrupt('steer');
-        if (!handle.session || handle.status !== 'running') {
-          handle.queuedAddenda.push(addendum);
-          this.harvestUnresolvedAddenda(handle);
-          return;
-        }
-        handle.session.sendUserText(`(plan update) ${addendum}`);
-      } catch (err) {
-        console.error(`[scheduler] steerWorker failed for ${workerId}:`, err);
-      }
-    })();
     handle.live.busy = true;
     handle.live.lastUpdateTs = Date.now();
     handle.stallNotified = false;
     handle.stallNudged = false;
     return { ok: true, queued: false };
+  }
+
+  /** Legacy name retained for renderer/MCP compatibility. Success means the
+   * instruction is durably queued, never that the Backend acknowledged it. */
+  steerWorker(workerId: string, addendum: string): Promise<SteerResult> {
+    return this.steerTask(workerId, addendum);
+  }
+
+  async recordWorkerQuestion(
+    taskId: string,
+    question: string,
+    sourceAttempt?: number,
+  ): Promise<TaskMessage> {
+    const handle = this.workers.get(taskId);
+    if (!handle) throw new Error(`unknown task: ${taskId}`);
+    if (handle.status !== 'running' || !handle.session) {
+      throw new Error(`worker cannot ask a question while ${handle.status}`);
+    }
+    if (sourceAttempt !== undefined && sourceAttempt !== handle.attempt) {
+      throw new Error(
+        `stale worker attempt ${sourceAttempt}; current attempt is ${handle.attempt}`,
+      );
+    }
+    const normalized = boundedTaskText(question, 'worker question');
+    const mailbox = this.requireTaskMailbox();
+    const message = await mailbox.enqueue({
+      taskId: handle.id,
+      attempt: handle.attempt,
+      sender: 'worker',
+      kind: 'question',
+      payload: { text: normalized },
+    });
+    const coordinator = this.talkerProvider();
+    if (!coordinator) return message;
+    try {
+      coordinator.sendUserText(
+        `(task question from ${handle.id}, message ${message.id}) ${normalized}`,
+        'high',
+      );
+      await mailbox.markDelivered(handle.id, message.id);
+    } catch {
+      await mailbox.markFailed(handle.id, message.id);
+    }
+    return mailbox.get(handle.id, message.id) ?? message;
+  }
+
+  async forwardTaskMessage(
+    fromTaskId: string,
+    toTaskId: string,
+    messageId: string,
+  ): Promise<TaskMessage> {
+    const mailbox = this.requireTaskMailbox();
+    const source = mailbox.get(fromTaskId, messageId);
+    if (!source || source.sender !== 'worker' || source.kind !== 'question') {
+      throw new Error('forward source must be a durable Worker question');
+    }
+    if (source.status !== 'delivered' && source.status !== 'acknowledged') {
+      throw new Error('forward source must have reached the Coordinator');
+    }
+    const target = this.workers.get(toTaskId);
+    if (!target) throw new Error(`unknown task: ${toTaskId}`);
+    const text = this.messageText(source);
+    const freshAttempt = this.requiresFreshAttempt(target.status);
+    const forwarded = await mailbox.enqueue({
+      taskId: target.id,
+      attempt: freshAttempt ? target.attempt + 1 : target.attempt,
+      sender: 'coordinator',
+      kind: 'follow-up',
+      replyTo: source.id,
+      payload: {
+        text,
+        forwardedFromTaskId: fromTaskId,
+      },
+    });
+    if (freshAttempt) this.beginFollowUpAttempt(target);
+    if (source.status === 'delivered') {
+      await mailbox.acknowledge(fromTaskId, source.id);
+    }
+    return forwarded;
   }
 
   markTaskDone(workerId: string, summary: string): void {
@@ -1120,11 +1335,10 @@ export class WorkerScheduler {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const msg: any = e.message;
         if (msg?.type === 'assistant') {
+          void this.acknowledgeMailboxDelivery(handle);
           if (handle.pendingDelegateAck) {
             handle.pendingDelegateAck = false;
-            if (handle.queuedAddenda.length > 0) {
-              this.flushQueuedAddenda(handle);
-            }
+            void this.deliverQueuedSteer(handle);
           }
           const text = extractText(msg);
           if (text) {
@@ -1178,6 +1392,8 @@ export class WorkerScheduler {
           // WorkReport can enter DeliveryHarness; this note merely keeps the
           // Coordinator informed.
           this.queueWorkerUpdate(handle, `[${handle.id}] turn complete`);
+          void this.acknowledgeMailboxDelivery(handle)
+            .then(() => this.deliverNextFollowUp(handle));
         }
       } else if (e.kind === 'auth-required') {
         void this.handleWorkerSignal(handle, {
@@ -1202,6 +1418,11 @@ export class WorkerScheduler {
           retryable: true,
         });
       } else if (e.kind === 'ended') {
+        if (this.steeringMessageByWorker.has(handle.id)) {
+          // A steering interrupt ends only the current provider turn. The
+          // task, workspace and checkpoint remain active for the queued steer.
+          return;
+        }
         // SDK stream end is transport state, never delivery success. A report
         // already being verified is allowed to finish; an unreported running
         // Worker is failed closed by handleWorkerSignal.
@@ -1366,6 +1587,15 @@ export class WorkerScheduler {
     }
     if (signal.kind === 'ended') {
       handle.live.busy = false;
+      if (
+        signal.reason === 'interrupted'
+        && this.steeringMessageByWorker.has(handle.id)
+      ) {
+        // Steering interrupts one model turn, not the task lifecycle.
+        handle.live.currentTool = null;
+        handle.live.currentToolInput = null;
+        return;
+      }
       handle.transportEnded = true;
       if (
         signal.reason !== 'interrupted'
@@ -1578,6 +1808,154 @@ export class WorkerScheduler {
   // ===========================================================================
   // Internals
 
+  private requireTaskMailbox(): TaskMailbox {
+    if (!this.opts.taskMailbox) {
+      throw new Error('durable task mailbox is unavailable');
+    }
+    return this.opts.taskMailbox;
+  }
+
+  private requiresFreshAttempt(status: WorkerStatusKind): boolean {
+    return status !== 'pending' && status !== 'running';
+  }
+
+  private messageText(message: TaskMessage): string {
+    if (
+      message.payload
+      && typeof message.payload === 'object'
+      && typeof (message.payload as { text?: unknown }).text === 'string'
+    ) {
+      return (message.payload as { text: string }).text;
+    }
+    throw new Error(`task message ${message.id} has no text payload`);
+  }
+
+  private beginFollowUpAttempt(handle: WorkerHandle): void {
+    handle.backendSession = handle.session?.snapshot?.() ?? handle.backendSession;
+    if (handle.session) {
+      const session = handle.session;
+      handle.session = null;
+      session.end();
+    }
+    handle.attempt += 1;
+    handle.status = 'pending';
+    handle.summary = '';
+    handle.report = null;
+    handle.transportEnded = false;
+    handle.deliveryId = null;
+    handle.contextPackage = undefined;
+    handle.contextPackageHash = undefined;
+    handle.backendRuntime = undefined;
+    handle.effectiveProfile = undefined;
+    handle.authorityGrant = undefined;
+    handle.live = {
+      lastAssistantText: '',
+      currentTool: null,
+      currentToolInput: null,
+      lastUpdateTs: 0,
+      busy: false,
+    };
+    this.emitPlanUpdate();
+  }
+
+  private async acknowledgeMailboxDelivery(handle: WorkerHandle): Promise<void> {
+    const inFlight = this.mailboxAckInFlightByWorker.get(handle.id);
+    if (inFlight) {
+      await inFlight;
+      return;
+    }
+    const messageId = this.pendingMailboxAckByWorker.get(handle.id);
+    if (!messageId || !this.opts.taskMailbox) return;
+    const acknowledge = (async () => {
+      try {
+        await this.opts.taskMailbox!.acknowledge(handle.id, messageId);
+        this.pendingMailboxAckByWorker.delete(handle.id);
+        if (this.steeringMessageByWorker.get(handle.id) === messageId) {
+          this.steeringMessageByWorker.delete(handle.id);
+        }
+      } catch (error) {
+        console.warn('[scheduler] task mailbox acknowledgement failed', {
+          taskId: handle.id,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    })();
+    this.mailboxAckInFlightByWorker.set(handle.id, acknowledge);
+    try {
+      await acknowledge;
+    } finally {
+      if (this.mailboxAckInFlightByWorker.get(handle.id) === acknowledge) {
+        this.mailboxAckInFlightByWorker.delete(handle.id);
+      }
+    }
+  }
+
+  private async deliverExistingSteer(
+    handle: WorkerHandle,
+    message: TaskMessage,
+  ): Promise<void> {
+    if (!this.opts.taskMailbox || !handle.session || handle.status !== 'running') return;
+    const session = handle.session;
+    this.steeringMessageByWorker.set(handle.id, message.id);
+    try {
+      await session.interrupt('steer');
+      if (handle.session !== session || handle.status !== 'running') {
+        this.steeringMessageByWorker.delete(handle.id);
+        await this.opts.taskMailbox.markFailed(handle.id, message.id);
+        return;
+      }
+      session.sendUserText(`(plan update) ${this.messageText(message)}`);
+      await this.opts.taskMailbox.markDelivered(handle.id, message.id);
+      this.pendingMailboxAckByWorker.set(handle.id, message.id);
+    } catch {
+      this.steeringMessageByWorker.delete(handle.id);
+      await this.opts.taskMailbox.markFailed(handle.id, message.id).catch(() => undefined);
+    }
+  }
+
+  private async deliverQueuedSteer(handle: WorkerHandle): Promise<void> {
+    if (!this.opts.taskMailbox || this.steeringMessageByWorker.has(handle.id)) return;
+    const message = this.opts.taskMailbox.list(handle.id)
+      .find((entry) => (
+        entry.attempt === handle.attempt
+        && entry.kind === 'steer'
+        && entry.status === 'queued'
+      ));
+    if (message) await this.deliverExistingSteer(handle, message);
+  }
+
+  private async deliverNextFollowUp(handle: WorkerHandle): Promise<void> {
+    if (
+      !this.opts.taskMailbox
+      || !handle.session
+      || handle.status !== 'running'
+      || this.steeringMessageByWorker.has(handle.id)
+    ) return;
+    const message = this.opts.taskMailbox.list(handle.id)
+      .find((entry) => (
+        entry.attempt === handle.attempt
+        && (entry.kind === 'follow-up' || entry.kind === 'instruction')
+        && entry.status === 'queued'
+      ));
+    if (!message) return;
+    try {
+      handle.session.sendUserText(`(follow-up) ${this.messageText(message)}`);
+      await this.opts.taskMailbox.markDelivered(handle.id, message.id);
+      this.pendingMailboxAckByWorker.set(handle.id, message.id);
+    } catch {
+      await this.opts.taskMailbox.markFailed(handle.id, message.id).catch(() => undefined);
+    }
+  }
+
+  private queuedInitialMessage(handle: WorkerHandle): TaskMessage | undefined {
+    return this.opts.taskMailbox?.list(handle.id)
+      .find((entry) => (
+        entry.attempt === handle.attempt
+        && (entry.kind === 'follow-up' || entry.kind === 'instruction')
+        && entry.status === 'queued'
+      ));
+  }
+
   private registerHandle(spec: {
     id: string;
     title: string;
@@ -1617,6 +1995,7 @@ export class WorkerScheduler {
       acceptanceCriteria: spec.acceptanceCriteria,
       status: 'pending',
       session: null,
+      backendSession: undefined,
       summary: '',
       live: {
         lastAssistantText: '',
@@ -1708,6 +2087,7 @@ export class WorkerScheduler {
     handle.approvedPlanVersion = undefined;
     handle.transportEnded = false;
     handle.deliveryId = null;
+    handle.backendSession = undefined;
     handle.attempt = 1;
     handle.eventSeq = 0;
     handle.stallNotified = false;
@@ -1920,7 +2300,7 @@ export class WorkerScheduler {
         }
       }
 
-      const workerMcp = this.opts.buildWorkerMcp(handle.id);
+      const workerMcp = this.opts.buildWorkerMcp(handle.id, handle.attempt);
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const mcpServers: Record<string, any> = { 'meeting-worker': workerMcp as any };
       let promptAppend = WORKER_PROMPT;
@@ -1984,6 +2364,9 @@ export class WorkerScheduler {
         sessionOptions: {
           systemPrompt: { type: 'preset', preset: 'claude_code', append: promptAppend },
           mcpServers,
+          ...(handle.backendSession?.sessionId
+            ? { resumeSessionId: handle.backendSession.sessionId }
+            : {}),
           ...(handle.effectiveProfile
             ? {
                 model: handle.effectiveProfile.model,
@@ -2002,6 +2385,7 @@ export class WorkerScheduler {
       this.startStallWatch();
       const session = handle.session;
       await session.start();
+      handle.backendSession = session.snapshot?.() ?? handle.backendSession;
       // The meeting may have ended, the task may have been cancelled, or an
       // auth-required event may have disposed the session during the handshake.
       if (handle.session !== session || handle.status !== 'running') return;
@@ -2014,7 +2398,24 @@ export class WorkerScheduler {
       const peerLine = peers.length > 0
         ? `\n\n（同事 worker 也在跑：${peers.map((p) => `${p.id}「${p.title}」`).join('、')}。注意可能改到同一份代码。）`
         : '';
-      session.sendUserText(handle.contextPackage ? firstMessage : handle.prompt + peerLine);
+      const initialMailboxMessage = this.queuedInitialMessage(handle);
+      const mailboxLine = initialMailboxMessage
+        ? `\n\n(follow-up attempt ${handle.attempt}) ${this.messageText(initialMailboxMessage)}`
+        : '';
+      try {
+        session.sendUserText(
+          `${handle.contextPackage ? firstMessage : handle.prompt + peerLine}${mailboxLine}`,
+        );
+        if (initialMailboxMessage && this.opts.taskMailbox) {
+          await this.opts.taskMailbox.markDelivered(handle.id, initialMailboxMessage.id);
+          this.pendingMailboxAckByWorker.set(handle.id, initialMailboxMessage.id);
+        }
+      } catch (error) {
+        if (initialMailboxMessage && this.opts.taskMailbox) {
+          await this.opts.taskMailbox.markFailed(handle.id, initialMailboxMessage.id).catch(() => undefined);
+        }
+        throw error;
+      }
 
       this.opts.emit({
         source: 'talker',
@@ -2124,6 +2525,7 @@ export class WorkerScheduler {
       // synchronously, which would otherwise re-enter disposeWorker and call
       // end repeatedly on the same session.
       const session = handle.session;
+      handle.backendSession = session.snapshot?.() ?? handle.backendSession;
       handle.session = null;
       try {
         session.end();
@@ -2134,6 +2536,9 @@ export class WorkerScheduler {
     handle.bufferedUpdates = [];
     handle.queuedAddenda = [];
     handle.pendingDelegateAck = false;
+    this.steeringMessageByWorker.delete(handle.id);
+    this.pendingMailboxAckByWorker.delete(handle.id);
+    this.mailboxAckInFlightByWorker.delete(handle.id);
     handle.live.busy = false;
     handle.live.currentTool = null;
     handle.live.currentToolInput = null;
@@ -2203,25 +2608,6 @@ export class WorkerScheduler {
       talker.sendUserText(`(worker ${rootId} failed before an accepted delivery — downstream tasks marked failed)`, 'low');
     }
     this.emitPlanUpdate();
-  }
-
-  private flushQueuedAddenda(handle: WorkerHandle): void {
-    const batch = handle.queuedAddenda;
-    handle.queuedAddenda = [];
-    if (batch.length === 0 || !handle.session) return;
-    void (async () => {
-      try {
-        await handle.session?.interrupt('steer');
-        if (!handle.session || handle.status !== 'running') {
-          handle.queuedAddenda.push(...batch);
-          this.harvestUnresolvedAddenda(handle);
-          return;
-        }
-        handle.session.sendUserText(`(plan update) ${batch.join('\n')}`);
-      } catch (err) {
-        console.error(`[scheduler] flushQueuedAddenda failed for ${handle.id}:`, err);
-      }
-    })();
   }
 
   // Coalesce a burst of per-worker events into ONE injected user message to

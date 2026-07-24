@@ -100,9 +100,12 @@ test('dependency is released only after journal-shaped delivery acceptance', asy
         && event.delivery.status === 'awaiting-delivery-acceptance'),
     'delivery did not reach review acceptance',
   );
-  const deliveryBriefing = events.map((item) => item.event)
-    .find((event) => event.kind === 'coordinator-briefing'
-      && event.briefing.kind === 'delivery-ready');
+  const deliveryBriefing = await waitFor(
+    () => events.map((item) => item.event)
+      .find((event) => event.kind === 'coordinator-briefing'
+        && event.briefing.kind === 'delivery-ready'),
+    'delivery-ready briefing was not emitted',
+  );
   assert.equal(deliveryBriefing.briefing.files, 1);
   assert.equal(deliveryBriefing.briefing.testsPassed, 1);
   assert.equal(deliveryBriefing.briefing.recommendedAction, 'review');

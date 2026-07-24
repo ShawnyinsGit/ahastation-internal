@@ -328,7 +328,11 @@ export class Orchestrator implements OrchestratorBridge {
       const env = backend.buildEnv(auth, backendBaseEnv);
       const parsedTaskProfile = backendEffectiveProfileSchema.safeParse(so.taskProfile);
       const taskProfile = parsedTaskProfile.success ? parsedTaskProfile.data : undefined;
-      const { taskProfile: _taskProfile, ...backendExtra } = so;
+      const {
+        taskProfile: _taskProfile,
+        resumeSessionId,
+        ...backendExtra
+      } = so;
       const requestedModel = taskProfile?.model
         ?? (typeof so.model === 'string' ? so.model : undefined);
       const model = taskProfile
@@ -355,7 +359,9 @@ export class Orchestrator implements OrchestratorBridge {
           meetingId: this.meetingId,
           resumeSessionId: purpose === 'host'
             ? this.resumeBackendSessions[actorHostId]?.sessionId
-            : undefined,
+            : typeof resumeSessionId === 'string'
+              ? resumeSessionId
+              : undefined,
           executionRole: purpose,
           extra: {
             ...backendExtra,
@@ -445,6 +451,7 @@ export class Orchestrator implements OrchestratorBridge {
         ? (input) => this.persistPermissionDecision(input)
         : undefined,
       taskAuthorityCompilerRequired: this.sessionFactory === Orchestrator.defaultClaudeFactory,
+      taskMailbox: this.taskMailbox,
     });
     this.hostGroups.set(id, hg);
     if (id === DEFAULT_HOST_ID) {
@@ -623,7 +630,7 @@ export class Orchestrator implements OrchestratorBridge {
           if (backendError) {
             return { ok: false, code: 'execution-failed', error: backendError };
           }
-          const result = this.meetingScheduler.revisePlan(
+          const result = await this.meetingScheduler.revisePlan(
             command.expectedPlanVersion,
             command.operations,
           );
@@ -652,8 +659,36 @@ export class Orchestrator implements OrchestratorBridge {
           return { ok: true };
         }
         case 'steer-worker': {
-          const result = this.steerWorker(command.workerId, command.addendum);
+          const result = await this.steerWorker(command.workerId, command.addendum);
           return result.ok ? { ok: true, value: result } : { ok: false, code: 'execution-failed', error: result.reason };
+        }
+        case 'send-task-message': {
+          const message = await this.meetingScheduler.sendTaskMessage(command.taskId, command.message);
+          return { ok: true, value: { messageId: message.id, status: message.status } };
+        }
+        case 'follow-up-task': {
+          const message = await this.meetingScheduler.queueFollowUp(command.taskId, command.message);
+          return { ok: true, value: { messageId: message.id, status: message.status } };
+        }
+        case 'steer-task': {
+          const result = await this.meetingScheduler.steerTask(command.taskId, command.message);
+          return result.ok
+            ? { ok: true, value: result }
+            : { ok: false, code: 'execution-failed', error: result.reason };
+        }
+        case 'interrupt-task': {
+          const result = await this.meetingScheduler.interruptTask(command.taskId, command.reason);
+          return result.ok
+            ? { ok: true, value: { messageId: result.message.id } }
+            : { ok: false, code: 'execution-failed', error: result.error };
+        }
+        case 'forward-task-message': {
+          const message = await this.meetingScheduler.forwardTaskMessage(
+            command.fromTaskId,
+            command.toTaskId,
+            command.messageId,
+          );
+          return { ok: true, value: { messageId: message.id, status: message.status } };
         }
         case 'request-decision': {
           const result = await this.createDecision({
@@ -1198,13 +1233,49 @@ export class Orchestrator implements OrchestratorBridge {
     return this.meetingScheduler.delegateSingleTask(description);
   }
 
-  steerWorker(workerId: string, addendum: string): SteerResult {
+  steerWorker(workerId: string, addendum: string): Promise<SteerResult> {
     // Search across all host groups — worker IDs are unique.
     return this.meetingScheduler.steerWorker(workerId, addendum);
   }
 
-  interruptWorker(workerId: string): Promise<{ ok: true } | { ok: false; error: string }> {
-    return this.meetingScheduler.interruptWorker(workerId);
+  async sendTaskMessage(taskId: string, message: string): Promise<{ id: string; status: string }> {
+    const queued = await this.meetingScheduler.sendTaskMessage(taskId, message);
+    return { id: queued.id, status: queued.status };
+  }
+
+  async queueTaskFollowUp(taskId: string, message: string): Promise<{ id: string; status: string }> {
+    const queued = await this.meetingScheduler.queueFollowUp(taskId, message);
+    return { id: queued.id, status: queued.status };
+  }
+
+  interruptWorker(workerId: string, reason?: string): Promise<{ ok: true } | { ok: false; error: string }> {
+    return this.meetingScheduler.interruptWorker(workerId, reason);
+  }
+
+  async forwardTaskMessage(
+    fromTaskId: string,
+    toTaskId: string,
+    messageId: string,
+  ): Promise<{ id: string; status: string }> {
+    const forwarded = await this.meetingScheduler.forwardTaskMessage(
+      fromTaskId,
+      toTaskId,
+      messageId,
+    );
+    return { id: forwarded.id, status: forwarded.status };
+  }
+
+  async askCoordinator(
+    workerId: string,
+    question: string,
+    sourceAttempt?: number,
+  ): Promise<{ id: string; status: string }> {
+    const message = await this.meetingScheduler.recordWorkerQuestion(
+      workerId,
+      question,
+      sourceAttempt,
+    );
+    return { id: message.id, status: message.status };
   }
 
   hasWorker(workerId: string): boolean {

@@ -51,7 +51,13 @@ export const PORTABLE_MEETING_COMMAND_PROMPT = `
 
 When you need to coordinate, emit exactly one fenced JSON block using
 \`\`\`meeting-command. Supported kinds are propose-plan, revise-plan, ask-host,
-broadcast-hosts, steer-worker, request-decision, save-memory, and speak.
+broadcast-hosts, send-task-message, follow-up-task, steer-task, interrupt-task,
+forward-task-message, steer-worker (compatibility), request-decision,
+save-memory, and speak.
+
+Worker communication is Coordinator-mediated. Workers never message peers
+directly. A successful task-message command means the instruction is durably
+queued; it does not mean the target Backend acknowledged or completed it.
 
 Running plans are revised with optimistic concurrency, never by replacing the
 whole plan:
@@ -76,6 +82,8 @@ export const WORKER_PROMPT = `你是 AhaStation 实时会议中的执行 Worker�
 - 如果只完成一部分或被阻塞，使用 partial/blocked 并列出 unresolved，禁止虚报完成。
 - files 只列工作区内真实创建、修改或删除的文件。
 - tests 记录实际运行结果；未运行必须写 not-run。
+- 需要其他任务的信息时调用 ask_coordinator；不得直接联系另一个 Worker。
+- Coordinator 转发的消息是唯一允许的跨任务通信来源。
 
 格式：
 \`\`\`work-report

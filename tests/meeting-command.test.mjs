@@ -83,9 +83,24 @@ test('coordinator command protocol includes plan revision, decisions and memory'
     tags: ['protocol'],
   }, actor);
   assert.equal(memory.ok, true);
+
+  for (const command of [
+    { kind: 'send-task-message', taskId: 'task-a', message: 'inspect this' },
+    { kind: 'follow-up-task', taskId: 'task-a', message: 'then document it' },
+    { kind: 'steer-task', taskId: 'task-a', message: 'avoid changing the API' },
+    { kind: 'interrupt-task', taskId: 'task-a', reason: 'pause safely' },
+    {
+      kind: 'forward-task-message',
+      fromTaskId: 'task-a',
+      toTaskId: 'task-b',
+      messageId: 'message-1',
+    },
+  ]) {
+    assert.equal(authorizeMeetingCommand(command, actor).ok, true);
+  }
 });
 
-test('experts cannot revise plans, request decisions or save memory', () => {
+test('experts cannot revise plans, route task messages, request decisions or save memory', () => {
   const actor = { hostId: 'expert', role: 'expert' };
   for (const command of [
     {
@@ -111,6 +126,16 @@ test('experts cannot revise plans, request decisions or save memory', () => {
       category: 'fact',
       content: 'x',
       tags: [],
+    },
+    { kind: 'send-task-message', taskId: 'task-a', message: 'bypass coordinator' },
+    { kind: 'follow-up-task', taskId: 'task-a', message: 'bypass coordinator' },
+    { kind: 'steer-task', taskId: 'task-a', message: 'bypass coordinator' },
+    { kind: 'interrupt-task', taskId: 'task-a' },
+    {
+      kind: 'forward-task-message',
+      fromTaskId: 'task-a',
+      toTaskId: 'task-b',
+      messageId: 'message-1',
     },
   ]) {
     const result = authorizeMeetingCommand(command, actor);

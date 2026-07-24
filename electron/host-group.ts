@@ -62,6 +62,7 @@ import type {
 } from './task-collaboration.js';
 import type { BackendRuntime } from './backends/task-profile.js';
 import type { PlanMeetingTask } from './meeting-tools.js';
+import type { TaskMailbox } from './task-mailbox.js';
 
 export interface HostGroupOpts {
   /** Unique identifier for this host group. Default = 'default'. */
@@ -141,6 +142,9 @@ export interface HostGroupOpts {
     grantHash?: string;
   }) => Promise<void>;
   taskAuthorityCompilerRequired?: boolean;
+  /** Shared Meeting mailbox; every Worker instruction is journaled here
+   * before a Backend session receives it. */
+  taskMailbox?: TaskMailbox;
 }
 
 export class HostGroup {
@@ -223,7 +227,10 @@ export class HostGroup {
       normalizePermissionRequest: opts.normalizePermissionRequest,
       persistPermissionDecision: opts.persistPermissionDecision,
       taskAuthorityCompilerRequired: opts.taskAuthorityCompilerRequired,
-      buildWorkerMcp: (workerId) => buildWorkerMcp(this.bridge, workerId, this.cwd),
+      taskMailbox: opts.taskMailbox,
+      buildWorkerMcp: (workerId, attempt) => (
+        buildWorkerMcp(this.bridge, workerId, this.cwd, attempt)
+      ),
       buildComputerUseMcp: process.platform === 'darwin'
         ? (workerId) => buildComputerUseMcp(cuBridge, workerId)
         : undefined,

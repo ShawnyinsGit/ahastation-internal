@@ -13,6 +13,12 @@ export const MEETING_TOOLS = {
   NARRATE: 'narrate_to_user',
   PLAN_MEETING: 'plan_meeting',
   DELEGATE_TO: 'delegate_to',
+  SEND_TASK_MESSAGE: 'send_task_message',
+  FOLLOW_UP_TASK: 'follow_up_task',
+  STEER_TASK: 'steer_task',
+  INTERRUPT_TASK: 'interrupt_task',
+  FORWARD_TASK_MESSAGE: 'forward_task_message',
+  ASK_COORDINATOR: 'ask_coordinator',
   TASK_DONE: 'task_done',
   SUBMIT_WORK_REPORT: 'submit_work_report',
   SUBMIT_DELIVERY: 'submit_delivery',
@@ -215,6 +221,22 @@ export const planMeetingArgsSchema = {
 export const delegateToArgsSchema = {
   workerId: z.string().min(1).describe('The id of the worker to steer.'),
   addendum: z.string().min(1).describe('Additional instruction or context for that worker.'),
+};
+
+export const taskMessageArgsSchema = {
+  taskId: z.string().trim().min(1).max(64),
+  message: z.string().trim().min(1).max(100_000),
+};
+
+export const interruptTaskArgsSchema = {
+  taskId: z.string().trim().min(1).max(64),
+  reason: z.string().trim().min(1).max(20_000).optional(),
+};
+
+export const forwardTaskMessageArgsSchema = {
+  fromTaskId: z.string().trim().min(1).max(64),
+  toTaskId: z.string().trim().min(1).max(64),
+  messageId: z.string().trim().min(1).max(500),
 };
 
 export const askHostArgsSchema = {

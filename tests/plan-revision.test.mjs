@@ -6,6 +6,43 @@ import { WorkerScheduler } from '../dist-electron/worker-scheduler.js';
 function createScheduler(overrides = {}) {
   const events = [];
   const sessions = [];
+  const messages = new Map();
+  const taskMailbox = {
+    async enqueue(input) {
+      const message = {
+        schemaVersion: 1,
+        id: `message-${messages.size + 1}`,
+        seq: messages.size + 1,
+        status: 'queued',
+        timestamp: Date.now(),
+        ...input,
+      };
+      messages.set(message.id, message);
+      return structuredClone(message);
+    },
+    async markDelivered(_taskId, messageId) {
+      const message = { ...messages.get(messageId), status: 'delivered' };
+      messages.set(messageId, message);
+      return structuredClone(message);
+    },
+    async markFailed(_taskId, messageId) {
+      const message = { ...messages.get(messageId), status: 'queued' };
+      messages.set(messageId, message);
+      return structuredClone(message);
+    },
+    async acknowledge(_taskId, messageId) {
+      const message = { ...messages.get(messageId), status: 'acknowledged' };
+      messages.set(messageId, message);
+      return structuredClone(message);
+    },
+    get(_taskId, messageId) {
+      const message = messages.get(messageId);
+      return message ? structuredClone(message) : undefined;
+    },
+    list(taskId) {
+      return Array.from(messages.values()).filter((message) => message.taskId === taskId);
+    },
+  };
   const scheduler = new WorkerScheduler({
     emit(event) { events.push(event); },
     cwd: process.cwd(),
@@ -28,9 +65,10 @@ function createScheduler(overrides = {}) {
     getTalker() { return null; },
     isClosed() { return false; },
     getSpeechFilterMode() { return 'strict'; },
+    taskMailbox,
     ...overrides,
   });
-  return { scheduler, events, sessions };
+  return { scheduler, events, sessions, taskMailbox };
 }
 
 test('running plans use versioned atomic add, cancel and steer operations', async () => {
@@ -43,7 +81,7 @@ test('running plans use versioned atomic add, cancel and steer operations', asyn
   assert.equal(scheduler.getPlanVersion(), 1);
   assert.equal(sessions.length, 1);
 
-  const result = scheduler.revisePlan(1, [
+  const result = await scheduler.revisePlan(1, [
     { kind: 'cancel-pending-task', taskId: 'obsolete' },
     {
       kind: 'add-task',
@@ -85,7 +123,7 @@ test('stale or invalid plan revisions leave the graph unchanged', async () => {
   await new Promise((resolve) => setImmediate(resolve));
   const eventCount = events.length;
 
-  assert.deepEqual(scheduler.revisePlan(0, [{
+  assert.deepEqual(await scheduler.revisePlan(0, [{
     kind: 'add-task',
     task: { id: 'stale', title: 'Stale', prompt: 'must not land', deps: [] },
   }]), {
@@ -93,7 +131,7 @@ test('stale or invalid plan revisions leave the graph unchanged', async () => {
     error: 'stale plan version: expected 0, current 1',
   });
   assert.match(
-    scheduler.revisePlan(1, [{
+    (await scheduler.revisePlan(1, [{
       kind: 'add-task',
       task: {
         id: 'broken',
@@ -101,21 +139,21 @@ test('stale or invalid plan revisions leave the graph unchanged', async () => {
         prompt: 'must not land',
         deps: ['missing'],
       },
-    }]).error,
+    }])).error,
     /depends on unknown/,
   );
   assert.match(
-    scheduler.revisePlan(1, [{
+    (await scheduler.revisePlan(1, [{
       kind: 'cancel-pending-task',
       taskId: 'active',
-    }]).error,
+    }])).error,
     /cannot be cancelled while running/,
   );
   assert.match(
-    scheduler.revisePlan(1, [
+    (await scheduler.revisePlan(1, [
       { kind: 'cancel-pending-task', taskId: 'dependent' },
       { kind: 'cancel-pending-task', taskId: 'dependent' },
-    ]).error,
+    ])).error,
     /cancelled more than once/,
   );
 
@@ -134,7 +172,7 @@ test('plan revisions may change pending dependencies but not running execution b
   ]);
   await new Promise((resolve) => setImmediate(resolve));
 
-  assert.deepEqual(scheduler.revisePlan(1, [{
+  assert.deepEqual(await scheduler.revisePlan(1, [{
     kind: 'update-task',
     taskId: 'pending',
     deps: [],
@@ -148,7 +186,7 @@ test('plan revisions may change pending dependencies but not running execution b
     timeoutMs: 1_800_000,
     maxTokenBudget: 200_000,
   };
-  assert.deepEqual(scheduler.revisePlan(2, [{
+  assert.deepEqual(await scheduler.revisePlan(2, [{
     kind: 'update-task',
     taskId: 'active',
     executionProfile: activeProfile,
@@ -189,7 +227,7 @@ test('coordinator cannot switch a pending managed task into shared compatibility
       workspaceMode: 'git-worktree',
     },
   ]);
-  assert.deepEqual(scheduler.revisePlan(1, [{
+  assert.deepEqual(await scheduler.revisePlan(1, [{
     kind: 'update-task',
     taskId: 'pending',
     workspaceMode: 'shared-locked',
@@ -201,4 +239,34 @@ test('coordinator cannot switch a pending managed task into shared compatibility
     scheduler.snapshot().find((task) => task.id === 'pending').workspaceMode,
     'git-worktree',
   );
+});
+
+test('mailbox failure leaves a mixed plan revision graph unchanged', async () => {
+  const failingMailbox = {
+    async enqueue() { throw new Error('journal unavailable'); },
+    async markDelivered() { throw new Error('not reached'); },
+    async markFailed() { throw new Error('not reached'); },
+    async acknowledge() { throw new Error('not reached'); },
+    get() { return undefined; },
+    list() { return []; },
+  };
+  const { scheduler, events } = createScheduler({ taskMailbox: failingMailbox });
+  scheduler.installPlan([
+    { id: 'active', title: 'Active', prompt: 'work', deps: [] },
+    { id: 'obsolete', title: 'Obsolete', prompt: 'wait', deps: ['active'] },
+  ]);
+  await new Promise((resolve) => setImmediate(resolve));
+  const eventCount = events.length;
+
+  assert.deepEqual(await scheduler.revisePlan(1, [
+    { kind: 'cancel-pending-task', taskId: 'obsolete' },
+    { kind: 'steer-running-task', taskId: 'active', addendum: 'new constraint' },
+  ]), {
+    ok: false,
+    error: 'validated steer failed for active: journal unavailable',
+  });
+
+  assert.equal(scheduler.getPlanVersion(), 1);
+  assert.equal(events.length, eventCount);
+  assert.match(scheduler.describeWorkers(), /obsolete/);
 });

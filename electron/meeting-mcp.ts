@@ -16,6 +16,9 @@ import {
   submitDeliveryArgsSchema,
   requestDecisionArgsSchema,
   askHostArgsSchema,
+  taskMessageArgsSchema,
+  interruptTaskArgsSchema,
+  forwardTaskMessageArgsSchema,
   type PlanMeetingTaskInput,
   type PlanMeetingTask,
 } from './meeting-tools.js';
@@ -45,7 +48,7 @@ export interface SaveMemoryResult {
  *  (instead of telling the user "got it" while the message vanished). */
 export type SteerResult =
   | { ok: true; queued: boolean }
-  | { ok: false; reason: 'unknown' | 'done' | 'failed' | 'no-session' };
+  | { ok: false; reason: 'unknown' | 'done' | 'failed' | 'no-session' | 'invalid-message' };
 
 /** Capabilities the MCP tool callbacks need from the Orchestrator. Each
  *  method maps to one tool's behaviour so the bridge stays narrow. */
@@ -54,7 +57,11 @@ export interface OrchestratorBridge {
   delegateSingleTask(description: string): { workerId: string; specialty: WorkerSpecialtyKind; reused: boolean };
   installPlan(tasks: PlanMeetingTask[]): Promise<{ ok: true } | { ok: false; error: string }>;
   proposePlan(tasks: PlanMeetingTaskInput[]): Promise<{ ok: true } | { ok: false; error: string }>;
-  steerWorker(workerId: string, addendum: string): SteerResult;
+  steerWorker(workerId: string, addendum: string): Promise<SteerResult>;
+  sendTaskMessage(taskId: string, message: string): Promise<{ id: string; status: string }>;
+  queueTaskFollowUp(taskId: string, message: string): Promise<{ id: string; status: string }>;
+  interruptWorker(workerId: string, reason?: string): Promise<{ ok: true } | { ok: false; error: string }>;
+  forwardTaskMessage(fromTaskId: string, toTaskId: string, messageId: string): Promise<{ id: string; status: string }>;
   hasWorker(workerId: string): boolean;
   activeWorkerIds(): string[];
   describeWorkers(workerId?: string): string;
@@ -73,6 +80,11 @@ export interface OrchestratorBridge {
   markWorkerTaskDone(workerId: string, summary: string): void;
   submitWorkerReport(workerId: string, report: WorkReport): void;
   submitWorkerDelivery(workerId: string, files: string[]): void;
+  askCoordinator(
+    workerId: string,
+    question: string,
+    sourceAttempt?: number,
+  ): Promise<{ id: string; status: string }>;
 }
 
 export function buildTalkerMcp(
@@ -148,7 +160,7 @@ export function buildTalkerMcp(
           let queued = 0;
           const dropped: string[] = [];
           for (const id of ids) {
-            const r = bridge.steerWorker(id, addendum);
+            const r = await bridge.steerWorker(id, addendum);
             if (r.ok) {
               if (r.queued) queued += 1; else sent += 1;
             } else {
@@ -166,7 +178,7 @@ export function buildTalkerMcp(
         delegateToArgsSchema,
         async ({ workerId, addendum }) => {
           if (!canCoordinate()) return denied();
-          const r = bridge.steerWorker(workerId, addendum);
+          const r = await bridge.steerWorker(workerId, addendum);
           if (r.ok) {
             const where = r.queued ? `queued for ${workerId} (worker still acknowledging)` : `addendum sent to ${workerId}`;
             return { content: [{ type: 'text', text: where }] };
@@ -179,8 +191,60 @@ export function buildTalkerMcp(
             done: `worker ${workerId} already completed — use delegate_task to spawn a follow-up for this addendum`,
             failed: `worker ${workerId} already failed — use delegate_task to spawn a new worker for this addendum`,
             'no-session': `worker ${workerId} has no live session — use delegate_task to spawn a new worker for this addendum`,
+            'invalid-message': 'the steering instruction is empty or exceeds the allowed size',
           }[r.reason];
           return { content: [{ type: 'text', text: why }] };
+        },
+      ),
+      tool(
+        MEETING_TOOLS.SEND_TASK_MESSAGE,
+        'Durably queue a Coordinator instruction for one task. Success means queued, not acknowledged.',
+        taskMessageArgsSchema,
+        async ({ taskId, message }) => {
+          if (!canCoordinate()) return denied();
+          const queued = await bridge.sendTaskMessage(taskId, message);
+          return { content: [{ type: 'text', text: `queued ${queued.id} for ${taskId}; acknowledgement pending` }] };
+        },
+      ),
+      tool(
+        MEETING_TOOLS.FOLLOW_UP_TASK,
+        'Durably queue a FIFO follow-up. It waits for the current Worker turn boundary and does not interrupt tools.',
+        taskMessageArgsSchema,
+        async ({ taskId, message }) => {
+          if (!canCoordinate()) return denied();
+          const queued = await bridge.queueTaskFollowUp(taskId, message);
+          return { content: [{ type: 'text', text: `follow-up ${queued.id} queued for ${taskId}` }] };
+        },
+      ),
+      tool(
+        MEETING_TOOLS.STEER_TASK,
+        'Durably queue an urgent steering instruction, then interrupt only the current model turn at a safe boundary.',
+        taskMessageArgsSchema,
+        async ({ taskId, message }) => {
+          if (!canCoordinate()) return denied();
+          const result = await bridge.steerWorker(taskId, message);
+          if (!result.ok) return { content: [{ type: 'text', text: `error: ${result.reason}` }] };
+          return { content: [{ type: 'text', text: result.queued ? 'steering queued; acknowledgement pending' : 'steering delivered; acknowledgement pending' }] };
+        },
+      ),
+      tool(
+        MEETING_TOOLS.INTERRUPT_TASK,
+        'Durably request a task interruption while preserving its workspace and resumable Backend checkpoint.',
+        interruptTaskArgsSchema,
+        async ({ taskId, reason }) => {
+          if (!canCoordinate()) return denied();
+          const result = await bridge.interruptWorker(taskId, reason);
+          return { content: [{ type: 'text', text: result.ok ? `interrupt accepted for ${taskId}` : `error: ${result.error}` }] };
+        },
+      ),
+      tool(
+        MEETING_TOOLS.FORWARD_TASK_MESSAGE,
+        'Forward one durable Worker question to another task through the Coordinator. Workers never communicate directly.',
+        forwardTaskMessageArgsSchema,
+        async ({ fromTaskId, toTaskId, messageId }) => {
+          if (!canCoordinate()) return denied();
+          const forwarded = await bridge.forwardTaskMessage(fromTaskId, toTaskId, messageId);
+          return { content: [{ type: 'text', text: `forwarded as ${forwarded.id}; target acknowledgement pending` }] };
         },
       ),
       tool(
@@ -258,11 +322,30 @@ export function buildTalkerMcp(
   });
 }
 
-export function buildWorkerMcp(bridge: OrchestratorBridge, workerId: string, cwd: string) {
+export function buildWorkerMcp(
+  bridge: OrchestratorBridge,
+  workerId: string,
+  cwd: string,
+  sourceAttempt?: number,
+) {
   return createSdkMcpServer({
     name: 'meeting-worker',
     version: '0.2.0',
     tools: [
+      tool(
+        MEETING_TOOLS.ASK_COORDINATOR,
+        'Ask the Coordinator a task question. The message is durable and never sent directly to another Worker.',
+        { question: z.string().trim().min(1).max(100_000) },
+        async ({ question }) => {
+          const message = await bridge.askCoordinator(workerId, question, sourceAttempt);
+          return {
+            content: [{
+              type: 'text',
+              text: `question ${message.id} queued for the Coordinator; acknowledgement pending`,
+            }],
+          };
+        },
+      ),
       tool(
         MEETING_TOOLS.TASK_DONE,
         'Deprecated compatibility hint. This does not complete the task or release dependencies. Submit a full WorkReport with submit_work_report.',

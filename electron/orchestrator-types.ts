@@ -7,7 +7,10 @@
 // sync when adding fields.
 
 import type { SessionEvent } from './claude-session.js';
-import type { BackendSession } from './backends/cli-backend.js';
+import type {
+  BackendSession,
+  BackendSessionSnapshot,
+} from './backends/cli-backend.js';
 import type { PlanMeetingTask } from './meeting-tools.js';
 import type { TaskWorkspace } from './task-workspace.js';
 import type { WorkspaceBlockedDiagnostic } from './task-workspace.js';
@@ -182,6 +185,9 @@ export interface WorkerHandle {
   acceptanceCriteria?: import('./worker-protocol.js').AcceptanceCriterion[];
   status: WorkerStatusKind;
   session: BackendSession | null;
+  /** Last durable native conversation handle. Captured before interruption so
+   * a user-approved continuation can resume without replaying side effects. */
+  backendSession?: BackendSessionSnapshot;
   summary: string;
   live: WorkerLiveStatus;
   pendingDelegateAck: boolean;
