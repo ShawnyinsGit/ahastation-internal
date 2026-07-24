@@ -25,7 +25,9 @@ const KIMI_CAPABILITIES: BackendCapabilities = {
     ? 'Kimi CLI is not yet available for Windows. Visit https://code.kimi.com for updates.'
     : 'curl -LsSf https://code.kimi.com/install.sh | bash',
 };
-const SUPPORTED_KIMI_ACP_VERSION = '0.24.1';
+// Verified ACP runtimes. The hard gate is ACP protocolVersion===1 — runtime
+// versions outside this list are allowed but logged as unverified.
+const VERIFIED_KIMI_ACP_VERSIONS = ['0.24.1', '0.29.1'];
 
 interface KimiStreamEvent {
   role?: string;
@@ -128,10 +130,10 @@ class KimiAcpSession implements BackendSession {
       if (protocolVersion !== 1) throw new Error(`Unsupported Kimi ACP protocol: ${String(protocolVersion)}`);
       const agentInfo = isRecord(initialized.agentInfo) ? initialized.agentInfo : {};
       this.backendVersion = typeof agentInfo.version === 'string' ? agentInfo.version : undefined;
-      if (this.backendVersion !== SUPPORTED_KIMI_ACP_VERSION) {
-        throw new Error(
-          `Unsupported Kimi Code runtime ${this.backendVersion ?? 'unknown'}; `
-          + `AhaStation requires ${SUPPORTED_KIMI_ACP_VERSION}`,
+      if (this.backendVersion && !VERIFIED_KIMI_ACP_VERSIONS.includes(this.backendVersion)) {
+        console.warn(
+          `[kimi] unverified runtime ${this.backendVersion} — proceeding on ACP protocol v1 `
+          + `(verified: ${VERIFIED_KIMI_ACP_VERSIONS.join(', ')})`,
         );
       }
       await this.transport.authenticate();
@@ -452,12 +454,11 @@ export class KimiBackend extends SubprocessBackend {
     });
     try {
       const initialized = await transport.start();
-      const agentInfo = isRecord(initialized.agentInfo) ? initialized.agentInfo : {};
-      if (initialized.protocolVersion !== 1 || agentInfo.version !== SUPPORTED_KIMI_ACP_VERSION) {
-        return { loggedIn: false };
-      }
+      if (initialized.protocolVersion !== 1) return { loggedIn: false };
+      // Auth probe = initialize + authenticate only. Requiring a full
+      // newSession here made CLI-side OAuth users show "未配置" whenever
+      // session creation hiccuped, even with valid credentials.
       await transport.authenticate();
-      await transport.newSession(homedir());
       return { loggedIn: true };
     } catch {
       return { loggedIn: false };

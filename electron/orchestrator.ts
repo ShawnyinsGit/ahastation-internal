@@ -291,7 +291,10 @@ export class Orchestrator implements OrchestratorBridge {
           extra: {
             ...so,
             ...(backendId === 'codex' ? { codexTransport: 'app-server' } : {}),
-            ...(backendId === 'kimi' ? { kimiTransport: 'acp' } : {}),
+            // Kimi: ACP mode only understands device-code OAuth — it ignores
+            // API keys entirely. When an apiKey is configured, fall back to
+            // the one-shot CLI mode (buildEnv injects MOONSHOT_API_KEY).
+            ...(backendId === 'kimi' && !auth.apiKey ? { kimiTransport: 'acp' } : {}),
             meetingCommandHandler: (raw: unknown) => this.executeMeetingCommand(actorHostId, raw),
           },
         },

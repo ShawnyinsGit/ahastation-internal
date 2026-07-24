@@ -131,9 +131,11 @@ function unpackify(p: string): string {
 export function resolveOpencodeBinary(): string | null {
   const platform = process.platform; // darwin | linux | win32
   const arch = process.arch === 'x64' ? 'x64' : 'arm64';
+  // Upstream names the Windows package "windows", not "win32".
+  const osName = platform === 'win32' ? 'windows' : platform;
   // TODO(cross-platform): linux x64 needs the AVX2/musl variant selection
   // from spike §1 (baseline packages) when we ship linux targets.
-  const pkg = `opencode-${platform}-${arch}`;
+  const pkg = `opencode-${osName}-${arch}`;
   const binName = platform === 'win32' ? 'opencode.exe' : 'opencode';
 
   // Dev / unpacked layout: node_modules/<pkg>/bin/opencode
@@ -195,7 +197,7 @@ async function waitForHealth(url: string, password: string, timeoutMs: number): 
 export async function spawnOpencodeServer(opts: SpawnServerOptions): Promise<OpencodeServerHandle> {
   const binary = opts.binaryPath === undefined ? resolveOpencodeBinary() : opts.binaryPath;
   if (!binary) {
-    throw new Error(`OpenCode binary not found (opencode-${process.platform}-${process.arch} not installed)`);
+    throw new Error(`OpenCode binary not found (opencode-${process.platform === 'win32' ? 'windows' : process.platform}-${process.arch} not installed)`);
   }
   const password = opts.password ?? generateServerPassword();
   const timeoutMs = opts.timeoutMs ?? 15000;

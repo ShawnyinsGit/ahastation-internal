@@ -37,7 +37,9 @@ export async function runTerminalLogin(
   });
   if (!opened) return { ok: false, error: '无法打开 Terminal，请手动执行登录命令。' };
 
-  const deadline = Date.now() + 10 * 60_000;
+  // Device-code pages stay valid for ~1800s (Kimi) — a 10 min deadline let
+  // slow approvers fall through the cracks. 35 min gives margin.
+  const deadline = Date.now() + 35 * 60_000;
   while (Date.now() < deadline) {
     try {
       const code = (await readFile(statusPath, 'utf8')).trim();
