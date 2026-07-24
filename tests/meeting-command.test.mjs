@@ -36,3 +36,70 @@ test('rejects empty speak commands', () => {
   assert.equal(result.ok, false);
   assert.equal(result.code, 'invalid-command');
 });
+
+test('coordinator command protocol includes plan revision, decisions and memory', () => {
+  const actor = { hostId: 'default', role: 'coordinator' };
+  const revised = authorizeMeetingCommand({
+    kind: 'revise-plan',
+    expectedPlanVersion: 1,
+    reason: 'verification failed',
+    operations: [{
+      kind: 'add-task',
+      task: { id: 'fix', title: 'Fix', prompt: 'repair the failure' },
+    }],
+  }, actor);
+  assert.equal(revised.ok, true);
+
+  const decision = authorizeMeetingCommand({
+    kind: 'request-decision',
+    question: 'Choose a rollout mode',
+    options: [
+      { title: 'A', summary: 'A', pros: [], cons: [], recommendationScore: 9 },
+      { title: 'B', summary: 'B', pros: [], cons: [], recommendationScore: 5 },
+    ],
+    deadlineMs: Date.now() + 60_000,
+  }, actor);
+  assert.equal(decision.ok, true);
+
+  const memory = authorizeMeetingCommand({
+    kind: 'save-memory',
+    category: 'decision',
+    content: 'Use WorkerEvent v2',
+    tags: ['protocol'],
+  }, actor);
+  assert.equal(memory.ok, true);
+});
+
+test('experts cannot revise plans, request decisions or save memory', () => {
+  const actor = { hostId: 'expert', role: 'expert' };
+  for (const command of [
+    {
+      kind: 'revise-plan',
+      expectedPlanVersion: 1,
+      reason: 'change',
+      operations: [{
+        kind: 'add-task',
+        task: { id: 'fix', title: 'Fix', prompt: 'repair' },
+      }],
+    },
+    {
+      kind: 'request-decision',
+      question: 'Choose',
+      options: [
+        { title: 'A', summary: 'A', pros: [], cons: [], recommendationScore: 9 },
+        { title: 'B', summary: 'B', pros: [], cons: [], recommendationScore: 5 },
+      ],
+      deadlineMs: Date.now() + 60_000,
+    },
+    {
+      kind: 'save-memory',
+      category: 'fact',
+      content: 'x',
+      tags: [],
+    },
+  ]) {
+    const result = authorizeMeetingCommand(command, actor);
+    assert.equal(result.ok, false);
+    assert.equal(result.code, 'forbidden');
+  }
+});

@@ -59,11 +59,11 @@ test('approved delivery requires independent verification and review before user
   await harness.decide(proposed.id, { kind: 'approve-spec', specVersion: 1 });
   await waitFor(harness, proposed.id, 'executing');
   execution.resolve({
-    outcome: 'completed',
+    status: 'completed',
     summary: 'implemented',
-    changes: [{ path: 'src/a.ts', purpose: 'feature' }],
-    tests: [{ name: 'unit', status: 'passed', evidenceRef: 'log-1' }],
-    artifacts: [], risks: [], unresolved: [],
+    files: [{ path: 'src/a.ts', action: 'modified' }],
+    tests: [{ command: 'npm test', status: 'passed', summary: 'unit passed' }],
+    unresolved: [],
   });
 
   const reviewReady = await waitFor(harness, proposed.id, 'awaiting-delivery-acceptance');
@@ -86,9 +86,9 @@ test('agent completion cannot produce a delivery candidate when verification fai
   const harness = new DeliveryHarness({
     runtime: {
       execute: async () => ({
-        outcome: 'completed', summary: 'claimed complete', changes: [],
-        tests: [{ name: 'unit', status: 'failed', evidenceRef: 'log-failed' }],
-        artifacts: [], risks: [], unresolved: [],
+        status: 'completed', summary: 'claimed complete', files: [],
+        tests: [{ command: 'npm test', status: 'failed', summary: 'unit failed' }],
+        unresolved: [],
       }),
     },
     verifier: {
@@ -104,10 +104,19 @@ test('agent completion cannot produce a delivery candidate when verification fai
     sourceRevision: 'base', acceptanceCriteria: [{ id: 'tests', description: 'tests pass' }],
   });
   await harness.decide(proposed.id, { kind: 'approve-spec', specVersion: 1 });
-  const failed = await waitFor(harness, proposed.id, 'failed');
+  const failed = await waitFor(harness, proposed.id, 'reworking');
   assert.equal(failed.error, 'unit test failed');
   assert.equal(failed.candidate, undefined);
+  assert.equal(failed.attempts[0].outcome, 'verification-failed');
+  assert.equal(failed.attempts[0].verification.passed, false);
   assert.equal(reviewed, false);
+  const scheduled = await harness.decide(proposed.id, {
+    kind: 'return-delivery',
+    feedback: 'fix the failing unit test',
+  });
+  assert.equal(scheduled.status, 'reworking');
+  assert.equal(scheduled.attempts[0].feedback, 'fix the failing unit test');
+  assert.match(scheduled.spec.objective, /fix the failing unit test/);
   await assert.rejects(
     harness.decide(proposed.id, { kind: 'accept-delivery', candidateId: 'missing' }),
     /not ready for acceptance/,
@@ -137,7 +146,7 @@ test('delivery observers continue from a cursor and receive later state changes 
   assert.equal(event.value.seq, 2);
   assert.equal(event.value.status, 'preparing-workspace');
   execution.resolve({
-    outcome: 'completed', summary: 'done', changes: [], tests: [], artifacts: [], risks: [], unresolved: [],
+    status: 'completed', summary: 'done', files: [], tests: [], unresolved: [],
   });
   await waitFor(harness, proposed.id, 'awaiting-delivery-acceptance');
 });
@@ -145,7 +154,7 @@ test('delivery observers continue from a cursor and receive later state changes 
 test('integration failures are terminal and accepted deliveries cannot be cancelled', async () => {
   const makeHarness = (integrate) => new DeliveryHarness({
     runtime: { execute: async () => ({
-      outcome: 'completed', summary: 'done', changes: [], tests: [], artifacts: [], risks: [], unresolved: [],
+      status: 'completed', summary: 'done', files: [], tests: [], unresolved: [],
     }) },
     verifier: { verify: async () => ({ passed: true, checks: ['ok'] }) },
     reviewer: { review: async () => ({ passed: true, findings: [] }) },
@@ -172,4 +181,87 @@ test('integration failures are terminal and accepted deliveries cannot be cancel
   const ready = await waitFor(successful, acceptedRun.id, 'awaiting-delivery-acceptance');
   await successful.decide(acceptedRun.id, { kind: 'accept-delivery', candidateId: ready.candidate.id });
   await assert.rejects(successful.decide(acceptedRun.id, { kind: 'cancel' }), /cannot cancel/);
+});
+
+test('external reports are accepted exactly once and rework creates a new attempt', async () => {
+  const harness = new DeliveryHarness({
+    executionMode: 'external',
+    verifier: { verify: async () => ({ passed: true, checks: ['ok'] }) },
+    reviewer: { review: async () => ({ passed: true, findings: [] }) },
+    integrator: { integrate: async () => ({}) },
+  });
+  const proposal = await harness.propose({
+    meetingId: 'meeting-external',
+    objective: 'external worker',
+    workspace: '/repo',
+    sourceRevision: 'base',
+    acceptanceCriteria: [{ id: 'manual', description: 'review result', verification: { kind: 'manual' } }],
+  });
+  const executing = await harness.decide(proposal.id, { kind: 'approve-spec', specVersion: 1 });
+  assert.equal(executing.status, 'executing');
+  assert.equal(executing.attempt, 1);
+
+  const report = { status: 'completed', summary: 'done', files: [], tests: [], unresolved: [] };
+  const ready = await harness.submitExternalReport(proposal.id, report);
+  assert.equal(ready.status, 'awaiting-delivery-acceptance');
+  await assert.rejects(harness.submitExternalReport(proposal.id, report), /not accepting reports/);
+
+  const reworking = await harness.decide(proposal.id, {
+    kind: 'return-delivery',
+    candidateId: ready.candidate.id,
+    feedback: 'please revise',
+  });
+  assert.equal(reworking.status, 'reworking');
+  const second = await harness.submitExternalReport(proposal.id, report);
+  assert.equal(second.attempt, 2);
+  assert.equal(second.status, 'awaiting-delivery-acceptance');
+});
+
+test('journaled delivery evidence restores as interrupted and resumes only by user action', async () => {
+  const dependencies = {
+    executionMode: 'external',
+    verifier: { verify: async () => ({ passed: true, checks: ['restored-check'] }) },
+    reviewer: { review: async () => ({ passed: true, findings: [] }) },
+    integrator: { integrate: async () => ({}) },
+  };
+  const original = new DeliveryHarness(dependencies);
+  const proposal = await original.propose({
+    meetingId: 'meeting-recovery',
+    objective: 'preserve evidence',
+    workspace: '/repo',
+    sourceRevision: 'base',
+    acceptanceCriteria: [{ id: 'manual', description: 'review result', verification: { kind: 'manual' } }],
+  });
+  await original.decide(proposal.id, { kind: 'approve-spec', specVersion: 1 });
+  const ready = await original.submitExternalReport(proposal.id, {
+    status: 'completed',
+    summary: 'first attempt evidence',
+    files: [{ path: 'result.txt', action: 'created' }],
+    tests: [{ command: 'node --test', status: 'passed' }],
+    unresolved: [],
+  });
+
+  const recovered = new DeliveryHarness(dependencies);
+  const interrupted = recovered.restore(ready);
+  assert.equal(interrupted.status, 'interrupted');
+  assert.equal(interrupted.candidate, undefined);
+  assert.equal(interrupted.attempts[0].report.summary, 'first attempt evidence');
+  await assert.rejects(
+    recovered.submitExternalReport(interrupted.id, {
+      status: 'completed', summary: 'must not auto-run', files: [], tests: [], unresolved: [],
+    }),
+    /not accepting reports/,
+  );
+
+  const reworking = await recovered.decide(interrupted.id, {
+    kind: 'resume-after-interruption',
+    mode: 'continue',
+  });
+  assert.equal(reworking.status, 'reworking');
+  const second = await recovered.submitExternalReport(interrupted.id, {
+    status: 'completed', summary: 'second attempt', files: [], tests: [], unresolved: [],
+  });
+  assert.equal(second.attempt, 2);
+  assert.equal(second.attempts.length, 2);
+  assert.equal(second.attempts[0].report.summary, 'first attempt evidence');
 });

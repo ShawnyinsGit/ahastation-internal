@@ -41,21 +41,49 @@ function makeOrch() {
   return { orch, events, sessions };
 }
 
-test('task_done releases the worker session', async () => {
-  const { orch, sessions } = makeOrch();
+async function waitUntil(predicate, message) {
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    const value = predicate();
+    if (value) return value;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error(message);
+}
+
+test('legacy task_done cannot release a worker; accepted WorkReport does', async () => {
+  const { orch, sessions, events } = makeOrch();
   const result = await orch.installPlan([
     { id: 'a', title: 'A', prompt: 'do A', deps: [] },
   ]);
   assert.equal(result.ok, true);
+  await waitUntil(() => sessions.length === 1, 'worker session was not created');
   assert.equal(sessions.length, 1, 'worker session created');
   assert.equal(sessions[0].started, true);
   assert.equal(sessions[0].ended, false, 'session live during task');
 
-  // Reach into the private markTaskDone to simulate the worker MCP tool path.
+  // Legacy completion is only a note. It cannot bypass verification/review.
   orch.markWorkerTaskDone('a', 'finished');
+  assert.equal(sessions[0].ended, false, 'task_done cannot release the session');
 
-  assert.equal(sessions[0].ended, true, 'session.end() called on task_done');
-  orch.end();
+  orch.submitWorkerReport('a', {
+    status: 'completed',
+    summary: 'finished with evidence',
+    files: [],
+    tests: [],
+    unresolved: [],
+  });
+  const ready = await waitUntil(
+    () => events.map((entry) => entry.event).find(
+      (event) => event?.kind === 'delivery-status'
+        && event.delivery.status === 'awaiting-delivery-acceptance',
+    ),
+    'delivery did not reach user acceptance',
+  );
+  assert.equal(sessions[0].ended, false, 'review-ready delivery remains live');
+  await orch.acceptDelivery(ready.delivery.id, ready.delivery.candidate.id);
+  assert.equal(sessions[0].ended, true, 'accepted delivery releases the session');
+  await orch.end();
 });
 
 test('premature session end (no task_done) cleans up + cascades', async () => {
@@ -64,11 +92,16 @@ test('premature session end (no task_done) cleans up + cascades', async () => {
     { id: 'a', title: 'A', prompt: 'do A', deps: [] },
     { id: 'b', title: 'B', prompt: 'do B', deps: ['a'] },
   ]);
+  await waitUntil(() => sessions.length === 1, 'first dependency worker was not created');
   assert.equal(sessions.length, 1, 'only A is spawned initially (B blocked on dep)');
 
   // Simulate the SDK ending the worker stream before task_done was called
   // (e.g. crash, network drop, or user cancel mid-flight).
   orch.schedulerOnWorkerEvent('a', { kind: 'ended' });
+  await waitUntil(
+    () => events.filter((e) => e.event?.kind === 'worker-ended' && e.event.status === 'failed').length >= 2,
+    'failure did not cascade',
+  );
 
   assert.equal(sessions[0].ended, true, 'A.session.end() invoked on premature end');
 
@@ -88,6 +121,7 @@ test('end() tears down every live worker', async () => {
     { id: 'a', title: 'A', prompt: 'do A', deps: [] },
     { id: 'b', title: 'B', prompt: 'do B', deps: [] },
   ]);
+  await waitUntil(() => sessions.length === 2, 'parallel workers were not created');
   assert.equal(sessions.length, 2);
   assert.ok(sessions.every((s) => s.ended === false));
 
@@ -102,9 +136,18 @@ test('end() tears down every live worker', async () => {
 test('disposeWorker is idempotent (double end() does not throw)', async () => {
   const { orch, sessions } = makeOrch();
   await orch.installPlan([{ id: 'a', title: 'A', prompt: 'do A', deps: [] }]);
-  orch.markWorkerTaskDone('a', 'first');
-  // Re-firing the SDK 'ended' event after task_done used to leave dangling
-  // listeners behind. With the disposeWorker tombstone it should be a no-op.
+  await waitUntil(() => sessions.length === 1, 'worker session was not created');
+  orch.schedulerOnWorkerEvent('a', {
+    kind: 'worker-signal',
+    signal: {
+      kind: 'failed',
+      code: 'fixture-failure',
+      message: 'first',
+      retryable: false,
+    },
+  });
+  await waitUntil(() => sessions[0].ended, 'failed worker was not disposed');
+  // Re-firing an SDK end event after terminal cleanup is a no-op.
   assert.doesNotThrow(() => orch.schedulerOnWorkerEvent('a', { kind: 'ended' }));
   assert.equal(sessions[0].ended, true);
   orch.end();
@@ -126,6 +169,7 @@ test('worker receives its first task only after backend readiness resolves', asy
   });
 
   await orch.installPlan([{ id: 'ready-gate', title: 'Ready', prompt: 'do work', deps: [] }]);
+  await waitUntil(() => sessions.length === 1, 'worker session was not created');
   assert.equal(sessions.length, 1);
   assert.deepEqual(sessions[0].inputs, [], 'task is not sent during backend handshake');
 

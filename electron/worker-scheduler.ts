@@ -18,13 +18,16 @@
 // flush timer, recent-edit pointer) is released exactly once, even if the
 // SDK 'ended' event arrives after end() already disposed the same handle.
 
-import type { ClaudeSession, SessionEvent } from './claude-session.js';
-import type { BackendSession } from './backends/cli-backend.js';
+import type { ClaudeSession } from './claude-session.js';
+import type { BackendSession, BackendSessionEvent } from './backends/cli-backend.js';
+import { randomUUID } from 'node:crypto';
+import { resolve as pathResolve } from 'node:path';
 import {
   validatePlan,
   type PlanMeetingTask,
 } from './meeting-tools.js';
-import { WORKER_PROMPT } from './orchestrator-prompts.js';
+import type { PlanRevisionOperation } from './meeting-command.js';
+import { CLAUDE_WORKER_PROMPT_SUFFIX, WORKER_PROMPT } from './orchestrator-prompts.js';
 import {
   FILE_COLLISION_WINDOW_MS,
   FILE_EDIT_TOOLS,
@@ -39,10 +42,19 @@ import {
 import type { SteerResult } from './meeting-mcp.js';
 import type { AutoApproveScope } from './auto-approve-policy.js';
 import type { TaskWorkspaceManager } from './task-workspace.js';
-import { snapshotDeliveryFilesSync } from './delivery-snapshot.js';
+import { snapshotDeliveryFiles } from './delivery-snapshot.js';
+import type { DeliveryHarness, DeliveryView } from './delivery-harness.js';
+import {
+  parseWorkerAdapterSignal,
+  type AcceptanceCriterion,
+  type WorkReport,
+  type WorkerAdapterSignal,
+  type WorkerEvent,
+} from './worker-protocol.js';
 import type {
   MeetingPlan,
   MeetingPlanNode,
+  CoordinatorBriefing,
   OrchestratorEvent,
   RecentFileEdit,
   WorkerHandle,
@@ -101,6 +113,15 @@ export interface WorkerSchedulerOpts {
    *  'off' if the caller wants the raw stream. Read on each flush so a live
    *  toggle takes effect on the next batch without restarting the meeting. */
   getSpeechFilterMode: () => 'strict' | 'off';
+  meetingId?: string;
+  defaultBackendId?: string;
+  deliveryHarness?: DeliveryHarness;
+  /** Meeting-private evidence directory, outside task worktrees. */
+  deliveryArtifactRoot?: string;
+  /** Waits until previously emitted canonical events are durable. */
+  flushEvents?: () => Promise<void>;
+  /** Durable structural plan version restored with the meeting snapshot. */
+  initialPlanVersion?: number;
 }
 
 const COMPUTER_USE_WORKER_PROMPT = `
@@ -134,7 +155,6 @@ const STALL_SWEEP_MS = 15_000;
 const TASK_HISTORY_MAX = 50;
 const ASSISTANT_CONDENSE_CHARS = 140;
 const ASSISTANT_DESCRIBE_MAX = 200;
-const TASK_DONE_LINE_MAX = 180;
 
 export class WorkerScheduler {
   private workers: Map<string, WorkerHandle> = new Map();
@@ -142,6 +162,8 @@ export class WorkerScheduler {
   private workerIdSeq = 0;
   private autoApproveScope: AutoApproveScope;
   private stallTimer: NodeJS.Timeout | null = null;
+  private capacityNotified = false;
+  private planVersion: number;
   private readonly opts: WorkerSchedulerOpts;
   private talkerProvider: () => BackendSession | null;
 
@@ -149,6 +171,10 @@ export class WorkerScheduler {
     this.opts = opts;
     this.talkerProvider = opts.getTalker;
     this.autoApproveScope = opts.autoApproveScope;
+    this.planVersion = Number.isSafeInteger(opts.initialPlanVersion)
+      && (opts.initialPlanVersion ?? 0) >= 0
+      ? opts.initialPlanVersion!
+      : 0;
   }
 
   /** Rebind progress/result delivery when coordination moves to another Host. */
@@ -183,7 +209,7 @@ export class WorkerScheduler {
 
   describeWorkers(workerId?: string): string {
     const ids = workerId ? [workerId] : Array.from(this.workers.keys());
-    const lines: string[] = [];
+    const lines: string[] = [`planVersion=${this.planVersion}`];
     for (const id of ids) {
       const h = this.workers.get(id);
       if (!h) { lines.push(`${id}: unknown`); continue; }
@@ -197,14 +223,15 @@ export class WorkerScheduler {
           : h.live.lastAssistantText;
         parts.push(`thought="${t}"`);
       }
-      if (h.summary && h.status === 'done') parts.push(`summary="${h.summary}"`);
+      if (h.summary && (h.status === 'accepted' || h.status === 'done')) parts.push(`summary="${h.summary}"`);
       if (h.deps.length > 0) {
-        const pending = h.deps.filter((d) => this.workers.get(d)?.status !== 'done');
+        const pending = h.deps.filter((d) => this.workers.get(d)?.status !== 'accepted');
         if (pending.length > 0) parts.push(`waiting_on=${pending.join(',')}`);
       }
       lines.push(parts.join(' | '));
     }
-    return lines.join('\n') || 'no workers';
+    if (lines.length === 1) lines.push('no workers');
+    return lines.join('\n');
   }
 
   snapshot(): Array<{
@@ -215,7 +242,12 @@ export class WorkerScheduler {
     deps: string[];
     executorBackendId?: string;
     writePaths?: string[];
+    acceptanceCriteria?: AcceptanceCriterion[];
     workspace?: { kind: string; cwd: string; branch?: string };
+    deliveryId?: string;
+    delivery?: DeliveryView;
+    attempt?: number;
+    summary?: string;
   }> {
     return Array.from(this.workers.values()).map((handle) => ({
       id: handle.id,
@@ -225,10 +257,134 @@ export class WorkerScheduler {
       deps: [...handle.deps],
       executorBackendId: handle.executorBackendId,
       writePaths: handle.writePaths ? [...handle.writePaths] : undefined,
+      acceptanceCriteria: handle.acceptanceCriteria
+        ? structuredClone(handle.acceptanceCriteria)
+        : undefined,
       workspace: handle.workspace
         ? { kind: handle.workspace.kind, cwd: handle.workspace.cwd, branch: handle.workspace.branch }
         : undefined,
+      deliveryId: handle.deliveryId ?? undefined,
+      delivery: handle.deliveryId
+        ? this.opts.deliveryHarness?.snapshot(handle.deliveryId)
+        : undefined,
+      attempt: handle.attempt,
+      summary: handle.summary || undefined,
     }));
+  }
+
+  getPlanVersion(): number {
+    return this.planVersion;
+  }
+
+  /** Hydrate recovered task shells and delivery evidence without spawning any
+   * Worker. The renderer can inspect the previous attempts immediately, but
+   * external side effects are never replayed until the user chooses an
+   * explicit recovery action. */
+  restoreTasks(tasks: Array<Record<string, unknown>>): void {
+    for (const task of tasks) {
+      const id = typeof task.id === 'string' ? task.id : '';
+      const prompt = typeof task.prompt === 'string' ? task.prompt : '';
+      if (!id || !prompt || this.workers.has(id)) continue;
+      this.registerHandle({
+        id,
+        title: typeof task.title === 'string' ? task.title : id,
+        prompt,
+        deps: Array.isArray(task.deps) ? task.deps.map(String) : [],
+        specialty: inferSpecialty(`${String(task.title ?? id)} ${prompt}`),
+        executorBackendId: typeof task.executorBackendId === 'string'
+          ? task.executorBackendId
+          : undefined,
+        writePaths: Array.isArray(task.writePaths) ? task.writePaths.map(String) : undefined,
+        acceptanceCriteria: Array.isArray(task.acceptanceCriteria)
+          ? task.acceptanceCriteria as AcceptanceCriterion[]
+          : undefined,
+      });
+      const handle = this.workers.get(id)!;
+      const rawStatus = typeof task.status === 'string' ? task.status : 'interrupted';
+      handle.status = (
+        rawStatus === 'accepted' || rawStatus === 'failed' || rawStatus === 'done'
+      ) ? rawStatus : 'interrupted';
+      handle.summary = typeof task.summary === 'string' ? task.summary : '';
+      handle.attempt = typeof task.attempt === 'number' && Number.isSafeInteger(task.attempt)
+        ? Math.max(1, task.attempt)
+        : 1;
+      const delivery = task.delivery;
+      if (
+        delivery
+        && typeof delivery === 'object'
+        && typeof (delivery as DeliveryView).id === 'string'
+        && this.opts.deliveryHarness
+      ) {
+        const restored = this.opts.deliveryHarness.restore(delivery as DeliveryView);
+        handle.deliveryId = restored.id;
+        handle.attempt = restored.attempt;
+      } else if (typeof task.deliveryId === 'string') {
+        handle.deliveryId = task.deliveryId;
+      }
+      handle.live.lastUpdateTs = Date.now();
+    }
+    if (this.workers.size > 0 && this.planVersion === 0) this.planVersion = 1;
+  }
+
+  emitRecoveredState(): void {
+    this.emitPlanUpdate();
+    if (!this.opts.deliveryHarness) return;
+    for (const handle of this.workers.values()) {
+      if (!handle.deliveryId) continue;
+      const delivery = this.opts.deliveryHarness.snapshot(handle.deliveryId);
+      if (!delivery) continue;
+      this.opts.emit({
+        source: 'system',
+        event: {
+          kind: 'delivery-status',
+          workerId: handle.id,
+          taskId: handle.currentTaskId,
+          delivery,
+        },
+      });
+    }
+  }
+
+  async resolveRecoveredTask(
+    taskId: string,
+    action: 'continue' | 'retry' | 'abandon',
+  ): Promise<{ ok: true } | { ok: false; error: string }> {
+    const handle = this.workers.get(taskId);
+    if (!handle) return { ok: false, error: 'interrupted task not found' };
+    if (handle.status !== 'interrupted') {
+      return { ok: false, error: `task is already ${handle.status}` };
+    }
+    if (action === 'abandon') {
+      this.disposeWorker(handle, 'failed', 'Abandoned by the user after recovery.');
+      this.emitPlanUpdate();
+      this.cascadeFailure(handle.id);
+      return { ok: true };
+    }
+    if (handle.deliveryId && this.opts.deliveryHarness) {
+      const restored = this.opts.deliveryHarness.snapshot(handle.deliveryId);
+      if (restored?.status === 'interrupted') {
+        const view = await this.opts.deliveryHarness.decide(handle.deliveryId, {
+          kind: 'resume-after-interruption',
+          mode: action,
+        });
+        handle.attempt = view.attempt;
+        this.applyDeliveryView(handle, view);
+      }
+    } else {
+      // Older snapshots did not persist DeliveryView. Start a fresh delivery
+      // while retaining the task identity and explicit recovery semantics.
+      handle.deliveryId = null;
+    }
+    handle.report = null;
+    handle.transportEnded = false;
+    handle.summary = '';
+    handle.prompt = action === 'continue'
+      ? `(recovery continuation) Inspect the existing workspace state and continue safely. Do not repeat external side effects without checking first.\n\n${handle.prompt}`
+      : `(recovery retry) This is a new attempt. Re-check the workspace before repeating any external side effect.\n\n${handle.prompt}`;
+    handle.status = 'pending';
+    this.emitPlanUpdate();
+    this.spawnReadyWorkers();
+    return { ok: true };
   }
 
   /** Snapshot every worker's un-flushed update buffer so the orchestrator
@@ -275,9 +431,27 @@ export class WorkerScheduler {
   interruptAll(): Promise<void>[] {
     const tasks: Promise<void>[] = [];
     for (const handle of this.workers.values()) {
-      if (handle.session) tasks.push(handle.session.interrupt());
+      if (handle.session) tasks.push(handle.session.interrupt('user'));
     }
     return tasks;
+  }
+
+  async interruptWorker(workerId: string): Promise<{ ok: true } | { ok: false; error: string }> {
+    const handle = this.workers.get(workerId);
+    if (!handle) return { ok: false, error: 'worker not found' };
+    if (!handle.session || handle.status !== 'running') {
+      return { ok: false, error: `worker cannot be interrupted in ${handle.status}` };
+    }
+    const session = handle.session;
+    try {
+      await session.interrupt('user');
+      if (handle.session === session && handle.status === 'running') {
+        await this.handleWorkerSignal(handle, { kind: 'ended', reason: 'interrupted' });
+      }
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
   }
 
   setPermissionModeAll(
@@ -307,6 +481,7 @@ export class WorkerScheduler {
     }
     const id = this.nextWorkerId('task');
     this.registerHandle({ id, title, prompt: description, deps: [], specialty });
+    this.planVersion += 1;
     this.emitPlanUpdate();
     this.spawnReadyWorkers();
     return { workerId: id, specialty, reused: false };
@@ -329,11 +504,107 @@ export class WorkerScheduler {
         specialty: inferSpecialty(`${task.title} ${task.prompt}`),
         executorBackendId: task.executorBackendId,
         writePaths: task.writePaths,
+        acceptanceCriteria: task.acceptanceCriteria,
       });
     }
+    this.planVersion += 1;
     this.emitPlanUpdate();
     this.spawnReadyWorkers();
     return { ok: true };
+  }
+
+  revisePlan(
+    expectedPlanVersion: number,
+    operations: PlanRevisionOperation[],
+  ): { ok: true; planVersion: number } | { ok: false; error: string } {
+    if (expectedPlanVersion !== this.planVersion) {
+      return {
+        ok: false,
+        error: `stale plan version: expected ${expectedPlanVersion}, current ${this.planVersion}`,
+      };
+    }
+
+    const projected = new Map<string, PlanMeetingTask>();
+    for (const handle of this.workers.values()) {
+      projected.set(handle.id, {
+        id: handle.id,
+        title: handle.title,
+        prompt: handle.prompt,
+        deps: [...handle.deps],
+        executorBackendId: handle.executorBackendId,
+        writePaths: handle.writePaths ? [...handle.writePaths] : undefined,
+        acceptanceCriteria: handle.acceptanceCriteria
+          ? structuredClone(handle.acceptanceCriteria)
+          : undefined,
+      });
+    }
+
+    for (const operation of operations) {
+      if (operation.kind === 'add-task') {
+        if (projected.has(operation.task.id)) {
+          return { ok: false, error: `Worker id already in use: ${operation.task.id}` };
+        }
+        projected.set(operation.task.id, {
+          ...operation.task,
+          deps: [...(operation.task.deps ?? [])],
+        });
+        continue;
+      }
+
+      const handle = this.workers.get(operation.taskId);
+      if (!handle) return { ok: false, error: `unknown task: ${operation.taskId}` };
+      if (operation.kind === 'cancel-pending-task') {
+        if (!projected.has(operation.taskId)) {
+          return { ok: false, error: `task ${operation.taskId} is cancelled more than once` };
+        }
+        if (handle.status !== 'pending' || handle.session) {
+          return {
+            ok: false,
+            error: `task ${operation.taskId} cannot be cancelled while ${handle.status}`,
+          };
+        }
+        projected.delete(operation.taskId);
+        continue;
+      }
+      if (handle.status !== 'running' || !handle.session) {
+        return {
+          ok: false,
+          error: `task ${operation.taskId} cannot be steered while ${handle.status}`,
+        };
+      }
+    }
+
+    const graphError = validatePlan(Array.from(projected.values()));
+    if (graphError) return { ok: false, error: graphError.message };
+
+    for (const operation of operations) {
+      if (operation.kind === 'add-task') {
+        this.registerHandle({
+          id: operation.task.id,
+          title: operation.task.title,
+          prompt: operation.task.prompt,
+          deps: operation.task.deps ?? [],
+          specialty: inferSpecialty(`${operation.task.title} ${operation.task.prompt}`),
+          executorBackendId: operation.task.executorBackendId,
+          writePaths: operation.task.writePaths,
+          acceptanceCriteria: operation.task.acceptanceCriteria,
+        });
+      } else if (operation.kind === 'cancel-pending-task') {
+        const handle = this.workers.get(operation.taskId)!;
+        if (handle.flushTimer) clearTimeout(handle.flushTimer);
+        this.workers.delete(operation.taskId);
+      } else {
+        const result = this.steerWorker(operation.taskId, operation.addendum);
+        if (!result.ok) {
+          throw new Error(`validated steer failed for ${operation.taskId}: ${result.reason}`);
+        }
+      }
+    }
+
+    this.planVersion += 1;
+    this.emitPlanUpdate();
+    this.spawnReadyWorkers();
+    return { ok: true, planVersion: this.planVersion };
   }
 
   steerWorker(workerId: string, addendum: string): SteerResult {
@@ -351,7 +622,7 @@ export class WorkerScheduler {
     }
     void (async () => {
       try {
-        await handle.session?.interrupt();
+        await handle.session?.interrupt('steer');
         if (!handle.session || handle.status !== 'running') {
           handle.queuedAddenda.push(addendum);
           this.harvestUnresolvedAddenda(handle);
@@ -372,89 +643,26 @@ export class WorkerScheduler {
   markTaskDone(workerId: string, summary: string): void {
     const handle = this.workers.get(workerId);
     if (!handle) {
-      // V0.7.4 MEDIUM: A worker may legitimately call task_done after the
-      // scheduler has already cleaned it up — spawn-time failure, SDK 'ended'
-      // before task_done landed, DAG-cascade failure from an upstream worker,
-      // or a race with endAll() on session teardown. Silently returning hides
-      // the lost completion (Talker never hears about it and the user has no
-      // signal that the work the worker thought it finished went nowhere).
-      // Warn so the case is visible in logs, and DO NOT throw / cascade —
-      // the MCP tool handler's success-shaped reply keeps the worker
-      // subprocess from retrying into a no-op loop.
       console.warn('[scheduler] task_done from unknown worker', {
         workerId,
         summary: summary.slice(0, 200),
       });
       return;
     }
-    // Snapshot the deliverables BEFORE disposeWorker resets the handle, so
-    // the renderer's "delivery acceptance" panel sees the same file list the
-    // user expects from the just-completed turn. Snapshot to an array; the
-    // Set is cleared as part of the snapshot to avoid leaking into the next
-    // task if this handle is reassigned.
-    // Explicit deliveries (declared via submit_delivery tool) override the
-    // auto-tracked edit set. When the worker called submit_delivery, it is
-    // telling us exactly which files are the real deliverables — honor that
-    // and skip the intermediate scripts/temp files the auto-tracker caught.
-    const deliveredPaths = handle.explicitDeliveries.length > 0
-      ? [...handle.explicitDeliveries]
-      : Array.from(handle.deliveries);
-    handle.deliveries.clear();
-    handle.explicitDeliveries = [];
+    handle.summary = summary;
+    this.talkerProvider()?.sendUserText(
+      `(worker ${workerId} sent a legacy task_done summary; a complete WorkReport is still required before verification.)`,
+      'low',
+    );
+  }
 
-    const snapshotMap = snapshotDeliveryFilesSync(this.opts.cwd, handle.title, deliveredPaths);
-
-    // Inform the talker with a walkthrough prompt so it explains the delivery
-    // conversationally rather than just announcing completion.
-    const talker = this.talkerProvider();
-    if (talker) {
-      const condensed = summary.length > TASK_DONE_LINE_MAX
-        ? `${summary.slice(0, TASK_DONE_LINE_MAX - 2)}…`
-        : summary;
-      const fileCount = deliveredPaths.length;
-      const fileList = fileCount > 0
-        ? deliveredPaths.slice(0, 10).map((p) => p.split('/').pop() ?? p).join(', ')
-        : '(no file edits)';
-      const walkthrough = [
-        `(worker ${workerId} delivered)`,
-        `任务「${handle.title}」完成了，改了 ${fileCount} 个文件。`,
-        `请向用户讲解这次交付的内容，逐步说明做了什么、为什么这么做。`,
-        `用对话方式讲解，每次说一两句就停下来等用户反应。`,
-        `如果用户说OK/通过/没问题就不用继续解释了。`,
-        ``,
-        `交付摘要: ${condensed}`,
-        `文件: ${fileList}`,
-      ].join('\n');
-      talker.sendUserText(walkthrough, 'low');
+  submitWorkerReport(workerId: string, report: WorkReport): void {
+    const handle = this.workers.get(workerId);
+    if (!handle) {
+      console.warn('[scheduler] WorkReport from unknown worker', { workerId });
+      return;
     }
-
-    this.opts.emit({
-      source: 'talker',
-      event: { kind: 'worker-ended', workerId, status: 'done', summary },
-    });
-    if (deliveredPaths.length > 0) {
-      this.opts.emit({
-        source: 'talker',
-        event: {
-          kind: 'worker-delivery',
-          workerId,
-          title: handle.title,
-          summary,
-          taskId: handle.currentTaskId,
-          files: deliveredPaths.map((p) => ({
-            path: p,
-            snapshotRelativePath: snapshotMap.get(p),
-          })),
-        },
-      });
-    }
-    // Tombstone the handle: status flips to 'done' and the SDK subprocess +
-    // flush timer + buffers are released. We keep the entry in `workers` so
-    // dependents can still see `status === 'done'` when spawnReadyWorkers
-    // walks the graph below.
-    this.disposeWorker(handle, 'done', summary);
-    this.emitPlanUpdate();
-    this.spawnReadyWorkers();
+    void this.handleWorkerSignal(handle, { kind: 'delivery', report });
   }
 
   submitWorkerDelivery(workerId: string, files: string[]): void {
@@ -556,6 +764,17 @@ export class WorkerScheduler {
           currentTool: handle.live.currentTool,
         },
       });
+      this.emitCoordinatorBriefing({
+        kind: 'stalled',
+        title: `${handle.title} 长时间无进展`,
+        summary: handle.live.currentTool
+          ? `Worker 停留在 ${handle.live.currentTool}，自动提醒后仍未继续。`
+          : 'Worker 在自动提醒后仍未产生新进展。',
+        blockers: [handle.live.currentTool ?? 'no-progress'],
+        recommendedAction: 'request-user-decision',
+        workerId: handle.id,
+        taskId: handle.currentTaskId,
+      });
     }
     if (!anyRunning) this.stopStallWatch();
   }
@@ -563,14 +782,14 @@ export class WorkerScheduler {
   // ---------------------------------------------------------------------------
   // Session event handler — wired into every spawnWorker emit callback.
 
-  onWorkerEvent(workerId: string, e: SessionEvent): void {
+  onWorkerEvent(workerId: string, e: BackendSessionEvent): void {
     const handle = this.workers.get(workerId);
     if (!handle) return;
 
-    this.opts.emit({ source: workerId, event: e });
-
     try {
-      if (e.kind === 'message') {
+      if (e.kind === 'worker-signal') {
+        void this.handleWorkerSignal(handle, e.signal);
+      } else if (e.kind === 'message') {
         // Any SDK message is progress: bump the activity clock and clear the
         // stall flag so the watchdog re-arms for the next idle stretch.
         handle.live.lastUpdateTs = Date.now();
@@ -634,38 +853,33 @@ export class WorkerScheduler {
           }
         } else if (msg?.type === 'result') {
           handle.live.busy = false;
-          // If the worker ended a turn WITHOUT calling task_done, we don't
-          // mark the node done — that's intentional, it might still be
-          // mid-task. But we queue a turn-complete note so the talker hears
-          // about it.
+          // A provider turn boundary never completes a task. Only a validated
+          // WorkReport can enter DeliveryHarness; this note merely keeps the
+          // Coordinator informed.
           this.queueWorkerUpdate(handle, `[${handle.id}] turn complete`);
         }
       } else if (e.kind === 'auth-required') {
-        this.opts.emit({
-          source: 'talker',
-          event: { kind: 'worker-ended', workerId, status: 'failed', summary: e.error },
+        void this.handleWorkerSignal(handle, {
+          kind: 'failed',
+          code: 'auth-required',
+          message: e.error,
+          retryable: false,
         });
-        this.harvestUnresolvedAddenda(handle);
-        this.disposeWorker(handle, 'failed', e.error);
-        this.emitPlanUpdate();
-        this.cascadeFailure(workerId);
+      } else if (e.kind === 'permission-request' || e.kind === 'permission-cancelled') {
+        this.opts.emit({ source: workerId, event: e });
+      } else if (e.kind === 'error') {
+        void this.handleWorkerSignal(handle, {
+          kind: 'failed',
+          code: 'worker-runtime-error',
+          message: e.error,
+          retryable: true,
+        });
       } else if (e.kind === 'ended') {
-        // SDK stream ended. Two paths land here:
-        //   1. Worker reported task_done → markTaskDone already disposed the
-        //      handle and called `session.end()`; this event is the SDK
-        //      acknowledging that. handle.status is 'done', skip further work.
-        //   2. Worker died / errored / exited a turn without task_done →
-        //      status is still 'running'. Treat as failure: emit, dispose,
-        //      cascade.
-        if (handle.status === 'running') {
-          this.opts.emit({
-            source: 'talker',
-            event: { kind: 'worker-ended', workerId, status: 'failed' },
-          });
-          this.harvestUnresolvedAddenda(handle);
-          this.disposeWorker(handle, 'failed');
-          this.emitPlanUpdate();
-          this.cascadeFailure(workerId);
+        // SDK stream end is transport state, never delivery success. A report
+        // already being verified is allowed to finish; an unreported running
+        // Worker is failed closed by handleWorkerSignal.
+        if (handle.status === 'running' || handle.report) {
+          void this.handleWorkerSignal(handle, { kind: 'ended', reason: 'completed' });
         } else {
           // Defensive re-dispose in case the session leaked back here after a
           // direct end() — disposeWorker is idempotent.
@@ -687,6 +901,283 @@ export class WorkerScheduler {
     }
   }
 
+  private createWorkerEvent(handle: WorkerHandle, signal: WorkerAdapterSignal): WorkerEvent {
+    return {
+      schemaVersion: 2,
+      eventId: randomUUID(),
+      seq: ++handle.eventSeq,
+      timestamp: Date.now(),
+      meetingId: this.opts.meetingId ?? 'meeting',
+      taskId: handle.currentTaskId,
+      attempt: handle.attempt,
+      workerId: handle.id,
+      backendId: handle.backendId,
+      payload: signal,
+    };
+  }
+
+  private async handleWorkerSignal(handle: WorkerHandle, value: WorkerAdapterSignal): Promise<void> {
+    const parsed = parseWorkerAdapterSignal(value);
+    if (!parsed.ok) {
+      console.warn('[scheduler] rejected invalid Worker signal', {
+        workerId: handle.id,
+        error: parsed.error,
+      });
+      return;
+    }
+    const signal = parsed.signal;
+    const event = this.createWorkerEvent(handle, signal);
+    this.opts.emit({ source: handle.id, event: { kind: 'worker-event', event } });
+
+    handle.live.lastUpdateTs = Date.now();
+    handle.stallNotified = false;
+    handle.stallNudged = false;
+    if (signal.kind === 'progress') {
+      handle.live.lastAssistantText = signal.message;
+      handle.live.busy = true;
+      this.queueWorkerUpdate(handle, `[${handle.id}] ${condense(signal.message, ASSISTANT_CONDENSE_CHARS)}`);
+      return;
+    }
+    if (signal.kind === 'tool') {
+      handle.live.currentTool = signal.phase === 'started' ? signal.toolName : null;
+      handle.live.currentToolInput = signal.detail ?? null;
+      handle.live.busy = signal.phase === 'started';
+      return;
+    }
+    if (signal.kind === 'failed') {
+      handle.summary = signal.message;
+      if (handle.status !== 'failed' && handle.status !== 'accepted') {
+        handle.status = 'failed';
+        this.opts.emit({
+          source: 'talker',
+          event: {
+            kind: 'worker-ended',
+            workerId: handle.id,
+            status: 'failed',
+            summary: signal.message,
+          },
+        });
+        this.emitCoordinatorBriefing({
+          kind: 'failed',
+          title: `${handle.title} 执行失败`,
+          summary: signal.message,
+          blockers: [signal.code],
+          recommendedAction: signal.retryable ? 'rework' : 'revise-plan',
+          workerId: handle.id,
+          taskId: handle.currentTaskId,
+        });
+        this.harvestUnresolvedAddenda(handle);
+        this.disposeWorker(handle, 'failed', signal.message);
+        this.emitPlanUpdate();
+        this.cascadeFailure(handle.id);
+      }
+      return;
+    }
+    if (signal.kind === 'ended') {
+      handle.live.busy = false;
+      handle.transportEnded = true;
+      if (
+        signal.reason !== 'interrupted'
+        && !handle.report
+        && handle.status === 'running'
+      ) {
+        await this.handleWorkerSignal(handle, {
+          kind: 'failed',
+          code: 'missing-work-report',
+          message: 'Worker turn ended without a valid WorkReport.',
+          retryable: true,
+        });
+      } else if (signal.reason === 'interrupted' && handle.status === 'running') {
+        handle.status = 'interrupted';
+        this.disposeWorker(handle, 'interrupted', 'Worker turn was interrupted.');
+        this.emitPlanUpdate();
+      }
+      return;
+    }
+    if (handle.report) {
+      console.warn('[scheduler] duplicate WorkReport ignored', {
+        workerId: handle.id,
+        taskId: handle.currentTaskId,
+        attempt: handle.attempt,
+      });
+      return;
+    }
+
+    handle.report = signal.report;
+    handle.summary = signal.report.summary;
+    if (!handle.deliveryId || !this.opts.deliveryHarness) {
+      handle.status = 'failed';
+      this.opts.emit({
+        source: 'talker',
+        event: {
+          kind: 'worker-ended',
+          workerId: handle.id,
+          status: 'failed',
+          summary: 'DeliveryHarness is unavailable for this Worker.',
+        },
+      });
+      this.emitPlanUpdate();
+      return;
+    }
+
+    handle.status = 'verifying';
+    this.emitPlanUpdate();
+    const view = await this.opts.deliveryHarness.submitExternalReport(handle.deliveryId, signal.report);
+    handle.attempt = view.attempt;
+    this.applyDeliveryView(handle, view);
+    if (view.status === 'awaiting-delivery-acceptance') {
+      await this.emitDeliveryCandidate(handle, view);
+      const report = view.candidate?.report;
+      this.emitCoordinatorBriefing({
+        kind: 'delivery-ready',
+        title: `${handle.title} 等待评审`,
+        summary: report?.summary ?? handle.summary,
+        files: report?.files.length ?? 0,
+        testsPassed: report?.tests.filter((test) => test.status === 'passed').length ?? 0,
+        testsFailed: report?.tests.filter((test) => test.status === 'failed').length ?? 0,
+        blockers: report?.unresolved.filter((item) => item.blocking).map((item) => item.message) ?? [],
+        recommendedAction: 'review',
+        workerId: handle.id,
+        taskId: handle.currentTaskId,
+      });
+    }
+  }
+
+  private applyDeliveryView(handle: WorkerHandle, view: DeliveryView): void {
+    const mapped: Partial<Record<DeliveryView['status'], WorkerStatusKind>> = {
+      executing: 'running',
+      verifying: 'verifying',
+      reviewing: 'reviewing',
+      'awaiting-delivery-acceptance': 'awaiting-acceptance',
+      reworking: 'reworking',
+      accepted: 'accepted',
+      interrupted: 'interrupted',
+      failed: 'failed',
+      cancelled: 'failed',
+    };
+    const next = mapped[view.status];
+    if (next) handle.status = next;
+    this.opts.emit({
+      source: 'talker',
+      event: {
+        kind: 'delivery-status',
+        workerId: handle.id,
+        taskId: handle.currentTaskId,
+        delivery: view,
+      },
+    });
+    this.emitPlanUpdate();
+  }
+
+  private async emitDeliveryCandidate(handle: WorkerHandle, view: DeliveryView): Promise<void> {
+    const report = view.candidate?.report;
+    if (!report) return;
+    const workerCwd = handle.workspace?.cwd ?? this.opts.cwd;
+    const deliveredPaths = report.files
+      .filter((file) => file.action !== 'deleted')
+      .map((file) => file.path);
+    const snapshotRoot = this.opts.deliveryArtifactRoot
+      ?? pathResolve(workerCwd, 'deliveries');
+    const snapshotMap = await snapshotDeliveryFiles(
+      workerCwd,
+      snapshotRoot,
+      `${view.id}-attempt-${view.attempt}`,
+      deliveredPaths,
+    );
+    this.opts.emit({
+      source: 'talker',
+      event: {
+        kind: 'worker-delivery',
+        workerId: handle.id,
+        title: handle.title,
+        summary: report.summary,
+        taskId: handle.currentTaskId,
+        deliveryId: view.id,
+        files: deliveredPaths.map((path) => ({
+          path,
+          ...snapshotMap.get(path),
+        })),
+      },
+    });
+  }
+
+  private async observeDelivery(handle: WorkerHandle, deliveryId: string): Promise<void> {
+    if (!this.opts.deliveryHarness) return;
+    try {
+      for await (const _event of this.opts.deliveryHarness.observe(deliveryId)) {
+        const view = await this.opts.deliveryHarness.inspect(deliveryId);
+        this.applyDeliveryView(handle, view);
+      }
+    } catch (error) {
+      console.warn('[scheduler] delivery observer stopped', {
+        workerId: handle.id,
+        deliveryId,
+        error: String(error),
+      });
+    }
+  }
+
+  async acceptDelivery(deliveryId: string, candidateId: string): Promise<DeliveryView> {
+    if (!this.opts.deliveryHarness) throw new Error('DeliveryHarness is unavailable');
+    const handle = Array.from(this.workers.values()).find((item) => item.deliveryId === deliveryId);
+    if (!handle) throw new Error(`delivery worker not found: ${deliveryId}`);
+    const view = await this.opts.deliveryHarness.decide(deliveryId, {
+      kind: 'accept-delivery',
+      candidateId,
+    });
+    this.applyDeliveryView(handle, view);
+    // The accepted delivery must be durable before it can release DAG
+    // dependencies. Otherwise a crash can leave a downstream task running
+    // while recovery sees its prerequisite as unaccepted.
+    await this.opts.flushEvents?.();
+    this.disposeWorker(handle, 'accepted', handle.summary);
+    this.opts.workspaceManager?.release(handle.id, false);
+    this.opts.emit({
+      source: 'talker',
+      event: { kind: 'worker-ended', workerId: handle.id, status: 'accepted', summary: handle.summary },
+    });
+    this.emitCoordinatorBriefing({
+      kind: 'accepted',
+      title: `${handle.title} 已接受`,
+      summary: handle.summary || 'Delivery accepted.',
+      recommendedAction: 'continue',
+      workerId: handle.id,
+      taskId: handle.currentTaskId,
+    });
+    this.spawnReadyWorkers();
+    return view;
+  }
+
+  async returnDelivery(
+    deliveryId: string,
+    candidateId: string | undefined,
+    feedback: string,
+  ): Promise<DeliveryView> {
+    if (!this.opts.deliveryHarness) throw new Error('DeliveryHarness is unavailable');
+    const handle = Array.from(this.workers.values()).find((item) => item.deliveryId === deliveryId);
+    if (!handle) throw new Error(`delivery worker not found: ${deliveryId}`);
+    const view = await this.opts.deliveryHarness.decide(deliveryId, {
+      kind: 'return-delivery',
+      ...(candidateId ? { candidateId } : {}),
+      feedback,
+    });
+    handle.report = null;
+    handle.transportEnded = false;
+    this.applyDeliveryView(handle, view);
+    // Rework is also journal-first: do not send a new side-effecting turn
+    // until recovery can observe the new attempt state.
+    await this.opts.flushEvents?.();
+    if (handle.session) {
+      handle.session.sendUserText(`(rework attempt) ${feedback}`, 'high');
+      handle.status = 'running';
+      this.emitPlanUpdate();
+    } else {
+      handle.status = 'pending';
+      void this.spawnWorker(handle);
+    }
+    return view;
+  }
+
   // ===========================================================================
   // Internals
 
@@ -698,6 +1189,7 @@ export class WorkerScheduler {
     specialty: WorkerSpecialtyKind;
     executorBackendId?: string;
     writePaths?: string[];
+    acceptanceCriteria?: AcceptanceCriterion[];
   }): void {
     const handle: WorkerHandle = {
       id: spec.id,
@@ -706,6 +1198,7 @@ export class WorkerScheduler {
       deps: spec.deps,
       executorBackendId: spec.executorBackendId,
       writePaths: spec.writePaths,
+      acceptanceCriteria: spec.acceptanceCriteria,
       status: 'pending',
       session: null,
       summary: '',
@@ -728,6 +1221,12 @@ export class WorkerScheduler {
       deliveries: new Set<string>(),
       explicitDeliveries: [],
       workspace: null,
+      backendId: spec.executorBackendId ?? this.opts.defaultBackendId ?? 'claude-code',
+      attempt: 1,
+      eventSeq: 0,
+      report: null,
+      transportEnded: false,
+      deliveryId: null,
       stallNotified: false,
       stallNudged: false,
     };
@@ -739,7 +1238,7 @@ export class WorkerScheduler {
    *  leave alone so the user can inspect them) and no live session. */
   private findReusableWorker(specialty: WorkerSpecialtyKind): WorkerHandle | null {
     for (const handle of this.workers.values()) {
-      if (handle.status === 'done' && handle.session === null && handle.specialty === specialty) {
+      if ((handle.status === 'accepted' || handle.status === 'done') && handle.session === null && handle.specialty === specialty) {
         return handle;
       }
     }
@@ -783,6 +1282,11 @@ export class WorkerScheduler {
     handle.pendingDelegateAck = false;
     handle.deliveries.clear();
     handle.explicitDeliveries = [];
+    handle.report = null;
+    handle.transportEnded = false;
+    handle.deliveryId = null;
+    handle.attempt = 1;
+    handle.eventSeq = 0;
     handle.stallNotified = false;
     handle.stallNudged = false;
     if (handle.flushTimer) {
@@ -796,7 +1300,7 @@ export class WorkerScheduler {
   private countRunning(): number {
     let n = 0;
     for (const h of this.workers.values()) {
-      if (h.status === 'running') n++;
+      if (h.session && !['accepted', 'failed', 'interrupted', 'done'].includes(h.status)) n++;
     }
     return n;
   }
@@ -804,13 +1308,32 @@ export class WorkerScheduler {
   private spawnReadyWorkers(): void {
     for (const handle of this.workers.values()) {
       if (handle.status !== 'pending') continue;
-      const allDepsDone = handle.deps.every((d) => this.workers.get(d)?.status === 'done');
+      const allDepsDone = handle.deps.every((d) => this.workers.get(d)?.status === 'accepted');
       if (!allDepsDone) continue;
       if (this.countRunning() >= MAX_CONCURRENT_WORKERS) break;
       if (this.opts.workspaceManager && !this.opts.workspaceManager.canPrepare(handle.id, handle.writePaths)) {
         continue;
       }
       void this.spawnWorker(handle);
+    }
+    const running = this.countRunning();
+    const waiting = Array.from(this.workers.values()).filter((handle) => (
+      handle.status === 'pending'
+      && handle.deps.every((dep) => this.workers.get(dep)?.status === 'accepted')
+    )).length;
+    if (running >= MAX_CONCURRENT_WORKERS && waiting > 0) {
+      if (!this.capacityNotified) {
+        this.capacityNotified = true;
+        this.emitCoordinatorBriefing({
+          kind: 'capacity',
+          title: 'Worker 容量已满',
+          summary: `${waiting} 个任务正在等待执行名额；当前任务不会被抢占。`,
+          recommendedAction: 'continue',
+          capacity: { running, limit: MAX_CONCURRENT_WORKERS, waiting },
+        });
+      }
+    } else {
+      this.capacityNotified = false;
     }
   }
 
@@ -819,6 +1342,7 @@ export class WorkerScheduler {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const mcpServers: Record<string, any> = { 'meeting-worker': workerMcp as any };
     let promptAppend = WORKER_PROMPT;
+    if (handle.backendId === 'claude-code') promptAppend += CLAUDE_WORKER_PROMPT_SUFFIX;
 
     if (handle.specialty === 'computer-use' && this.opts.buildComputerUseMcp) {
       const cuMcp = this.opts.buildComputerUseMcp(handle.id);
@@ -835,14 +1359,40 @@ export class WorkerScheduler {
     try {
       handle.workspace = this.opts.workspaceManager?.prepare(handle.id, handle.writePaths) ?? null;
       const workerCwd = handle.workspace?.cwd ?? this.opts.cwd;
-      const sessionFactory = this.opts.resolveSessionFactory?.(handle.executorBackendId)
+      if (this.opts.deliveryHarness && !handle.deliveryId) {
+        const acceptanceCriteria = handle.acceptanceCriteria?.length
+          ? handle.acceptanceCriteria
+          : [{
+              id: 'manual-acceptance',
+              description: 'User reviews and accepts the delivered result.',
+              verification: { kind: 'manual' as const },
+            }];
+        const proposed = await this.opts.deliveryHarness.propose({
+          meetingId: this.opts.meetingId ?? 'meeting',
+          objective: handle.prompt,
+          workspace: workerCwd,
+          sourceRevision: handle.workspace?.sourceRevision ?? 'non-git',
+          acceptanceCriteria,
+        });
+        handle.deliveryId = proposed.id;
+        void this.observeDelivery(handle, proposed.id);
+        const executing = await this.opts.deliveryHarness.decide(proposed.id, {
+          kind: 'approve-spec',
+          specVersion: proposed.spec.version,
+        });
+        handle.attempt = executing.attempt;
+      }
+      const sessionFactory = this.opts.resolveSessionFactory?.(handle.backendId)
         ?? this.opts.sessionFactory;
       handle.session = sessionFactory({
         cwd: workerCwd,
         autoApproveScope: this.autoApproveScope,
         envOverride: this.opts.workerEnv,
         confirmDestructive: this.opts.confirmDestructive,
-        emit: (e) => this.onWorkerEvent(handle.id, e),
+        emit: (e) => this.onWorkerEvent(
+          handle.id,
+          e as unknown as BackendSessionEvent,
+        ),
         sessionOptions: {
           systemPrompt: { type: 'preset', preset: 'claude_code', append: promptAppend },
           mcpServers,
@@ -905,7 +1455,7 @@ export class WorkerScheduler {
     }
   }
 
-  /** B8: when a worker fails (SDK exit without task_done, spawn-time throw,
+  /** B8: when a worker fails (SDK exit without WorkReport, spawn-time throw,
    *  cascade) any addenda that the user/Talker queued via steerWorker are
    *  about to be wiped by disposeWorker. Without this, those instructions
    *  vanish silently — the user sees no feedback and the Talker has no idea
@@ -958,7 +1508,9 @@ export class WorkerScheduler {
     handle.live.currentTool = null;
     handle.live.currentToolInput = null;
     handle.status = finalStatus;
-    this.opts.workspaceManager?.release(handle.id, finalStatus !== 'done');
+    // Delivery integration removes accepted worktrees. Failed/interrupted
+    // worktrees are intentionally preserved for manual recovery.
+    this.opts.workspaceManager?.release(handle.id, false);
     if (typeof summary === 'string') handle.summary = summary;
     // Drop any file-collision tracking pointing at this worker — without
     // this the recentEdits map keeps a stale workerId reference for up to
@@ -976,7 +1528,7 @@ export class WorkerScheduler {
       deps: h.deps,
       executorBackendId: h.executorBackendId,
     }));
-    const plan: MeetingPlan = { nodes };
+    const plan: MeetingPlan = { version: this.planVersion, nodes };
     this.opts.emit({ source: 'talker', event: { kind: 'plan-updated', plan } });
   }
 
@@ -1010,7 +1562,7 @@ export class WorkerScheduler {
     }
     const talker = this.talkerProvider();
     if (talker) {
-      talker.sendUserText(`(worker ${rootId} ended without task_done — downstream tasks marked failed)`, 'low');
+      talker.sendUserText(`(worker ${rootId} failed before an accepted delivery — downstream tasks marked failed)`, 'low');
     }
     this.emitPlanUpdate();
   }
@@ -1021,7 +1573,7 @@ export class WorkerScheduler {
     if (batch.length === 0 || !handle.session) return;
     void (async () => {
       try {
-        await handle.session?.interrupt();
+        await handle.session?.interrupt('steer');
         if (!handle.session || handle.status !== 'running') {
           handle.queuedAddenda.push(...batch);
           this.harvestUnresolvedAddenda(handle);
@@ -1065,6 +1617,42 @@ export class WorkerScheduler {
       const text = `(worker ${handle.id} update)\n${batch.join('\n')}`;
       talker.sendUserText(text, 'low');
     }, QUEUED_UPDATE_FLUSH_MS);
+  }
+
+  private emitCoordinatorBriefing(
+    input: Omit<CoordinatorBriefing, 'id' | 'timestamp' | 'completedTasks' | 'failedTasks' | 'files' | 'testsPassed' | 'testsFailed' | 'blockers'> & {
+      completedTasks?: number;
+      failedTasks?: number;
+      files?: number;
+      testsPassed?: number;
+      testsFailed?: number;
+      blockers?: string[];
+    },
+  ): void {
+    const completedTasks = Array.from(this.workers.values())
+      .filter((worker) => worker.status === 'accepted').length;
+    const failedTasks = Array.from(this.workers.values())
+      .filter((worker) => worker.status === 'failed').length;
+    const briefing: CoordinatorBriefing = {
+      id: randomUUID(),
+      timestamp: Date.now(),
+      completedTasks,
+      failedTasks,
+      files: 0,
+      testsPassed: 0,
+      testsFailed: 0,
+      blockers: [],
+      ...input,
+    };
+    this.opts.emit({
+      source: 'system',
+      event: { kind: 'coordinator-briefing', briefing },
+    });
+    this.talkerProvider()?.sendUserText(
+      `[structured coordinator briefing]\n${JSON.stringify(briefing)}\n`
+      + 'Use this summary to decide whether to continue, request rework, revise the plan, or ask the user. Do not echo raw Worker logs.',
+      'high',
+    );
   }
 
   private recordFileEdit(workerId: string, path: string): void {

@@ -1,4 +1,7 @@
 import { randomUUID } from 'node:crypto';
+import type { AcceptanceCriterion, WorkReport } from './worker-protocol.js';
+
+export type { AcceptanceCriterion, WorkReport } from './worker-protocol.js';
 
 export type DeliveryStatus =
   | 'awaiting-spec-approval'
@@ -13,12 +16,6 @@ export type DeliveryStatus =
   | 'interrupted'
   | 'failed'
   | 'cancelled';
-
-export interface AcceptanceCriterion {
-  id: string;
-  description: string;
-  verification?: { kind: 'command'; command: string } | { kind: 'manual' };
-}
 
 export interface DeliveryProposal {
   meetingId: string;
@@ -44,16 +41,6 @@ export interface WorkOrder {
   sourceRevision: string;
 }
 
-export interface WorkReport {
-  outcome: 'completed' | 'partial' | 'blocked' | 'failed';
-  summary: string;
-  changes: Array<{ path: string; purpose: string }>;
-  tests: Array<{ name: string; status: 'passed' | 'failed' | 'skipped'; evidenceRef?: string }>;
-  artifacts: Array<{ id?: string; path?: string }>;
-  risks: string[];
-  unresolved: string[];
-}
-
 export interface VerificationEvidence {
   passed: boolean;
   checks: unknown[];
@@ -73,6 +60,23 @@ export interface DeliveryCandidate {
   review: ReviewVerdict;
 }
 
+export interface DeliveryAttempt {
+  attempt: number;
+  report: WorkReport;
+  verification?: VerificationEvidence;
+  review?: ReviewVerdict;
+  outcome:
+    | 'reported'
+    | 'worker-incomplete'
+    | 'verification-failed'
+    | 'review-failed'
+    | 'awaiting-acceptance'
+    | 'returned'
+    | 'accepted';
+  feedback?: string;
+  updatedAt: number;
+}
+
 export interface DeliveryView {
   id: string;
   meetingId: string;
@@ -82,6 +86,7 @@ export interface DeliveryView {
   workspace: string;
   attempt: number;
   candidate?: DeliveryCandidate;
+  attempts: DeliveryAttempt[];
   integration?: Record<string, unknown>;
   error?: string;
   updatedAt: number;
@@ -91,7 +96,8 @@ export type DeliveryDecision =
   | { kind: 'approve-spec'; specVersion: number }
   | { kind: 'revise-spec'; feedback: string }
   | { kind: 'accept-delivery'; candidateId: string }
-  | { kind: 'return-delivery'; candidateId: string; feedback: string }
+  | { kind: 'return-delivery'; candidateId?: string; feedback: string }
+  | { kind: 'resume-after-interruption'; mode: 'continue' | 'retry' }
   | { kind: 'cancel' };
 
 export interface DeliveryEvent {
@@ -104,7 +110,8 @@ export interface DeliveryEvent {
 }
 
 export interface DeliveryHarnessDependencies {
-  runtime: {
+  executionMode?: 'internal' | 'external';
+  runtime?: {
     execute(order: WorkOrder, signal: AbortSignal): Promise<WorkReport>;
   };
   verifier: {
@@ -124,6 +131,7 @@ type DeliveryRecord = {
   view: DeliveryView;
   events: DeliveryEvent[];
   subscribers: Set<(event: DeliveryEvent) => void>;
+  submittedAttempts: Set<number>;
   abort?: AbortController;
 };
 
@@ -138,6 +146,34 @@ export class DeliveryHarness {
   constructor(private readonly deps: DeliveryHarnessDependencies) {
     this.now = deps.now ?? Date.now;
     this.id = deps.id ?? randomUUID;
+  }
+
+  /** Restore a journaled delivery without executing it. Any state that was
+   * live at the time of the crash becomes interrupted and requires an
+   * explicit user resume decision before another Worker attempt can start. */
+  restore(input: DeliveryView): DeliveryView {
+    if (this.records.has(input.id)) return cloneView(this.records.get(input.id)!.view);
+    const view = cloneView(input);
+    if (!isTerminal(view.status)) {
+      view.status = 'interrupted';
+      view.candidate = undefined;
+      view.error = 'Meeting restarted before the delivery was accepted.';
+      view.updatedAt = this.now();
+    }
+    const record: DeliveryRecord = {
+      view,
+      events: [],
+      subscribers: new Set(),
+      submittedAttempts: new Set(view.attempts.map((attempt) => attempt.attempt)),
+    };
+    this.records.set(view.id, record);
+    this.append(record, 'delivery.status-changed', { recovered: true });
+    return cloneView(view);
+  }
+
+  snapshot(id: string): DeliveryView | undefined {
+    const record = this.records.get(id);
+    return record ? cloneView(record.view) : undefined;
   }
 
   async propose(input: DeliveryProposal): Promise<DeliveryView> {
@@ -156,9 +192,15 @@ export class DeliveryHarness {
       sourceRevision: input.sourceRevision,
       workspace: input.workspace,
       attempt: 0,
+      attempts: [],
       updatedAt: this.now(),
     };
-    const record: DeliveryRecord = { view, events: [], subscribers: new Set() };
+    const record: DeliveryRecord = {
+      view,
+      events: [],
+      subscribers: new Set(),
+      submittedAttempts: new Set(),
+    };
     this.records.set(id, record);
     this.append(record, 'delivery.proposed');
     return cloneView(view);
@@ -172,7 +214,11 @@ export class DeliveryHarness {
         if (decision.specVersion !== record.view.spec.version) throw new Error('spec version conflict');
         record.view.attempt += 1;
         this.transition(record, 'preparing-workspace');
-        void this.execute(record);
+        if ((this.deps.executionMode ?? 'internal') === 'external') {
+          this.transition(record, 'executing');
+        } else {
+          void this.execute(record);
+        }
         break;
       case 'revise-spec':
         if (record.view.status !== 'awaiting-spec-approval') throw new Error('delivery is not awaiting spec revision');
@@ -194,6 +240,13 @@ export class DeliveryHarness {
           record.view.integration = await this.deps.integrator.integrate(
             cloneView(record.view), structuredClone(record.view.candidate),
           );
+          const attempt = record.view.attempts.find(
+            (item) => item.attempt === record.view.candidate?.attempt,
+          );
+          if (attempt) {
+            attempt.outcome = 'accepted';
+            attempt.updatedAt = this.now();
+          }
           this.transition(record, 'accepted', 'delivery.accepted');
         } catch (error) {
           record.view.error = error instanceof Error ? error.message : String(error);
@@ -202,9 +255,27 @@ export class DeliveryHarness {
         }
         break;
       }
-      case 'return-delivery':
-        if (record.view.status !== 'awaiting-delivery-acceptance' || record.view.candidate?.id !== decision.candidateId) {
-          throw new Error('delivery candidate cannot be returned');
+      case 'return-delivery': {
+        if (record.view.status === 'awaiting-delivery-acceptance') {
+          if (!decision.candidateId || record.view.candidate?.id !== decision.candidateId) {
+            throw new Error('delivery candidate cannot be returned');
+          }
+          const attempt = record.view.attempts.find(
+            (item) => item.attempt === record.view.candidate?.attempt,
+          );
+          if (attempt) {
+            attempt.outcome = 'returned';
+            attempt.feedback = decision.feedback;
+            attempt.updatedAt = this.now();
+          }
+        } else if (record.view.status === 'reworking') {
+          const attempt = record.view.attempts.find((item) => item.attempt === record.view.attempt);
+          if (attempt) {
+            attempt.feedback = decision.feedback;
+            attempt.updatedAt = this.now();
+          }
+        } else {
+          throw new Error('delivery cannot be scheduled for rework');
         }
         this.transition(record, 'reworking');
         record.view.spec = {
@@ -215,7 +286,19 @@ export class DeliveryHarness {
         record.view.candidate = undefined;
         record.view.updatedAt = this.now();
         this.append(record, 'delivery.spec-revised', { specVersion: record.view.spec.version });
-        this.transition(record, 'awaiting-spec-approval');
+        break;
+      }
+      case 'resume-after-interruption':
+        if (record.view.status !== 'interrupted') {
+          throw new Error('only an interrupted delivery can be resumed');
+        }
+        record.view.candidate = undefined;
+        record.view.error = undefined;
+        record.view.updatedAt = this.now();
+        this.transition(record, 'reworking', 'delivery.status-changed', {
+          recovered: true,
+          mode: decision.mode,
+        });
         break;
       case 'cancel':
         if (isTerminal(record.view.status)) throw new Error(`cannot cancel ${record.view.status} delivery`);
@@ -227,6 +310,31 @@ export class DeliveryHarness {
   }
 
   async inspect(id: string): Promise<DeliveryView> { return cloneView(this.require(id).view); }
+
+  /**
+   * Submit a report produced by the Meeting Scheduler's already-running
+   * Worker. The Harness remains the sole owner of verification, review,
+   * acceptance and integration without spawning a second agent runtime.
+   */
+  async submitExternalReport(id: string, report: WorkReport): Promise<DeliveryView> {
+    if ((this.deps.executionMode ?? 'internal') !== 'external') {
+      throw new Error('delivery harness is not in external execution mode');
+    }
+    const record = this.require(id);
+    if (record.view.status === 'reworking') {
+      record.view.attempt += 1;
+      this.transition(record, 'executing');
+    }
+    if (record.view.status !== 'executing') {
+      throw new Error(`delivery is not accepting reports in ${record.view.status}`);
+    }
+    if (record.submittedAttempts.has(record.view.attempt)) {
+      throw new Error(`report already submitted for attempt ${record.view.attempt}`);
+    }
+    record.submittedAttempts.add(record.view.attempt);
+    await this.evaluateReport(record, report);
+    return cloneView(record.view);
+  }
 
   async *observe(id: string, cursor = 0): AsyncIterable<DeliveryEvent> {
     const record = this.require(id);
@@ -258,23 +366,10 @@ export class DeliveryHarness {
     const order = this.toWorkOrder(record.view);
     try {
       this.transition(record, 'executing');
+      if (!this.deps.runtime) throw new Error('delivery runtime is required in internal mode');
       const report = await this.deps.runtime.execute(order, controller.signal);
       if (controller.signal.aborted) return;
-      if (report.outcome !== 'completed') throw new Error(`runtime outcome: ${report.outcome}`);
-      this.transition(record, 'verifying');
-      const verification = await this.deps.verifier.verify(order, report);
-      if (!verification.passed) throw new Error(verification.error ?? 'verification failed');
-      this.transition(record, 'reviewing');
-      const review = await this.deps.reviewer.review(order, report, verification);
-      if (!review.passed) throw new Error('independent review failed');
-      record.view.candidate = {
-        id: this.id(),
-        attempt: record.view.attempt,
-        report: structuredClone(report),
-        verification: structuredClone(verification),
-        review: structuredClone(review),
-      };
-      this.transition(record, 'awaiting-delivery-acceptance');
+      await this.evaluateReport(record, report);
     } catch (error) {
       if (controller.signal.aborted || record.view.status === 'cancelled') return;
       record.view.error = error instanceof Error ? error.message : String(error);
@@ -282,6 +377,81 @@ export class DeliveryHarness {
     } finally {
       if (record.abort === controller) record.abort = undefined;
     }
+  }
+
+  private async evaluateReport(record: DeliveryRecord, report: WorkReport): Promise<void> {
+    const order = this.toWorkOrder(record.view);
+    const attempt: DeliveryAttempt = {
+      attempt: record.view.attempt,
+      report: structuredClone(report),
+      outcome: 'reported',
+      updatedAt: this.now(),
+    };
+    record.view.attempts.push(attempt);
+    if (report.status !== 'completed') {
+      record.view.error = `worker reported ${report.status}`;
+      attempt.outcome = 'worker-incomplete';
+      attempt.updatedAt = this.now();
+      this.transition(record, 'reworking', 'delivery.status-changed', {
+        reason: record.view.error,
+        report: structuredClone(report),
+      });
+      return;
+    }
+
+    this.transition(record, 'verifying');
+    let verification: VerificationEvidence;
+    try {
+      verification = await this.deps.verifier.verify(order, report);
+    } catch (error) {
+      record.view.error = error instanceof Error ? error.message : String(error);
+      this.transition(record, 'failed', 'delivery.failed', record.view.error);
+      return;
+    }
+    attempt.verification = structuredClone(verification);
+    attempt.updatedAt = this.now();
+    if (!verification.passed) {
+      record.view.error = verification.error ?? 'verification failed';
+      attempt.outcome = 'verification-failed';
+      this.transition(record, 'reworking', 'delivery.status-changed', {
+        reason: record.view.error,
+        verification: structuredClone(verification),
+      });
+      return;
+    }
+
+    this.transition(record, 'reviewing');
+    let review: ReviewVerdict;
+    try {
+      review = await this.deps.reviewer.review(order, report, verification);
+    } catch (error) {
+      record.view.error = error instanceof Error ? error.message : String(error);
+      this.transition(record, 'failed', 'delivery.failed', record.view.error);
+      return;
+    }
+    attempt.review = structuredClone(review);
+    attempt.updatedAt = this.now();
+    if (!review.passed) {
+      record.view.error = 'independent review failed';
+      attempt.outcome = 'review-failed';
+      this.transition(record, 'reworking', 'delivery.status-changed', {
+        reason: record.view.error,
+        review: structuredClone(review),
+      });
+      return;
+    }
+
+    record.view.error = undefined;
+    record.view.candidate = {
+      id: this.id(),
+      attempt: record.view.attempt,
+      report: structuredClone(report),
+      verification: structuredClone(verification),
+      review: structuredClone(review),
+    };
+    attempt.outcome = 'awaiting-acceptance';
+    attempt.updatedAt = this.now();
+    this.transition(record, 'awaiting-delivery-acceptance');
   }
 
   private toWorkOrder(view: DeliveryView): WorkOrder {

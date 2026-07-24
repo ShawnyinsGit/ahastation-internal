@@ -63,5 +63,6 @@ test('git tasks receive isolated worktrees without touching dirty files', async 
   assert.equal(workspace.kind, 'git-worktree');
   assert.notEqual(workspace.cwd, cwd);
   assert.equal(workspace.branch.includes('task-a'), true);
+  assert.match(workspace.sourceRevision, /^[0-9a-f]{40}$/);
   manager.release('task-a', true);
 });

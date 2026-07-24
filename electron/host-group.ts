@@ -46,6 +46,7 @@ import type {
 } from './orchestrator-types.js';
 import type { SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { TaskWorkspaceManager } from './task-workspace.js';
+import type { DeliveryHarness } from './delivery-harness.js';
 
 export interface HostGroupOpts {
   /** Unique identifier for this host group. Default = 'default'. */
@@ -73,6 +74,11 @@ export interface HostGroupOpts {
   getSpeechFilterMode: () => 'strict' | 'off';
   isCoordinator: () => boolean;
   workspaceManager?: TaskWorkspaceManager;
+  meetingId: string;
+  deliveryHarness: DeliveryHarness;
+  deliveryArtifactRoot?: string;
+  flushEvents?: () => Promise<void>;
+  initialPlanVersion?: number;
 }
 
 export class HostGroup {
@@ -137,6 +143,12 @@ export class HostGroup {
       sessionFactory: this.sessionFactory,
       resolveSessionFactory: opts.resolveWorkerSessionFactory,
       workspaceManager: opts.workspaceManager,
+      meetingId: opts.meetingId,
+      defaultBackendId: opts.backendId,
+      deliveryHarness: opts.deliveryHarness,
+      deliveryArtifactRoot: opts.deliveryArtifactRoot,
+      flushEvents: opts.flushEvents,
+      initialPlanVersion: opts.initialPlanVersion,
       buildWorkerMcp: (workerId) => buildWorkerMcp(this.bridge, workerId, this.cwd),
       buildComputerUseMcp: process.platform === 'darwin'
         ? (workerId) => buildComputerUseMcp(cuBridge, workerId)

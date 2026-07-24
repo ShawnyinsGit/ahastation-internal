@@ -24,6 +24,12 @@ export class MeetingRepository {
     return join(app.getPath('userData'), 'meetings', this.meetingId);
   }
 
+  /** Immutable delivery evidence lives beside the journal, never in a task
+   * worktree or the user's project checkout. */
+  deliveryArtifactRoot(): string {
+    return join(this.root(), 'deliveries');
+  }
+
   private eventPath(): string {
     return join(this.root(), 'events.jsonl');
   }
@@ -91,7 +97,11 @@ export class MeetingRepository {
           const tasks = Array.isArray(parsed.state.tasks)
             ? parsed.state.tasks.map((task: Record<string, unknown>) => ({
                 ...task,
-                status: task.status === 'running' ? 'interrupted' : task.status,
+                status: (
+                  task.status === 'accepted'
+                  || task.status === 'done'
+                  || task.status === 'failed'
+                ) ? task.status : 'interrupted',
               }))
             : [];
           out.push({

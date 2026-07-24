@@ -1,18 +1,54 @@
 import { z } from 'zod';
-import { planMeetingTaskSchema } from './meeting-tools.js';
+import { decisionOptionSchema, planMeetingTaskSchema } from './meeting-tools.js';
 
 const boundedText = z.string().trim().min(1).max(100_000);
 const actorId = z.string().min(1).max(64).regex(/^[a-zA-Z0-9._-]+$/);
 
+export const planRevisionOperationSchema = z.discriminatedUnion('kind', [
+  z.object({
+    kind: z.literal('add-task'),
+    task: planMeetingTaskSchema,
+  }).strict(),
+  z.object({
+    kind: z.literal('cancel-pending-task'),
+    taskId: actorId,
+  }).strict(),
+  z.object({
+    kind: z.literal('steer-running-task'),
+    taskId: actorId,
+    addendum: boundedText,
+  }).strict(),
+]);
+
 export const meetingCommandSchema = z.discriminatedUnion('kind', [
-  z.object({ kind: z.literal('propose-plan'), tasks: z.array(planMeetingTaskSchema).min(1).max(100) }),
-  z.object({ kind: z.literal('ask-host'), hostId: actorId, question: boundedText }),
-  z.object({ kind: z.literal('broadcast-hosts'), question: boundedText }),
-  z.object({ kind: z.literal('steer-worker'), workerId: actorId, addendum: boundedText }),
-  z.object({ kind: z.literal('speak'), text: boundedText }),
+  z.object({ kind: z.literal('propose-plan'), tasks: z.array(planMeetingTaskSchema).min(1).max(100) }).strict(),
+  z.object({
+    kind: z.literal('revise-plan'),
+    expectedPlanVersion: z.number().int().nonnegative(),
+    operations: z.array(planRevisionOperationSchema).min(1).max(100),
+    reason: z.string().trim().min(1).max(20_000),
+  }).strict(),
+  z.object({ kind: z.literal('ask-host'), hostId: actorId, question: boundedText }).strict(),
+  z.object({ kind: z.literal('broadcast-hosts'), question: boundedText }).strict(),
+  z.object({ kind: z.literal('steer-worker'), workerId: actorId, addendum: boundedText }).strict(),
+  z.object({
+    kind: z.literal('request-decision'),
+    question: boundedText,
+    context: z.string().max(100_000).optional(),
+    options: z.array(decisionOptionSchema).min(2).max(20),
+    deadlineMs: z.number().int().positive(),
+  }).strict(),
+  z.object({
+    kind: z.literal('save-memory'),
+    category: z.enum(['point', 'decision', 'todo', 'fact']),
+    content: boundedText,
+    tags: z.array(z.string().trim().min(1).max(100)).max(50),
+  }).strict(),
+  z.object({ kind: z.literal('speak'), text: boundedText }).strict(),
 ]);
 
 export type MeetingCommand = z.infer<typeof meetingCommandSchema>;
+export type PlanRevisionOperation = z.infer<typeof planRevisionOperationSchema>;
 
 export type MeetingCommandActor = {
   hostId: string;
@@ -35,7 +71,10 @@ export function authorizeMeetingCommand(
   }
   const command = parsed.data;
   const coordinatorOnly = command.kind === 'propose-plan'
+    || command.kind === 'revise-plan'
     || command.kind === 'steer-worker'
+    || command.kind === 'request-decision'
+    || command.kind === 'save-memory'
     || command.kind === 'speak';
   if (coordinatorOnly && actor.role !== 'coordinator') {
     return { ok: false, code: 'forbidden', error: `${command.kind} requires the coordinator role` };

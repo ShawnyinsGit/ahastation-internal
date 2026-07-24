@@ -7,6 +7,7 @@ export interface TaskWorkspace {
   kind: 'git-worktree' | 'shared-locked';
   cwd: string;
   branch?: string;
+  sourceRevision: string;
   lockKeys: string[];
 }
 
@@ -51,7 +52,19 @@ export class TaskWorkspaceManager {
           timeout: 30_000,
         });
       }
-      const workspace: TaskWorkspace = { kind: 'git-worktree', cwd, branch, lockKeys: [] };
+      const sourceRevision = execFileSync('git', ['rev-parse', 'HEAD'], {
+        cwd: this.baseCwd,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+        timeout: 5_000,
+      }).trim();
+      const workspace: TaskWorkspace = {
+        kind: 'git-worktree',
+        cwd,
+        branch,
+        sourceRevision,
+        lockKeys: [],
+      };
       this.workspaces.set(taskId, workspace);
       return workspace;
     }
@@ -62,7 +75,12 @@ export class TaskWorkspaceManager {
       if (owner && owner !== taskId) throw new Error(`workspace path is locked by ${owner}: ${key}`);
     }
     for (const key of keys) this.locks.set(key, taskId);
-    const workspace: TaskWorkspace = { kind: 'shared-locked', cwd: this.baseCwd, lockKeys: keys };
+    const workspace: TaskWorkspace = {
+      kind: 'shared-locked',
+      cwd: this.baseCwd,
+      sourceRevision: this.currentRevision(),
+      lockKeys: keys,
+    };
     this.workspaces.set(taskId, workspace);
     return workspace;
   }
@@ -96,6 +114,19 @@ export class TaskWorkspaceManager {
         timeout: 5_000,
       }).trim() === 'true';
     } catch { return false; }
+  }
+
+  private currentRevision(): string {
+    try {
+      return execFileSync('git', ['rev-parse', 'HEAD'], {
+        cwd: this.baseCwd,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+        timeout: 5_000,
+      }).trim();
+    } catch {
+      return 'non-git';
+    }
   }
 
   private normalizedLockKey(path: string): string {
