@@ -25,11 +25,13 @@ export function normalizePlanDraft(
     contextSelection: task.contextSelection ? {
       ...task.contextSelection,
       messageIds: [...task.contextSelection.messageIds],
+      decisionIds: [...(task.contextSelection.decisionIds ?? [])],
       dependencyTaskIds: [...task.contextSelection.dependencyTaskIds],
       attachmentIds: [...task.contextSelection.attachmentIds],
     } : {
       mode: contextMode,
       messageIds: [],
+      decisionIds: [],
       dependencyTaskIds: [],
       attachmentIds: [],
     },

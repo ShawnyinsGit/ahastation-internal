@@ -27,6 +27,7 @@ function currentTask(overrides = {}) {
     contextSelection: {
       mode: 'meeting-summary',
       messageIds: [],
+      decisionIds: [],
       dependencyTaskIds: [],
       attachmentIds: [],
     },

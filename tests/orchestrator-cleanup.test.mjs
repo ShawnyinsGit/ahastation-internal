@@ -175,6 +175,7 @@ test('worker receives its first task only after backend readiness resolves', asy
 
   releaseReady();
   await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(sessions[0].inputs[0]?.text, 'do work');
+  assert.match(sessions[0].inputs[0]?.text ?? '', /^## Task\ndo work/);
+  assert.match(sessions[0].inputs[0]?.text ?? '', /## Frozen visible context/);
   await orch.end();
 });

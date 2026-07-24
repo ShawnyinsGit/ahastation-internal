@@ -47,6 +47,11 @@ import type {
 import type { SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { TaskWorkspaceManager } from './task-workspace.js';
 import type { DeliveryHarness } from './delivery-harness.js';
+import type {
+  AuthorizedMeetingContextSource,
+  ContextSelection,
+} from './task-context.js';
+import type { ContextPackage } from './task-collaboration.js';
 
 export interface HostGroupOpts {
   /** Unique identifier for this host group. Default = 'default'. */
@@ -79,6 +84,11 @@ export interface HostGroupOpts {
   deliveryArtifactRoot?: string;
   flushEvents?: () => Promise<void>;
   initialPlanVersion?: number;
+  getAuthorizedTaskContextSource: (
+    taskId: string,
+    selection: ContextSelection,
+  ) => Promise<AuthorizedMeetingContextSource>;
+  persistContextPackage: (contextPackage: ContextPackage) => Promise<void>;
 }
 
 export class HostGroup {
@@ -105,6 +115,7 @@ export class HostGroup {
 
   /** Talker transcript for recap. Accumulates user+assistant text turns. */
   private talkerTranscript: TalkerTurn[] = [];
+  private talkerTurnSeq = 0;
 
   constructor(opts: HostGroupOpts) {
     this.id = opts.id;
@@ -149,6 +160,9 @@ export class HostGroup {
       deliveryArtifactRoot: opts.deliveryArtifactRoot,
       flushEvents: opts.flushEvents,
       initialPlanVersion: opts.initialPlanVersion,
+      getAuthorizedTaskContextSource: opts.getAuthorizedTaskContextSource,
+      persistContextPackage: opts.persistContextPackage,
+      contextCompilerRequired: true,
       buildWorkerMcp: (workerId) => buildWorkerMcp(this.bridge, workerId, this.cwd),
       buildComputerUseMcp: process.platform === 'darwin'
         ? (workerId) => buildComputerUseMcp(cuBridge, workerId)
@@ -353,8 +367,13 @@ export class HostGroup {
     }
   }
 
-  private appendTurn(turn: TalkerTurn) {
-    this.talkerTranscript = [...this.talkerTranscript, turn].slice(
+  private appendTurn(turn: Pick<TalkerTurn, 'role' | 'text'>) {
+    this.talkerTurnSeq += 1;
+    this.talkerTranscript = [...this.talkerTranscript, {
+      ...turn,
+      id: `${this.id}:turn:${this.talkerTurnSeq}`,
+      timestamp: Date.now(),
+    }].slice(
       -TALKER_TRANSCRIPT_MAX_ENTRIES,
     );
   }

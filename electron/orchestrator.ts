@@ -56,6 +56,7 @@ import { BrowserTabManager } from './browser-tab-manager.js';
 import { startRecap, type RecapHandle } from './recap.js';
 import { type SessionFactory, type WorkerScheduler } from './worker-scheduler.js';
 import { ensureDir, maybeAppendGitignore } from './attachments/workspace.js';
+import { listAuthorizedAssetReferences } from './attachments/assets.js';
 import { promises as fsp } from 'node:fs';
 import path from 'node:path';
 import { HostGroup } from './host-group.js';
@@ -82,6 +83,11 @@ import type {
   WorkerStatusKind,
 } from './orchestrator-types.js';
 import type { SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
+import type {
+  AuthorizedMeetingContextSource,
+  ContextSelection,
+} from './task-context.js';
+import type { ContextPackage } from './task-collaboration.js';
 
 export const MAX_HOSTS = 3;
 
@@ -166,6 +172,7 @@ export class Orchestrator implements OrchestratorBridge {
   // in end().
   private decisions: DecisionWatcher = new DecisionWatcher();
   private decisionMeta: Map<string, { question: string; path: string }> = new Map();
+  private resolvedDecisionContext = new Map<string, { id: string; summary: string }>();
 
   // Cross-host messaging bus. Each HostGroup subscribes on creation; the
   // orchestrator publishes when cross-host events occur (file writes, decision
@@ -367,6 +374,10 @@ export class Orchestrator implements OrchestratorBridge {
       deliveryArtifactRoot: this.repository.deliveryArtifactRoot(),
       flushEvents: () => this.repository.flush(),
       initialPlanVersion: id === DEFAULT_HOST_ID ? this.recoveredPlanVersion : 0,
+      getAuthorizedTaskContextSource: (taskId, selection) =>
+        this.getAuthorizedTaskContextSource(taskId, selection),
+      persistContextPackage: (contextPackage) =>
+        this.persistContextPackage(contextPackage),
     });
     this.hostGroups.set(id, hg);
     if (id === DEFAULT_HOST_ID) {
@@ -1144,6 +1155,36 @@ export class Orchestrator implements OrchestratorBridge {
     };
   }
 
+  private async getAuthorizedTaskContextSource(
+    taskId: string,
+    selection: ContextSelection,
+  ): Promise<AuthorizedMeetingContextSource> {
+    const messages = Array.from(this.hostGroups.values())
+      .flatMap((host) => host.getTranscript())
+      .sort((left, right) => left.timestamp - right.timestamp || left.id.localeCompare(right.id));
+    const meetingSummary = messages
+      .slice(-40)
+      .map((message) => `${message.role === 'user' ? 'User' : 'Assistant'}: ${message.text}`)
+      .join('\n');
+    return {
+      messages,
+      meetingSummary,
+      decisions: Array.from(this.resolvedDecisionContext.values())
+        .sort((left, right) => left.id.localeCompare(right.id)),
+      dependencyReports: this.meetingScheduler.getAcceptedDependencyReports(taskId),
+      attachments: await listAuthorizedAssetReferences(this.cwd, selection.attachmentIds),
+    };
+  }
+
+  private async persistContextPackage(contextPackage: ContextPackage): Promise<void> {
+    await this.repository.append('context-package-frozen', {
+      taskId: contextPackage.taskId,
+      attempt: contextPackage.attempt,
+      package: contextPackage,
+    });
+    await this.repository.flush();
+  }
+
   async saveMemory(input: { category: MemoryCategory; content: string; tags: string[] }): Promise<SaveMemoryResult> {
     if (this.saveMemoryCallsThisSession >= SAVE_MEMORY_PER_SESSION_LIMIT) {
       return { ok: false, error: `rate limit reached (${SAVE_MEMORY_PER_SESSION_LIMIT}/session)` };
@@ -1277,6 +1318,10 @@ export class Orchestrator implements OrchestratorBridge {
       },
     });
     const condensed = r.conclusion.length > 400 ? `${r.conclusion.slice(0, 398)}…` : r.conclusion;
+    this.resolvedDecisionContext.set(r.id, {
+      id: r.id,
+      summary: question ? `${question}: ${condensed}` : condensed,
+    });
     this.defaultHost().getHost()?.sendUserText(
       `(decision update) 用户对"${question}"给出了结论：${condensed}\n\n如果这跟你之前推进的方向不一致，请马上调整：可以 delegate_to 现有 worker 让他改，或开新 worker 走另一条路；并简短告诉用户你怎么调整。`,
       'normal',

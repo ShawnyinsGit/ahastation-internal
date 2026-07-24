@@ -36,6 +36,7 @@ function cloneTasks(tasks: PlanMeetingTaskInput[], backends: BackendInfo[]): Pla
     contextSelection: task.contextSelection ? {
       ...task.contextSelection,
       messageIds: [...task.contextSelection.messageIds],
+      decisionIds: [...task.contextSelection.decisionIds],
       dependencyTaskIds: [...task.contextSelection.dependencyTaskIds],
       attachmentIds: [...task.contextSelection.attachmentIds],
     } : undefined,

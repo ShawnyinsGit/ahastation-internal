@@ -135,8 +135,10 @@ export interface OrchestratorEvent {
 }
 
 export interface TalkerTurn {
+  id: string;
   role: 'user' | 'assistant';
   text: string;
+  timestamp: number;
 }
 
 export interface WorkerLiveStatus {
@@ -167,6 +169,8 @@ export interface WorkerHandle {
   contextSelection?: PlanMeetingTask['contextSelection'];
   workspaceMode?: PlanMeetingTask['workspaceMode'];
   authorityRequest?: PlanMeetingTask['authorityRequest'];
+  contextPackage?: import('./task-collaboration.js').ContextPackage;
+  contextPackageHash?: string;
   acceptanceCriteria?: import('./worker-protocol.js').AcceptanceCriterion[];
   status: WorkerStatusKind;
   session: BackendSession | null;

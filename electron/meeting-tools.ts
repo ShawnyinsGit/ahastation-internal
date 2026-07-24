@@ -30,6 +30,7 @@ export const MEETING_TOOL_NAMES: ReadonlySet<string> = new Set<string>(
 const taskContextSelectionSchema = z.object({
   mode: taskExecutionProfileSchema.shape.contextMode,
   messageIds: z.array(z.string().trim().min(1).max(500)).max(500).default([]),
+  decisionIds: z.array(z.string().trim().min(1).max(500)).max(100).default([]),
   dependencyTaskIds: z.array(z.string().trim().min(1).max(500)).max(100).default([]),
   attachmentIds: z.array(z.string().trim().min(1).max(500)).max(100).default([]),
 }).strict();
@@ -153,6 +154,7 @@ export function normalizePlanMeetingTask(
     contextSelection: legacy.contextSelection ?? {
       mode: contextMode,
       messageIds: [],
+      decisionIds: [],
       dependencyTaskIds: [],
       attachmentIds: [],
     },

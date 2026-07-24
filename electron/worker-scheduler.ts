@@ -45,6 +45,19 @@ import type { SteerResult } from './meeting-mcp.js';
 import type { AutoApproveScope } from './auto-approve-policy.js';
 import type { TaskWorkspaceManager } from './task-workspace.js';
 import { snapshotDeliveryFiles } from './delivery-snapshot.js';
+import {
+  compileContextPackage,
+  freezeContextPackage,
+  hashVisibleContextValue,
+  renderContextPackageForWorker,
+  verifyContextPackageIntegrity,
+  type AuthorizedMeetingContextSource,
+  type ContextSelection,
+} from './task-context.js';
+import {
+  contextPackageSchema,
+  type ContextPackage,
+} from './task-collaboration.js';
 import type { DeliveryHarness, DeliveryView } from './delivery-harness.js';
 import {
   parseWorkerAdapterSignal,
@@ -124,6 +137,16 @@ export interface WorkerSchedulerOpts {
   flushEvents?: () => Promise<void>;
   /** Durable structural plan version restored with the meeting snapshot. */
   initialPlanVersion?: number;
+  /** Orchestrator-owned, read-only source of user-visible Meeting context. */
+  getAuthorizedTaskContextSource?: (
+    taskId: string,
+    selection: ContextSelection,
+  ) => Promise<AuthorizedMeetingContextSource>;
+  /** Appends and flushes context-package-frozen before side effects. */
+  persistContextPackage?: (contextPackage: ContextPackage) => Promise<void>;
+  /** Production HostGroups require context compilation; narrow unit tests may
+   * omit the source seam to exercise legacy Scheduler behavior. */
+  contextCompilerRequired?: boolean;
 }
 
 const COMPUTER_USE_WORKER_PROMPT = `
@@ -244,6 +267,12 @@ export class WorkerScheduler {
     deps: string[];
     executorBackendId?: string;
     writePaths?: string[];
+    executionProfile?: PlanMeetingTask['executionProfile'];
+    contextSelection?: PlanMeetingTask['contextSelection'];
+    workspaceMode?: PlanMeetingTask['workspaceMode'];
+    authorityRequest?: PlanMeetingTask['authorityRequest'];
+    contextPackage?: ContextPackage;
+    contextPackageHash?: string;
     acceptanceCriteria?: AcceptanceCriterion[];
     workspace?: { kind: string; cwd: string; branch?: string };
     deliveryId?: string;
@@ -263,6 +292,8 @@ export class WorkerScheduler {
       contextSelection: handle.contextSelection ? structuredClone(handle.contextSelection) : undefined,
       workspaceMode: handle.workspaceMode,
       authorityRequest: handle.authorityRequest ? structuredClone(handle.authorityRequest) : undefined,
+      contextPackage: handle.contextPackage ? structuredClone(handle.contextPackage) : undefined,
+      contextPackageHash: handle.contextPackageHash,
       acceptanceCriteria: handle.acceptanceCriteria
         ? structuredClone(handle.acceptanceCriteria)
         : undefined,
@@ -280,6 +311,24 @@ export class WorkerScheduler {
 
   getPlanVersion(): number {
     return this.planVersion;
+  }
+
+  getAcceptedDependencyReports(taskId: string): Array<{
+    taskId: string;
+    reportHash: string;
+    summary: string;
+  }> {
+    const task = this.workers.get(taskId);
+    if (!task) return [];
+    return task.deps.flatMap((dependencyId) => {
+      const dependency = this.workers.get(dependencyId);
+      if (!dependency || dependency.status !== 'accepted' || !dependency.report) return [];
+      return [{
+        taskId: dependencyId,
+        reportHash: hashVisibleContextValue(dependency.report),
+        summary: dependency.report.summary,
+      }];
+    });
   }
 
   /** Hydrate recovered task shells and delivery evidence without spawning any
@@ -328,6 +377,16 @@ export class WorkerScheduler {
         acceptanceCriteria: normalized.acceptanceCriteria,
       });
       const handle = this.workers.get(id)!;
+      const recoveredContext = contextPackageSchema.safeParse(task.contextPackage);
+      if (
+        recoveredContext.success
+        && recoveredContext.data.taskId === id
+        && recoveredContext.data.packageHash === task.contextPackageHash
+        && verifyContextPackageIntegrity(recoveredContext.data)
+      ) {
+        handle.contextPackage = freezeContextPackage(recoveredContext.data);
+        handle.contextPackageHash = recoveredContext.data.packageHash;
+      }
       const rawStatus = typeof task.status === 'string' ? task.status : 'interrupted';
       handle.status = (
         rawStatus === 'accepted' || rawStatus === 'failed' || rawStatus === 'done'
@@ -1303,6 +1362,8 @@ export class WorkerScheduler {
       contextSelection: spec.contextSelection,
       workspaceMode: spec.workspaceMode,
       authorityRequest: spec.authorityRequest,
+      contextPackage: undefined,
+      contextPackageHash: undefined,
       acceptanceCriteria: spec.acceptanceCriteria,
       status: 'pending',
       session: null,
@@ -1443,25 +1504,53 @@ export class WorkerScheduler {
   }
 
   private async spawnWorker(handle: WorkerHandle): Promise<void> {
-    const workerMcp = this.opts.buildWorkerMcp(handle.id);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const mcpServers: Record<string, any> = { 'meeting-worker': workerMcp as any };
-    let promptAppend = WORKER_PROMPT;
-    if (handle.backendId === 'claude-code') promptAppend += CLAUDE_WORKER_PROMPT_SUFFIX;
-
-    if (handle.specialty === 'computer-use' && this.opts.buildComputerUseMcp) {
-      const cuMcp = this.opts.buildComputerUseMcp(handle.id);
-      mcpServers['computer-use'] = cuMcp as any;
-      promptAppend += COMPUTER_USE_WORKER_PROMPT;
-    }
-
-    // Browser MCP is available to ALL workers (not just a specialty)
-    if (this.opts.buildBrowserMcp) {
-      const browserMcp = this.opts.buildBrowserMcp(handle.id);
-      mcpServers['browser'] = browserMcp as any;
-    }
-
     try {
+      let firstMessage = handle.prompt;
+      if (handle.contextSelection && !handle.contextPackage) {
+        const getSource = this.opts.getAuthorizedTaskContextSource;
+        const persist = this.opts.persistContextPackage;
+        if (!getSource || !persist) {
+          if (this.opts.contextCompilerRequired) {
+            throw new Error('authorized Context Package compiler is unavailable');
+          }
+        } else {
+          const source = await getSource(handle.id, handle.contextSelection);
+          const contextPackage = compileContextPackage({
+            taskId: handle.id,
+            attempt: handle.attempt,
+            selection: handle.contextSelection,
+            source,
+            limits: {
+              maxBytes: 512_000,
+              maxEstimatedTokens: 128_000,
+            },
+          });
+          await persist(contextPackage);
+          handle.contextPackage = contextPackage;
+          handle.contextPackageHash = contextPackage.packageHash;
+        }
+      }
+      if (handle.contextPackage) {
+        firstMessage = renderContextPackageForWorker(handle.prompt, handle.contextPackage);
+      }
+
+      const workerMcp = this.opts.buildWorkerMcp(handle.id);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const mcpServers: Record<string, any> = { 'meeting-worker': workerMcp as any };
+      let promptAppend = WORKER_PROMPT;
+      if (handle.backendId === 'claude-code') promptAppend += CLAUDE_WORKER_PROMPT_SUFFIX;
+
+      if (handle.specialty === 'computer-use' && this.opts.buildComputerUseMcp) {
+        const cuMcp = this.opts.buildComputerUseMcp(handle.id);
+        mcpServers['computer-use'] = cuMcp as any;
+        promptAppend += COMPUTER_USE_WORKER_PROMPT;
+      }
+
+      if (this.opts.buildBrowserMcp) {
+        const browserMcp = this.opts.buildBrowserMcp(handle.id);
+        mcpServers['browser'] = browserMcp as any;
+      }
+
       handle.workspace = this.opts.workspaceManager?.prepare(handle.id, handle.writePaths) ?? null;
       const workerCwd = handle.workspace?.cwd ?? this.opts.cwd;
       if (this.opts.deliveryHarness && !handle.deliveryId) {
@@ -1525,7 +1614,7 @@ export class WorkerScheduler {
       const peerLine = peers.length > 0
         ? `\n\n（同事 worker 也在跑：${peers.map((p) => `${p.id}「${p.title}」`).join('、')}。注意可能改到同一份代码。）`
         : '';
-      session.sendUserText(handle.prompt + peerLine);
+      session.sendUserText(handle.contextPackage ? firstMessage : handle.prompt + peerLine);
 
       this.opts.emit({
         source: 'talker',
@@ -1541,7 +1630,10 @@ export class WorkerScheduler {
     } catch (err) {
       // auth-required/ended may have already terminalized this worker while the
       // awaited readiness promise was rejecting. Do not emit/cascade twice.
-      if (handle.status !== 'running' || handle.session === null) return;
+      if (
+        handle.session === null
+        && ['accepted', 'failed', 'interrupted', 'done'].includes(handle.status)
+      ) return;
       // B2: anything throwing between sessionFactory and the first
       // sendUserText would otherwise strand the handle: status='pending'
       // (factory threw — and since spawnReadyWorkers retries on pending,

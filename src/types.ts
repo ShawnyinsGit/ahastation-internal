@@ -1084,6 +1084,7 @@ export type TaskWorkspaceMode = 'read-only' | 'git-worktree' | 'shared-locked';
 export interface TaskContextSelection {
   mode: TaskExecutionProfile['contextMode'];
   messageIds: string[];
+  decisionIds: string[];
   dependencyTaskIds: string[];
   attachmentIds: string[];
 }
