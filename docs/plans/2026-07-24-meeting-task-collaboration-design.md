@@ -12,14 +12,20 @@ Meeting. A single Claude Code Coordinator owns planning, task communication,
 review, and integration decisions. Claude and Codex Workers execute tasks in
 isolated contexts and worktrees. OpenCode and Kimi use the same contracts
 behind experimental capability gates until their real runtime matrices pass.
+Every attempt receives one frozen, user-inspectable Context Package compiled
+from authorized Meeting facts.
 
 This design extends the existing `WorkerScheduler`, Worker protocol,
 `DeliveryHarness`, Meeting journal, worktree manager, and Task Rail. It does
 not create a second scheduler or a separate sidebar task product.
 
 The user approves the plan and its bounded authority grant once. The
-Coordinator can then run, steer, review, rework, accept, and integrate tasks
-within that grant. High-risk operations always require the user.
+Coordinator can then run, steer, review, request rework, and approve reviewed
+candidates for staged integration within that grant. High-risk operations
+always require the user.
+Task integrations are verified on a Meeting-owned integration branch before
+the user's base branch is advanced. The user accepts or requests rework on one
+final Meeting delivery.
 
 ## 2. Confirmed product decisions
 
@@ -36,15 +42,15 @@ within that grant. High-risk operations always require the user.
 | Context | Coordinator chooses scope; user can inspect the frozen package |
 | Permission | Coordinator auto-approves only within an approved authority grant |
 | High risk | Always requires the user |
-| Delivery acceptance | Coordinator automatically accepts passing tasks |
-| User acceptance | User accepts the final Meeting result, not every task |
-| Integration | Serialized queue with exact reviewed-commit cherry-picks |
+| Delivery acceptance | Coordinator approves complete review; Integration Queue accepts only after verified publication |
+| User acceptance | User accepts one final Meeting delivery; rejection creates a versioned rework plan |
+| Integration | Serialized queue stages exact reviewed commits on a Meeting integration branch and publishes only verified state |
 | Rework | Continue within budget; pause on budget or non-convergence |
 | Recovery | Read-only work may resume; side-effecting work requires confirmation |
 | Review | Coordinator reviews the complete diff through durable chunks |
 | Plan updates | Versioned operations with optimistic concurrency |
 | Persistence | Existing append-only Meeting journal plus snapshots |
-| Renderer sync | Typed IPC snapshot plus `afterSeq` replay |
+| Renderer sync | Typed IPC snapshot, bounded `afterSeq` replay, and task-scoped live subscription |
 | First stable Workers | Claude and Codex |
 
 ## 3. Requirements
@@ -62,15 +68,21 @@ within that grant. High-risk operations always require the user.
 6. A valid `WorkReport` is the only Worker completion signal.
 7. Deterministic verification runs before Coordinator review.
 8. The Coordinator reviews every chunk of the frozen diff.
-9. Passing tasks enter a serialized integration queue.
-10. A dependency is released only after integration succeeds and the
-    `accepted` event is durable.
-11. The user reviews one final Meeting delivery.
+9. Passing tasks enter a serialized Meeting integration queue.
+10. Reviewed commits and post-integration checks run on a Meeting-owned
+    integration branch before the user's base branch changes.
+11. A dependency is released only after verified integration is durably
+    accepted.
+12. The final Meeting delivery aggregates accepted task evidence, changed
+    files, verification, risks, and unresolved items.
+13. The user either accepts that final delivery or creates a versioned rework
+    plan; final rejection never performs an implicit destructive rollback.
 
 ### 3.2 Non-functional requirements
 
 - Local-first: no service is required beyond the selected CLI Backends.
-- Recoverable: crashes lose neither instructions nor accepted evidence.
+- Recoverable: crashes lose neither instructions nor accepted evidence; a
+  partially staged integration never becomes a published base-branch update.
 - Fail-closed: missing authority, workspace facts, report identity, review
   coverage, or integration provenance cannot widen access.
 - Auditable: requested and effective Backend settings remain visible.
@@ -112,6 +124,8 @@ Meeting UI
        ├─ Authority projection
        ├─ Workspace allocation
        └─ Integration Queue
+            ├─ Meeting integration worktree/branch
+            └─ compare-and-publish gate
             │
             v
        Backend Adapter
@@ -124,10 +138,13 @@ Meeting UI
        WorkReport → Verifier → Coordinator chunk review
             │
             v
-       reviewed commit → exact cherry-pick → integration verification
+       reviewed commit → staged cherry-pick → integration verification
             │
             v
-       durable accepted event → release dependent tasks
+       atomic base publish → durable accepted event → release dependents
+            │
+            v
+       Final Meeting Delivery → user accept or versioned rework plan
 ```
 
 ## 6. Ownership
@@ -142,7 +159,7 @@ The Coordinator may:
 - explain permission requests;
 - review complete diffs;
 - request rework;
-- accept tasks and enqueue integration.
+- approve a completely reviewed candidate for the Integration Queue.
 
 The Coordinator may not:
 
@@ -160,14 +177,17 @@ recovery, and dependency release.
 
 ### Backend Adapter
 
-An Adapter compiles a provider-neutral task profile, creates a session, maps
-native progress into canonical events, implements interrupt/resume when
-supported, and emits a validated `WorkReport`.
+An Adapter compiles a provider-neutral task profile, normalizes native
+permission requests, creates a session, maps native progress into canonical
+events, implements interrupt/resume when supported, and emits a validated
+`WorkReport`.
 
 ### Integration Queue
 
 The queue is the only component allowed to update the base branch. It
-serializes accepted candidates and cherry-picks the exact reviewed commit.
+serializes reviewed candidates, cherry-picks exact commits into a
+Meeting-owned integration worktree, verifies the staged result, and publishes
+only when the user base is clean and still at the expected revision.
 
 ## 7. Domain model
 
@@ -239,6 +259,31 @@ and unauthorized attachments.
 Later context is added as mailbox messages. It never rewrites the frozen
 initial package.
 
+```ts
+interface ContextPackage {
+  schemaVersion: 1;
+  taskId: string;
+  attempt: number;
+  mode:
+    | 'minimal'
+    | 'meeting-summary'
+    | 'selected-history'
+    | 'full-visible-history';
+  messages: Array<{ id: string; role: 'user' | 'assistant'; text: string }>;
+  decisions: Array<{ id: string; summary: string }>;
+  dependencyReports: Array<{ taskId: string; reportHash: string; summary: string }>;
+  attachments: Array<{ id: string; name: string; contentHash: string }>;
+  byteLength: number;
+  packageHash: string;
+}
+```
+
+The compiler resolves identifiers against the current Meeting, checks
+attachment authorization, applies byte/token bounds, redacts forbidden
+metadata, freezes the result, and appends `context-package-frozen` before any
+workspace or Backend session is created. A selection is not a package until
+this compilation succeeds.
+
 ### 7.4 Authority grant
 
 ```ts
@@ -247,16 +292,45 @@ interface TaskAuthorityGrant {
   workspaceRoot: string;
   writePaths: string[];
   allowedToolKinds: string[];
+  allowedWorkingDirectories: string[];
   allowedCommands: string[][];
+  allowedEnvironmentKeys: string[];
+  maxCommandTimeoutMs: number;
   allowedNetworkHosts: string[];
   expiresAt: number;
-  maxAttempts: number;
   grantHash: string;
 }
 ```
 
 The user approves the grant with the plan. The Coordinator may approve only
 operations that are a subset of this grant.
+
+Native Backend permission requests compile into one canonical request before
+policy evaluation:
+
+```ts
+interface CanonicalExecutionRequest {
+  schemaVersion: 1;
+  taskId: string;
+  backendId: string;
+  kind: 'read' | 'write' | 'command' | 'network' | 'external';
+  workspaceRoot: string;
+  cwd?: string;
+  executable?: string;
+  argv?: string[];
+  writePaths: string[];
+  networkHosts: string[];
+  environmentKeys: string[];
+  sideEffects: string[];
+  timeoutMs?: number;
+  nativeRequestId: string;
+}
+```
+
+The Adapter, not the Coordinator prompt, owns this compilation. Shell-wrapped
+commands are compared as their exact executable plus argv; they are never
+joined into a shell string. Environment values and native credential-bearing
+payloads are never journaled.
 
 ### 7.5 Attempt record
 
@@ -266,6 +340,22 @@ message range, report, verification, review coverage, candidate commit,
 failure fingerprint, cost, and duration.
 
 Historical attempts are immutable.
+
+Budget is a separate user-approved execution constraint, not part of the
+permission grant:
+
+```ts
+interface TaskBudget {
+  schemaVersion: 1;
+  maxAttempts: number;
+  maxTotalTokens: number;
+  maxTotalDurationMs: number;
+  maxStagnantAttempts: number;
+}
+```
+
+Increasing a budget requires a versioned user decision. It never widens file,
+command, network, or external-service authority.
 
 ## 8. Task state machine
 
@@ -292,6 +382,13 @@ recoverable branches:
 Only `accepted` releases a dependency. `accepted` is written after the exact
 candidate commit is integrated, post-integration verification passes, and the
 journal flush completes.
+
+Schema evolution is additive before it is subtractive. Existing
+`reviewing`, `awaiting-acceptance`, and `done` values remain readable during
+the migration window. A versioned projection maps them to the new lifecycle
+without rewriting historical events. Production types may remove the legacy
+values only after Scheduler, renderer, fixture, and recovery consumers have
+all migrated and replay tests cover both schemas.
 
 ## 9. Task Mailbox
 
@@ -349,6 +446,9 @@ For non-Git or shared mode:
 
 Failed and conflicting worktrees remain recoverable. Successful worktrees are
 removed only after integration and durable acceptance.
+The Meeting integration worktree persists across the accepted task chain and
+is removed only after final Meeting acceptance is durable and the published
+base contains its head.
 
 ## 11. Permission model
 
@@ -390,6 +490,13 @@ Every chunk has a content hash and review result. Changing the candidate
 invalidates affected review results. The Coordinator cannot accept incomplete
 coverage.
 
+Review is driven by a durable `CoordinatorReviewSession`, not by one advisory
+chat message. Verification appends `coordinator-review-requested` before the
+Host is notified. Chunk results and the next cursor are idempotent journal
+events. If a Coordinator turn ends before coverage is complete, the review
+driver queues another bounded turn. Restart reconstructs the cursor and
+continues; it never converts incomplete coverage into acceptance.
+
 Rework continues within token, time, and non-convergence budgets. Repeated
 equivalent failures without meaningful diff or evidence changes pause the task
 and request user direction.
@@ -401,17 +508,48 @@ The current fast-forward integration is replaced for parallel work.
 For each queued task:
 
 1. Verify the candidate commit equals the reviewed commit.
-2. Verify the base branch and user workspace are safe.
-3. Cherry-pick the exact commit.
+2. Verify or create the Meeting-owned integration worktree and branch at the
+   last durably published base.
+3. Cherry-pick the exact commit onto that integration branch.
 4. Stop on conflict; do not auto-resolve.
-5. Run post-integration checks.
-6. Persist integration evidence.
-7. Flush the journal.
-8. Mark the task accepted and release dependents.
+5. Run post-integration checks in the integration worktree.
+6. Persist candidate, resulting tree, checks, and expected base revision.
+7. Re-check that the user's base worktree is clean and its HEAD still equals
+   the expected revision.
+8. Publish only the verified integration branch by fast-forwarding the base.
+9. Flush the journal.
+10. Mark the task accepted and release dependents.
 
 An integration conflict creates a rework attempt based on the new base.
+Verification failure leaves the user's base unchanged. A moved or dirty base
+pauses publication; the queue rebuilds and re-verifies on the new base only
+after the user workspace is safe. It never auto-reverts or resets user work.
 
-## 14. Recovery
+## 14. Final Meeting delivery
+
+After all required tasks are accepted or explicitly resolved, the Coordinator
+compiles a durable `MeetingDelivery` containing:
+
+- the accepted plan version and task/attempt identities;
+- integrated commit and file manifest;
+- deterministic verification and review summaries;
+- high-risk approvals and remaining limitations;
+- unresolved, cancelled, or intentionally skipped work;
+- a final content hash.
+
+The renderer offers one user decision:
+
+```text
+accept-final-meeting
+request-final-meeting-rework
+```
+
+Acceptance acknowledges the delivered integrated state. A rework request
+creates a new versioned plan revision with replacement/rework task nodes that
+reference, but never regress, accepted tasks. It does not silently roll back
+already integrated commits.
+
+## 15. Recovery
 
 The Meeting journal remains the fact source. Snapshots accelerate startup but
 are disposable projections.
@@ -425,17 +563,21 @@ are disposable projections.
 - Retry creates a new attempt after re-checking workspace state.
 - Side effects are never automatically replayed.
 
-## 15. Renderer synchronization and information architecture
+## 16. Renderer synchronization and information architecture
 
 The main process exposes:
 
 ```text
-getTaskSnapshot(taskId)
-subscribeTask(taskId, afterSeq)
+getTaskSnapshot(sessionId, taskId)
+getTaskEvents(sessionId, taskId, afterSeq, limit)
+subscribeTask(sessionId, taskId, afterSeq)
 ```
 
-The renderer hydrates from a snapshot and applies idempotent events by
-`eventId + seq`.
+Replay returns `events`, `nextAfterSeq`, and `hasMore`; it never returns an
+unbounded journal tail. The renderer hydrates from a snapshot, pages to the
+current cursor, then applies task-scoped live events idempotently by
+`eventId + seq`. A gap triggers snapshot refresh. Subscription ownership and
+unsubscribe are explicit IPC contracts.
 
 The accepted visual direction is a three-column desktop workspace:
 
@@ -447,7 +589,7 @@ The Inspector contains overview, context, mailbox, activity, diff review,
 verification, permissions, and integration tabs. It shows requested versus
 effective execution profile and distinguishes states with text and icons.
 
-## 16. Backend capability compilation
+## 17. Backend capability compilation
 
 Every Adapter implements a pure profile compilation step. Codex maps work mode
 to native reasoning effort. Claude maps to SDK-supported model/thinking
@@ -461,7 +603,7 @@ recovery contract tests pass.
 Claude and Codex are stable first-release Workers. OpenCode and Kimi remain
 experimental until their complete matrices pass.
 
-## 17. Failure modes
+## 18. Failure modes
 
 | Failure | Required behavior |
 |---|---|
@@ -472,13 +614,16 @@ experimental until their complete matrices pass.
 | Backend turn ends without report | Fail the attempt |
 | Verification fails | Create rework attempt |
 | Diff changes during review | Invalidate changed chunks |
+| Coordinator turn ends mid-review | Persist cursor and queue another bounded review turn |
 | Integration base moves | Re-check before cherry-pick |
 | Cherry-pick conflicts | Preserve worktree and pause |
+| Post-integration verification fails | Preserve integration branch; leave user base unchanged |
+| Final Meeting rejected | Create versioned rework plan; do not auto-rollback |
 | Repeated equivalent failure | Enter `budget-paused` |
 | Coordinator disconnects | Existing Workers continue; new scheduling pauses |
 | Application restarts | Side-effecting tasks become interrupted |
 
-## 18. Acceptance gates
+## 19. Acceptance gates
 
 The feature is ready when:
 
@@ -486,9 +631,11 @@ The feature is ready when:
 - Claude Coordinator can schedule and steer Claude and Codex Workers;
 - both Workers produce valid reports and survive interruption/recovery;
 - complete chunk review is enforced;
-- parallel commits integrate serially without fast-forward assumptions;
+- parallel commits stage and verify serially before atomic base publication;
 - conflict, dirty workspace, high-risk permission, budget pause, and restart
   scenarios pass;
-- renderer snapshot/replay is idempotent;
+- renderer snapshot/replay/live subscription is bounded and idempotent;
+- one final Meeting delivery can be accepted or revised without destructive
+  rollback;
 - a real four-task Meeting completes without hidden peer communication;
 - two-hour soak and packaged-app checks pass before formal release.

@@ -2,9 +2,9 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Add Meeting-owned visible tasks with durable mailboxes, per-Backend execution profiles, bounded Coordinator authority, complete Coordinator diff review, and serialized exact-commit integration.
+**Goal:** Add Meeting-owned visible tasks with frozen context packages, durable mailboxes, per-Backend execution profiles, bounded Coordinator authority, complete Coordinator diff review, staged exact-commit integration, and one final Meeting delivery.
 
-**Architecture:** Extend the existing Meeting `WorkerScheduler`, append-only journal, Backend adapters, worktree manager, Delivery Harness, and Task Rail. Claude Code remains the only first-release Coordinator; it never edits files. Workers execute isolated attempts, the Coordinator reviews frozen diff chunks, and one Integration Queue cherry-picks accepted commits before dependencies are released.
+**Architecture:** Extend the existing Meeting `WorkerScheduler`, append-only journal, Backend adapters, worktree manager, Delivery Harness, and Task Rail. Claude Code remains the only first-release Coordinator; it never edits files. Workers execute isolated attempts, the Coordinator reviews frozen diff chunks through a durable review session, and one Integration Queue stages exact commits on a Meeting-owned integration branch before verified state is published to the user's base.
 
 **Tech Stack:** TypeScript 5.7, Zod 4, Electron main/preload IPC, React 18, Node test runner, Git worktrees, append-only JSONL journal, Claude Agent SDK, Codex app-server, OpenCode SDK, Kimi ACP.
 
@@ -31,6 +31,11 @@ git rev-parse --short HEAD
 
 Stop if unrelated uncommitted changes overlap the task's owned files.
 
+If the shell cannot resolve `node`/`npm`, follow `AGENTS.md`: prepend
+`/usr/local/bin` to `PATH` or use `/usr/local/bin/node` and
+`/usr/local/bin/npm`. Do not interpret a missing shell `PATH` entry as a
+product failure.
+
 Build Electron before importing files from `dist-electron`:
 
 ```powershell
@@ -52,7 +57,11 @@ npm test
 git diff --check
 ```
 
-Do not enable automatic Coordinator acceptance until Tasks 1-10 all pass.
+Do not enable automatic Coordinator candidate approval until Tasks 1-12 all
+pass.
+Do not publish an integration to the user's base until Task 13 passes.
+Do not remove per-delivery migration controls until Task 14 and legacy replay
+tests pass.
 
 ## Milestone 1: Typed collaboration contracts
 
@@ -77,7 +86,7 @@ Cover:
 - task message;
 - task attempt;
 - task record;
-- every new task status;
+- every new task status and every legacy status projection;
 - unknown-key rejection;
 - hidden reasoning and credential-shaped context rejection;
 - empty or invalid hashes;
@@ -147,12 +156,12 @@ credential
 
 The check rejects keys, not innocent user prose containing those words.
 
-**Step 3: Add shared task statuses**
+**Step 3: Add versioned task statuses without breaking legacy consumers**
 
-Replace duplicated status unions with the full set:
+Add a new `MeetingTaskStatus` for the durable collaboration record:
 
 ```ts
-export type WorkerStatusKind =
+export type MeetingTaskStatus =
   | 'draft'
   | 'pending'
   | 'running'
@@ -170,14 +179,27 @@ export type WorkerStatusKind =
   | 'cancelled';
 ```
 
-Keep renderer and Electron types in parity. Do not add status translation in
-components yet.
+Do **not** remove `reviewing`, `awaiting-acceptance`, or `done` from the
+existing `WorkerStatusKind` in this task. Add a pure, versioned normalizer:
+
+```ts
+normalizeLegacyWorkerStatus(
+  input: { status: WorkerStatusKind | string; evidence?: LegacyDeliveryEvidence },
+): { status: MeetingTaskStatus; diagnostic?: string }
+```
+
+Do not infer new review or integration evidence from an old status string.
+Legacy `reviewing` and `awaiting-acceptance` recover as `interrupted` with a
+`legacy-delivery-review-required` diagnostic. Legacy `done` becomes
+`accepted` only when durable legacy acceptance/integration evidence exists;
+otherwise it also recovers interrupted. Historical journal events remain
+unchanged. Keep renderer and Electron types in parity.
 
 **Step 4: Run targeted tests**
 
 ```powershell
 npm run build:electron
-node --import "data:text/javascript,import { register } from 'node:module'; import { pathToFileURL } from 'node:url'; register('./tests/electron-stub.mjs', pathToFileURL('./'));" --test tests/task-collaboration.test.mjs tests/worker-event-schema-parity.test.mjs
+node --import "data:text/javascript,import { register } from 'node:module'; import { pathToFileURL } from 'node:url'; register('./tests/electron-stub.mjs', pathToFileURL('./'));" --test tests/task-collaboration.test.mjs tests/worker-event-schema-parity.test.mjs tests/meeting-recovery.test.mjs
 ```
 
 Expected: all tests pass.
@@ -210,6 +232,9 @@ git commit -m "feat(collaboration): define meeting task contracts"
 Test that:
 
 - every executable plan task has `executionProfile`;
+- legacy task input is normalized before strict validation;
+- recovery of a legacy plan never gains command, network, or undeclared write
+  authority;
 - `backendId` agrees with `executorBackendId` during the compatibility window;
 - write tasks declare `workspaceMode`;
 - plan revision cannot mutate a running task's frozen profile, grant request,
@@ -218,7 +243,33 @@ Test that:
   dependencies, or steer a running task;
 - stale `expectedPlanVersion` remains rejected.
 
-**Step 2: Extend `planMeetingTaskSchema`**
+**Step 2: Add a versioned plan-input normalizer**
+
+Keep a permissive legacy input schema at the command/recovery boundary and
+compile it into the strict current schema. Use these conservative defaults:
+
+```text
+backendId       = executorBackendId ?? current Meeting Worker default
+workMode        = balanced
+contextMode     = meeting-summary
+timeoutMs       = 1_800_000
+maxTokenBudget  = 200_000
+workspaceMode   = writePaths.length > 0 ? git-worktree : read-only
+writePaths      = legacy writePaths
+toolKinds       = read plus write only when writePaths are declared
+workingDirectories = ["."]
+commands        = []
+environmentKeys = []
+maxCommandTimeoutMs = 1_800_000
+networkHosts    = []
+```
+
+The normalizer emits a safe migration diagnostic and never infers command,
+network, credential, destructive, or external-service authority. Persist the
+normalized plan version after user approval; do not rewrite historical journal
+events during replay.
+
+**Step 3: Extend `planMeetingTaskSchema`**
 
 Add:
 
@@ -234,7 +285,10 @@ workspaceMode: z.enum(['read-only', 'git-worktree', 'shared-locked']),
 authorityRequest: z.object({
   writePaths: z.array(z.string().min(1)).max(100),
   toolKinds: z.array(z.string().min(1)).max(100),
+  workingDirectories: z.array(z.string().min(1)).max(100),
   commands: z.array(z.array(z.string().max(4_000)).min(1).max(100)).max(100),
+  environmentKeys: z.array(z.string().min(1).max(200)).max(100),
+  maxCommandTimeoutMs: z.number().int().min(1_000).max(7_200_000),
   networkHosts: z.array(z.string().min(1).max(253)).max(100),
 }).strict(),
 ```
@@ -242,7 +296,7 @@ authorityRequest: z.object({
 Keep old `executorBackendId` and `writePaths` only as read compatibility fields.
 Normalize them into the new shape at the command boundary.
 
-**Step 3: Update plan revision invariants**
+**Step 4: Update plan revision invariants**
 
 Capture the task status before applying each revision operation. Reject
 in-place changes to immutable running-attempt fields with:
@@ -251,7 +305,7 @@ in-place changes to immutable running-attempt fields with:
 running task execution boundaries require a new attempt
 ```
 
-**Step 4: Update `PlanMeetingModal`**
+**Step 5: Update `PlanMeetingModal`**
 
 Add controls for:
 
@@ -260,29 +314,117 @@ Add controls for:
 - context mode;
 - workspace mode;
 - write paths;
+- allowed working directories;
 - commands;
+- environment-key names and maximum command timeout;
 - network hosts;
 - timeout and token budget.
 
 Show a compact authority summary before the user confirms. High-risk actions
 must not appear as auto-approved options.
 
-**Step 5: Run tests and typechecks**
+**Step 6: Run tests and typechecks**
 
 ```powershell
 npm run build:electron
-node --import "data:text/javascript,import { register } from 'node:module'; import { pathToFileURL } from 'node:url'; register('./tests/electron-stub.mjs', pathToFileURL('./'));" --test tests/plan-task-profile.test.mjs tests/meeting-command.test.mjs tests/plan-revision.test.mjs tests/renderer-plan-validation.test.mjs
+node --import "data:text/javascript,import { register } from 'node:module'; import { pathToFileURL } from 'node:url'; register('./tests/electron-stub.mjs', pathToFileURL('./'));" --test tests/plan-task-profile.test.mjs tests/meeting-command.test.mjs tests/plan-revision.test.mjs tests/renderer-plan-validation.test.mjs tests/meeting-recovery.test.mjs
 npm run typecheck:renderer
 ```
 
-**Step 6: Commit**
+**Step 7: Commit**
 
 ```powershell
 git add electron/meeting-tools.ts electron/meeting-command.ts electron/worker-scheduler.ts electron/orchestrator-types.ts src/types.ts src/lib/plan-validation.ts src/components/PlanMeetingModal.tsx tests/meeting-command.test.mjs tests/plan-revision.test.mjs tests/renderer-plan-validation.test.mjs tests/plan-task-profile.test.mjs
 git commit -m "feat(collaboration): add task execution profiles to plans"
 ```
 
-### Task 3: Compile execution intent per Backend
+### Task 3: Compile and freeze the Context Package
+
+**Files:**
+
+- Create: `electron/task-context.ts`
+- Create: `tests/task-context.test.mjs`
+- Modify: `electron/orchestrator.ts`
+- Modify: `electron/host-group.ts`
+- Modify: `electron/worker-scheduler.ts:70-125,1184-1235,1340-1425`
+- Modify: `electron/orchestrator-types.ts`
+- Modify: `electron/attachments/assets.ts`
+- Modify: `tests/meeting-command-execution.test.mjs`
+
+**Step 1: Write failing context-compiler tests**
+
+Test:
+
+- `minimal`, `meeting-summary`, `selected-history`, and
+  `full-visible-history` compile deterministic packages;
+- selected message, decision, dependency-report, and attachment IDs must
+  belong to the current Meeting/task authority;
+- missing and unauthorized references reject before workspace creation;
+- hidden reasoning, Backend authentication, credential-shaped metadata, and
+  native payloads never enter the package;
+- byte and estimated-token bounds reject an oversized package;
+- the package hash changes with visible content but not map ordering;
+- later mailbox messages do not mutate the frozen initial package;
+- a failed compile produces no worktree and no Backend session.
+
+**Step 2: Implement a pure compiler**
+
+```ts
+export function compileContextPackage(input: {
+  taskId: string;
+  attempt: number;
+  selection: ContextSelection;
+  source: AuthorizedMeetingContextSource;
+  limits: { maxBytes: number; maxEstimatedTokens: number };
+}): ContextPackage
+```
+
+Resolve IDs before reading content. Copy only user-visible text, bounded
+decision summaries, accepted dependency reports, and authorized attachment
+references. Hash attachment contents without embedding arbitrary binary data.
+Use stable serialization plus SHA-256 for `packageHash`.
+
+**Step 3: Add one explicit source seam**
+
+The Orchestrator owns Meeting transcript, decisions, dependency reports, and
+attachment authorization. Add one read-only
+`getAuthorizedTaskContextSource(taskId, selection)` callback to
+`WorkerSchedulerOptions`; do not let the Scheduler scrape renderer state or
+the filesystem outside the attachment resolver.
+
+**Step 4: Freeze before any execution side effect**
+
+In `spawnWorker()`:
+
+1. compile the package;
+2. append and flush `context-package-frozen`;
+3. store its immutable hash on the attempt;
+4. only then compile the Backend profile, allocate the workspace, and create
+   the session.
+
+Render the package into a bounded provider-neutral first message. The
+Backend-specific Adapter may frame it but cannot add hidden Meeting history.
+
+**Step 5: Run tests**
+
+```powershell
+npm run build:electron
+node --import "data:text/javascript,import { register } from 'node:module'; import { pathToFileURL } from 'node:url'; register('./tests/electron-stub.mjs', pathToFileURL('./'));" --test tests/task-context.test.mjs tests/meeting-command-execution.test.mjs tests/meeting-recovery.test.mjs
+```
+
+Expected: all tests pass, including the assertion that context failure creates
+no worktree or Backend process.
+
+**Step 6: Commit**
+
+```powershell
+git add electron/task-context.ts electron/orchestrator.ts electron/host-group.ts electron/worker-scheduler.ts electron/orchestrator-types.ts electron/attachments/assets.ts tests/task-context.test.mjs tests/meeting-command-execution.test.mjs
+git commit -m "feat(collaboration): freeze authorized task context"
+```
+
+## Milestone 2: Backend intent, authority, and workspace safety
+
+### Task 4: Compile execution intent per Backend
 
 **Files:**
 
@@ -309,10 +451,10 @@ Test:
 - capability hash is stable and secret-free;
 - a Backend that cannot report its runtime version fails closed.
 
-**Step 2: Extend the Adapter contract**
+**Step 2: Extend the registered `CliBackend` contract**
 
 ```ts
-export interface BackendAdapter {
+export interface CliBackend {
   // existing members...
   compileTaskProfile?(
     requested: TaskExecutionProfile,
@@ -321,8 +463,8 @@ export interface BackendAdapter {
 }
 ```
 
-If the existing registry exposes instances rather than this interface, add the
-method to the registered Backend definition instead. Do not let the Scheduler
+`BackendRegistry` already stores `CliBackend` instances. Add the method there;
+do not introduce a parallel `BackendAdapter` type and do not let the Scheduler
 contain provider-specific `if` chains.
 
 **Step 3: Implement pure compilers**
@@ -356,9 +498,77 @@ git add electron/backends/task-profile.ts electron/backends/cli-backend.ts elect
 git commit -m "feat(collaboration): compile task profiles per backend"
 ```
 
-## Milestone 2: Authority and workspace safety
+### Task 5: Normalize native Backend permission requests
 
-### Task 4: Compile bounded authority grants
+**Files:**
+
+- Create: `electron/backends/canonical-execution.ts`
+- Create: `tests/backend-canonical-execution.test.mjs`
+- Modify: `electron/backends/cli-backend.ts`
+- Modify: `electron/backends/claude-code-adapter.ts`
+- Modify: `electron/backends/codex-adapter.ts`
+- Modify: `electron/backends/opencode-adapter.ts`
+- Modify: `electron/backends/kimi-adapter.ts`
+
+**Step 1: Write failing normalization tests**
+
+Cover, for every Worker-capable Backend:
+
+- source read and workspace write;
+- exact executable plus argv, `cwd`, timeout, and environment-key names;
+- shell-wrapped command identity without joining a new shell string;
+- network hosts and external-service side effects;
+- destructive Git, credential, administrator, and system-install facts;
+- stable native request identity;
+- native credential values and raw payloads never enter the canonical request;
+- an incomplete or unrecognized native request fails closed.
+
+Qoder and custom Backends currently have `executeTasks: false`; assert they
+remain unavailable as Workers rather than inventing an unverified permission
+normalizer.
+
+**Step 2: Add the canonical contract**
+
+```ts
+export interface CanonicalExecutionRequest {
+  schemaVersion: 1;
+  taskId: string;
+  backendId: string;
+  kind: 'read' | 'write' | 'command' | 'network' | 'external';
+  workspaceRoot: string;
+  cwd?: string;
+  executable?: string;
+  argv?: string[];
+  writePaths: string[];
+  networkHosts: string[];
+  environmentKeys: string[];
+  sideEffects: string[];
+  timeoutMs?: number;
+  nativeRequestId: string;
+}
+```
+
+Add `normalizePermissionRequest(...)` to `CliBackend`. The Adapter must return
+either a complete canonical request or an explicit unsupported diagnostic.
+The Coordinator and Scheduler never parse provider-native payloads.
+
+**Step 3: Implement Backend-specific pure normalizers**
+
+Do not start a process, read credentials, or access the network. Preserve the
+exact executable/argv boundary supplied by the Backend. If a Backend exposes
+only opaque shell text, classify it as requiring the user until a safe parser
+and test matrix exist.
+
+**Step 4: Run tests and commit**
+
+```powershell
+npm run build:electron
+node --import "data:text/javascript,import { register } from 'node:module'; import { pathToFileURL } from 'node:url'; register('./tests/electron-stub.mjs', pathToFileURL('./'));" --test tests/backend-canonical-execution.test.mjs tests/permission-broker.test.mjs tests/backend-capability-gates.test.mjs
+git add electron/backends/canonical-execution.ts electron/backends/cli-backend.ts electron/backends/claude-code-adapter.ts electron/backends/codex-adapter.ts electron/backends/opencode-adapter.ts electron/backends/kimi-adapter.ts tests/backend-canonical-execution.test.mjs
+git commit -m "feat(collaboration): normalize backend execution requests"
+```
+
+### Task 6: Compile bounded authority grants
 
 **Files:**
 
@@ -376,7 +586,8 @@ Cover:
 
 - plan approval produces a deterministic grant;
 - Coordinator auto-approves an in-grant source write and approved test argv;
-- path escape, undeclared command, and undeclared network host deny;
+- path escape, wrong `cwd`, executable/argv mismatch, undeclared environment
+  key, undeclared command, and undeclared network host deny;
 - deletion, destructive Git, credential access, admin privilege, system install,
   external publish, and external message always ask the user;
 - task text and context cannot grant authority;
@@ -394,9 +605,10 @@ export function compileTaskAuthority(
 ): TaskAuthorityGrant
 ```
 
-Normalize and confine paths to `workspaceRoot`. Normalize command argv without
-joining through a shell. Canonicalize host names. Compute `grantHash` from
-non-secret normalized facts.
+Normalize and confine write paths and working directories to `workspaceRoot`.
+Normalize command executable/argv without joining through a shell. Normalize
+environment-key names, cap timeout, and canonicalize host names. Compute
+`grantHash` from non-secret normalized facts.
 
 **Step 3: Add deterministic policy**
 
@@ -410,11 +622,13 @@ export type AuthorityDecision =
 High-risk classification runs before in-grant allow logic. Trust or
 Coordinator identity cannot override `ask-user` or `deny`.
 
-**Step 4: Integrate with existing Permission Broker**
+**Step 4: Integrate canonical requests with the existing Permission Broker**
 
-Native Backend permission requests must be normalized to the same policy
-facts. Preserve the current UI card and response path. Journal the canonical
-decision, not raw credential-bearing native payloads.
+The Permission Broker accepts only `CanonicalExecutionRequest` from Task 5.
+Preserve the current UI card and native response path. Journal the canonical
+decision and safe summary, not raw credential-bearing native payloads.
+Missing Adapter normalization is `ask-user` or `deny`, never an in-grant
+automatic allow.
 
 **Step 5: Run tests**
 
@@ -430,7 +644,7 @@ git add electron/task-authority.ts electron/permission-broker.ts electron/orches
 git commit -m "feat(collaboration): enforce bounded task authority"
 ```
 
-### Task 5: Guard dirty workspaces and explicit shared mode
+### Task 7: Guard dirty workspaces and explicit shared mode
 
 **Files:**
 
@@ -502,7 +716,7 @@ git commit -m "feat(collaboration): guard task workspace baselines"
 
 ## Milestone 3: Durable Task Mailbox
 
-### Task 6: Add mailbox events and task projection
+### Task 8: Add mailbox events and task projection
 
 **Files:**
 
@@ -549,10 +763,18 @@ Add:
 static async replayAfter(
   meetingId: string,
   afterSeq: number,
-): Promise<PersistedMeetingEvent[]>
+  limit: number,
+): Promise<{
+  events: PersistedMeetingEvent[];
+  nextAfterSeq: number;
+  hasMore: boolean;
+}>
 ```
 
-Ignore a final partial JSONL line exactly as current replay does.
+Clamp `limit` to `1..500`, stop collecting after the page is full, and bound
+serialized output. Ignore a final partial JSONL line exactly as current replay
+does. The first release may scan the local JSONL file, but it must not return
+an unbounded tail to IPC callers.
 
 **Step 3: Implement mailbox service**
 
@@ -582,7 +804,7 @@ git add electron/task-mailbox.ts electron/task-projection.ts electron/meeting-re
 git commit -m "feat(collaboration): persist task mailboxes"
 ```
 
-### Task 7: Route follow-up, steering, and interrupt through Mailbox
+### Task 9: Route follow-up, steering, and interrupt through Mailbox
 
 **Files:**
 
@@ -653,7 +875,7 @@ git commit -m "feat(collaboration): route durable task messages"
 
 ## Milestone 4: Snapshot IPC and Task Inspector
 
-### Task 8: Add task snapshot and `afterSeq` replay
+### Task 10: Add bounded task snapshot, replay, and live subscription
 
 **Files:**
 
@@ -671,9 +893,10 @@ git commit -m "feat(collaboration): route durable task messages"
 Test:
 
 - snapshot contains the task record, mailbox, attempt evidence, and last seq;
-- `afterSeq` returns only later task events;
+- `afterSeq` returns only later task events in bounded pages;
 - another Meeting/task cannot be read through the IPC;
 - invalid cursor and oversized request fail;
+- live subscription emits only the authorized Meeting/task and can unsubscribe;
 - duplicate event ID and sequence are ignored;
 - a gap triggers snapshot refresh rather than speculative reduction;
 - sensitive authority internals are projected to a safe renderer view.
@@ -682,11 +905,20 @@ Test:
 
 ```ts
 getTaskSnapshot(sessionId: string, taskId: string): Promise<TaskSnapshot>
-getTaskEvents(sessionId: string, taskId: string, afterSeq: number): Promise<TaskEvent[]>
+getTaskEvents(
+  sessionId: string,
+  taskId: string,
+  afterSeq: number,
+  limit: number,
+): Promise<{
+  events: TaskEvent[];
+  nextAfterSeq: number;
+  hasMore: boolean;
+}>
 ```
 
 Use the existing session authorization lookup. Do not expose arbitrary Meeting
-journal reads.
+journal reads. Clamp `limit` to `1..500` and bound the serialized response.
 
 **Step 3: Add preload bridge**
 
@@ -694,7 +926,8 @@ Expose typed methods:
 
 ```ts
 tasks.getSnapshot(sessionId, taskId)
-tasks.getEvents(sessionId, taskId, afterSeq)
+tasks.getEvents(sessionId, taskId, afterSeq, limit)
+tasks.onEvent(sessionId, taskId, afterSeq, listener) => unsubscribe
 tasks.followUp(sessionId, taskId, text)
 tasks.steer(sessionId, taskId, text)
 tasks.interrupt(sessionId, taskId, reason)
@@ -707,9 +940,10 @@ Bound all strings and IDs at IPC validation.
 On Task Inspector open:
 
 1. fetch snapshot;
-2. set `afterSeq = snapshot.seq`;
-3. apply live events;
-4. if a sequence gap appears, re-fetch the snapshot.
+2. page persisted events until `hasMore === false`;
+3. subscribe from the last applied sequence;
+4. apply live events;
+5. if a sequence gap appears, unsubscribe and re-fetch the snapshot.
 
 Do not fetch the entire Meeting transcript for every task.
 
@@ -723,7 +957,7 @@ git add electron/ipc/tasks.ts electron/main.ts electron/preload.cjs src/types.ts
 git commit -m "feat(collaboration): replay task state through typed ipc"
 ```
 
-### Task 9: Build the docked Task Inspector
+### Task 11: Build the docked Task Inspector
 
 **Files:**
 
@@ -763,7 +997,9 @@ Match the accepted screenshot structure:
 - right docked inspector.
 
 Use the current AhaStation dark visual system and existing backend icon assets.
-Do not introduce another design system.
+Do not introduce another design system. The screenshot is visual inspiration;
+the requirements and tests in this plan are normative, so implementation must
+not depend on a file in the original user's Downloads directory.
 
 **Step 3: Add review coverage and Integration Queue status**
 
@@ -796,15 +1032,18 @@ git add src/components/TaskInspector.tsx src/components/TaskMailboxPanel.tsx src
 git commit -m "feat(collaboration): add the task inspector workspace"
 ```
 
-## Milestone 5: Coordinator review and automatic acceptance
+## Milestone 5: Coordinator review, staged integration, and final delivery
 
-### Task 10: Add frozen, chunked Coordinator diff review
+### Task 12: Add durable frozen, chunked Coordinator diff review
 
 **Files:**
 
 - Create: `electron/delivery-diff.ts`
+- Create: `electron/delivery-candidate.ts`
 - Create: `electron/coordinator-review.ts`
+- Create: `electron/coordinator-review-driver.ts`
 - Create: `tests/coordinator-diff-review.test.mjs`
+- Create: `tests/coordinator-review-driver.test.mjs`
 - Modify: `electron/delivery-harness.ts`
 - Modify: `electron/meeting-mcp.ts`
 - Modify: `electron/meeting-tools.ts`
@@ -817,6 +1056,8 @@ git commit -m "feat(collaboration): add the task inspector workspace"
 Test:
 
 - review freezes candidate commit and diff hash;
+- candidate creation commits only WorkReport paths after deterministic
+  verification and refuses unreported changes;
 - manifest contains every changed file and bounded statistics;
 - chunks are deterministic and bounded by bytes/lines;
 - binary and oversized files produce explicit non-inline evidence;
@@ -826,9 +1067,31 @@ Test:
 - incomplete coverage cannot complete;
 - blocking finding creates a structured rework request;
 - complete passing review emits `coordinator-review-completed`;
+- verification appends `coordinator-review-requested` before notifying the
+  Host;
+- a Coordinator turn that ends with incomplete coverage queues the next
+  bounded review turn;
+- restart resumes the exact unreviewed chunk without duplicating reviewed
+  chunks;
+- Coordinator disconnect pauses new review turns but preserves the session;
 - Coordinator has no write or shell tool.
 
-**Step 2: Implement safe diff construction**
+**Step 2: Prepare and freeze the exact candidate before review**
+
+After deterministic verification:
+
+1. compare all dirty worktree paths with the WorkReport manifest;
+2. refuse missing/unreported paths;
+3. stage only reported paths with explicit Git argv;
+4. create one candidate commit in the task worktree;
+5. persist commit ID, tree ID, base revision, and report hash;
+6. build the review manifest from that immutable commit.
+
+Never use `git add -A`. Candidate preparation is idempotent for the same
+attempt/report hash. Any subsequent worktree change creates a new attempt or
+invalidates review; it never mutates the frozen candidate.
+
+**Step 3: Implement safe diff construction**
 
 Use Git argv, never a shell string:
 
@@ -842,7 +1105,23 @@ content from diagnostic metadata, but never mutate the diff being reviewed.
 If a diff itself contains a suspected secret, block automatic acceptance and
 request the user.
 
-**Step 3: Add review tools to Meeting MCP**
+**Step 4: Implement the durable review driver**
+
+```ts
+export class CoordinatorReviewDriver {
+  request(input: VerifiedDelivery): Promise<CoordinatorReviewSession>;
+  onCoordinatorTurnEnded(reviewId: string): Promise<void>;
+  resume(reviewId: string): Promise<void>;
+}
+```
+
+The driver journals the session and current cursor before sending a bounded
+review briefing to the Coordinator. Tool results advance the cursor
+idempotently. If a turn ends before complete coverage, enqueue another turn
+instead of accepting or abandoning the review. Backoff and maximum
+review-turn budget are structural; exceeding them pauses for the user.
+
+**Step 5: Add review tools to Meeting MCP**
 
 Provide Coordinator-only tools:
 
@@ -856,30 +1135,33 @@ request_delivery_rework
 
 Tool output is bounded and never exposes arbitrary files.
 
-**Step 4: Change Delivery Harness ownership**
+**Step 6: Change Delivery Harness ownership**
 
 After deterministic verification, enter `coordinator-reviewing`. The existing
 simple reviewer becomes a pre-review structural check, not the acceptance
 owner.
 
-Only a complete review session may call the internal acceptance transition.
+Only a complete review session may produce a `ReviewedCandidate` and enqueue
+Task 13. It cannot mark the task accepted; durable acceptance remains
+post-publication.
 
-**Step 5: Run tests and commit**
+**Step 7: Run tests and commit**
 
 ```powershell
 npm run build:electron
-node --import "data:text/javascript,import { register } from 'node:module'; import { pathToFileURL } from 'node:url'; register('./tests/electron-stub.mjs', pathToFileURL('./'));" --test tests/coordinator-diff-review.test.mjs tests/delivery-harness.test.mjs tests/delivery-verifier.test.mjs tests/meeting-command-execution.test.mjs
-git add electron/delivery-diff.ts electron/coordinator-review.ts electron/delivery-harness.ts electron/meeting-mcp.ts electron/meeting-tools.ts electron/orchestrator-prompts.ts electron/worker-scheduler.ts electron/orchestrator-types.ts tests/coordinator-diff-review.test.mjs
+node --import "data:text/javascript,import { register } from 'node:module'; import { pathToFileURL } from 'node:url'; register('./tests/electron-stub.mjs', pathToFileURL('./'));" --test tests/coordinator-diff-review.test.mjs tests/coordinator-review-driver.test.mjs tests/delivery-harness.test.mjs tests/delivery-verifier.test.mjs tests/meeting-command-execution.test.mjs tests/meeting-recovery.test.mjs
+git add electron/delivery-candidate.ts electron/delivery-diff.ts electron/coordinator-review.ts electron/coordinator-review-driver.ts electron/delivery-harness.ts electron/meeting-mcp.ts electron/meeting-tools.ts electron/orchestrator-prompts.ts electron/worker-scheduler.ts electron/orchestrator-types.ts tests/coordinator-diff-review.test.mjs tests/coordinator-review-driver.test.mjs
 git commit -m "feat(collaboration): require complete coordinator diff review"
 ```
 
-### Task 11: Replace fast-forward acceptance with Integration Queue
+### Task 13: Replace direct base integration with a staged Integration Queue
 
 **Files:**
 
 - Create: `electron/integration-queue.ts`
 - Create: `tests/integration-queue.test.mjs`
 - Modify: `electron/delivery-integrator.ts`
+- Modify: `electron/task-workspace.ts`
 - Modify: `electron/delivery-harness.ts`
 - Modify: `electron/worker-scheduler.ts:1000-1180,1305-1335`
 - Modify: `electron/orchestrator.ts:1170-1220`
@@ -895,65 +1177,198 @@ Test:
 
 - two branches from the same base both integrate serially;
 - each task produces exactly one reviewed candidate commit;
-- the queue cherry-picks the exact reviewed commit;
+- the queue cherry-picks the exact reviewed commit into a Meeting-owned
+  integration worktree/branch;
 - unreported or unreviewed files refuse candidate creation;
-- moved base is re-checked rather than blindly refused;
+- post-integration verification failure leaves the user's base HEAD and
+  working tree unchanged;
+- a dirty user base pauses publication without stash, reset, or auto-commit;
+- a moved base rebuilds the integration branch and re-runs checks before
+  publication;
 - cherry-pick conflict aborts the cherry-pick and preserves the task branch;
 - no automatic conflict resolution occurs;
-- post-integration verification failure leaves recoverable evidence;
+- a crash between staged verification and publication is idempotently
+  recoverable;
 - dependency remains blocked until journal flush after integration;
 - no normal per-task user acceptance is required.
 
-**Step 2: Split candidate creation from base integration**
+**Step 2: Split staging, verification, and publication**
 
 `GitDeliveryIntegrator` should expose:
 
 ```ts
-prepareCandidate(view: DeliveryView, candidate: DeliveryCandidate): Promise<PreparedCandidate>
-integrateCandidate(candidate: PreparedCandidate): Promise<WorkspaceIntegration>
-abortIntegration(candidate: PreparedCandidate): Promise<void>
+stageCandidate(candidate: ReviewedCandidate, state: IntegrationState): Promise<StagedIntegration>
+verifyStagedIntegration(staged: StagedIntegration): Promise<VerifiedIntegration>
+publishVerifiedIntegration(verified: VerifiedIntegration): Promise<WorkspaceIntegration>
+abortStagedIntegration(staged: StagedIntegration): Promise<void>
 ```
 
-`prepareCandidate` stages only WorkReport paths and commits them in the task
-worktree. `integrateCandidate` runs:
+Task 12 already created and froze the candidate commit before Coordinator
+review. `stageCandidate` first re-verifies its commit, tree, report, and review
+hashes, then runs:
 
 ```text
 git cherry-pick <reviewedCommit>
 ```
 
-against the base. Never use `git add -A`.
+inside the Meeting-owned integration worktree, never the user's base
+worktree. Never use `git add -A`. `publishVerifiedIntegration` first checks:
+
+```text
+base worktree is clean
+base HEAD == verified.expectedBaseRevision
+integration checks match verified tree hash
+```
+
+It then fast-forwards the base to the verified integration revision. If any
+check fails, publication pauses without modifying the base.
+
+```text
+git merge --ff-only <verifiedIntegrationRevision>
+```
+
+Run this only in the clean user base after the expected-HEAD comparison. The
+queue is the sole caller.
 
 **Step 3: Implement serialized queue**
 
-One Meeting queue processes one candidate at a time. Queue state is journaled
+One Meeting queue processes one candidate at a time. Create the integration
+branch/worktree from the last durably published base and journal its identity
 before cherry-pick. On conflict:
 
 ```text
 git cherry-pick --abort
 ```
 
-is allowed because the queue created that operation and verified the repository
-state. Preserve the task worktree and mark `integration-conflict`.
+is allowed only in the queue-owned integration worktree because the queue
+created that operation and verified the repository state. Preserve both task
+and integration evidence and mark `integration-conflict`. Never run
+`cherry-pick --abort`, reset, or revert in the user's base worktree.
 
-**Step 4: Move automatic acceptance**
+Reuse one integration branch/worktree per Meeting so accepted tasks form one
+verified chain. Remove the integration worktree only after final Meeting
+acceptance is durable and the published base contains its head; cleanup
+failure is diagnostic, not acceptance rollback.
 
-Coordinator review completion enqueues integration. Successful integration and
-post-checks produce durable `accepted`. Remove the normal renderer dependency
-on `acceptDelivery()`; retain a migration/developer path until journal replay
-tests cover old deliveries.
+**Step 4: Move task acceptance to verified publication**
+
+Coordinator review completion enqueues staging. Successful staged checks,
+atomic publication, and journal flush produce durable `accepted`. Remove the
+normal renderer dependency on `acceptDelivery()`; retain a
+migration/developer path until journal replay tests cover old deliveries.
 
 **Step 5: Run tests and commit**
 
 ```powershell
 npm run build:electron
 node --import "data:text/javascript,import { register } from 'node:module'; import { pathToFileURL } from 'node:url'; register('./tests/electron-stub.mjs', pathToFileURL('./'));" --test tests/integration-queue.test.mjs tests/delivery-integrator.test.mjs tests/worker-delivery-slice.test.mjs tests/meeting-recovery.test.mjs
-git add electron/integration-queue.ts electron/delivery-integrator.ts electron/delivery-harness.ts electron/worker-scheduler.ts electron/orchestrator.ts electron/orchestrator-types.ts src/lib/meeting-store.ts src/components/DeliveryViewer.tsx tests/integration-queue.test.mjs tests/delivery-integrator.test.mjs tests/worker-delivery-slice.test.mjs
+git add electron/integration-queue.ts electron/delivery-integrator.ts electron/task-workspace.ts electron/delivery-harness.ts electron/worker-scheduler.ts electron/orchestrator.ts electron/orchestrator-types.ts src/lib/meeting-store.ts src/components/DeliveryViewer.tsx tests/integration-queue.test.mjs tests/delivery-integrator.test.mjs tests/worker-delivery-slice.test.mjs
 git commit -m "feat(collaboration): serialize reviewed commit integration"
+```
+
+### Task 14: Aggregate and accept one final Meeting delivery
+
+**Files:**
+
+- Create: `electron/meeting-delivery.ts`
+- Create: `electron/ipc/meeting-delivery.ts`
+- Create: `src/components/FinalMeetingDelivery.tsx`
+- Create: `tests/meeting-final-delivery.test.mjs`
+- Create: `tests/renderer-final-meeting-delivery.test.mjs`
+- Modify: `electron/main.ts`
+- Modify: `electron/preload.cjs`
+- Modify: `electron/orchestrator.ts`
+- Modify: `electron/integration-queue.ts`
+- Modify: `electron/task-workspace.ts`
+- Modify: `electron/meeting-command.ts`
+- Modify: `electron/orchestrator-types.ts`
+- Modify: `src/types.ts`
+- Modify: `src/lib/meeting-store.ts`
+- Modify: `src/components/ScreenStage.tsx`
+
+**Step 1: Write failing final-delivery tests**
+
+Test:
+
+- a final delivery cannot be created while required tasks are pending,
+  unreviewed, unintegrated, conflicted, or budget-paused;
+- it includes accepted plan version, task/attempt IDs, integrated commits,
+  changed-file manifest, verification/review summaries, approvals, limitations,
+  and unresolved/cancelled work;
+- its content hash is deterministic and excludes credentials/native payloads;
+- `meeting-delivery-ready` is durable before the UI can act;
+- user acceptance appends `meeting-delivery-accepted`;
+- accepted final delivery permits cleanup only after the published base
+  contains the integration head;
+- user rejection requires a reason and creates versioned replacement/rework
+  task nodes without regressing accepted tasks;
+- rejection does not reset, revert, or rewrite already integrated commits;
+- duplicate accept/rework commands are idempotent;
+- recovery restores the same final delivery and decision.
+
+**Step 2: Implement the pure aggregator**
+
+```ts
+export function buildMeetingDelivery(input: {
+  meetingId: string;
+  planVersion: number;
+  tasks: MeetingTaskRecord[];
+  integrationHead: string;
+}): MeetingDelivery
+```
+
+Only durable accepted task evidence may enter the successful manifest. List
+cancelled, skipped, or unresolved work separately. Bound every summary and
+compute a stable SHA-256 content hash.
+
+**Step 3: Add durable user decisions**
+
+Expose typed IPC:
+
+```ts
+meetingDelivery.get(sessionId): Promise<MeetingDelivery | null>
+meetingDelivery.accept(sessionId, deliveryId, contentHash): Promise<Result>
+meetingDelivery.requestRework(
+  sessionId,
+  deliveryId,
+  contentHash,
+  reason,
+): Promise<Result>
+```
+
+`requestRework` creates a new plan version with explicit
+`add-rework-task`/dependency operations. Each new node references the accepted
+task it supersedes; accepted task records remain terminal and immutable. It
+never runs Git rollback. Stale delivery hashes and duplicate conflicting
+decisions fail closed.
+
+**Step 4: Build the final Meeting panel**
+
+Show:
+
+- integrated files and commits;
+- per-task verification/review status;
+- high-risk approvals;
+- unresolved limitations;
+- `接受最终交付` and `请求返工` controls.
+
+The task Inspector remains read-only for per-task acceptance. Final Meeting
+rework requires a visible reason and shows that existing integrated commits
+will remain until a new plan changes them explicitly.
+
+**Step 5: Run tests and commit**
+
+```powershell
+npm run build:electron
+npm run typecheck:renderer
+node --import "data:text/javascript,import { register } from 'node:module'; import { pathToFileURL } from 'node:url'; register('./tests/electron-stub.mjs', pathToFileURL('./'));" --test tests/meeting-final-delivery.test.mjs tests/renderer-final-meeting-delivery.test.mjs tests/plan-revision.test.mjs tests/meeting-recovery.test.mjs
+git add electron/meeting-delivery.ts electron/ipc/meeting-delivery.ts electron/main.ts electron/preload.cjs electron/orchestrator.ts electron/integration-queue.ts electron/task-workspace.ts electron/meeting-command.ts electron/orchestrator-types.ts src/types.ts src/lib/meeting-store.ts src/components/FinalMeetingDelivery.tsx src/components/ScreenStage.tsx tests/meeting-final-delivery.test.mjs tests/renderer-final-meeting-delivery.test.mjs
+git commit -m "feat(collaboration): deliver final meeting result"
 ```
 
 ## Milestone 6: Rework budget and recovery
 
-### Task 12: Add bounded continuous rework
+### Task 15: Add bounded continuous rework
 
 **Files:**
 
@@ -983,6 +1398,14 @@ Cover:
 **Step 2: Implement pure budget evaluation**
 
 ```ts
+export interface TaskBudget {
+  schemaVersion: 1;
+  maxAttempts: number;
+  maxTotalTokens: number;
+  maxTotalDurationMs: number;
+  maxStagnantAttempts: number;
+}
+
 export function evaluateTaskBudget(
   budget: TaskBudget,
   attempts: TaskAttemptRecord[],
@@ -990,7 +1413,8 @@ export function evaluateTaskBudget(
 ```
 
 Do not let the Coordinator override a pause by prompt text. A user decision or
-plan revision is required.
+plan revision is required. Budget extension never changes the task authority
+grant.
 
 **Step 3: Bind rework requests**
 
@@ -1007,7 +1431,7 @@ git add electron/task-budget.ts electron/worker-scheduler.ts electron/orchestrat
 git commit -m "feat(collaboration): bound automatic task rework"
 ```
 
-### Task 13: Recover task mailboxes, attempts, reviews, and integration safely
+### Task 16: Recover task mailboxes, attempts, reviews, and integration safely
 
 **Files:**
 
@@ -1031,8 +1455,15 @@ Test:
 - queued and delivered-but-unacknowledged messages remain recoverable;
 - review chunk coverage restores exactly;
 - integration queued before a crash is not duplicated;
-- an in-progress cherry-pick is detected and requires explicit recovery;
+- an in-progress cherry-pick is detected only in the queue-owned integration
+  worktree and requires explicit recovery;
+- a verified-but-unpublished integration remains unpublished until base
+  cleanliness and expected HEAD are re-checked;
+- a failed staged check never changes the user's base;
 - accepted task never regresses due to late events;
+- legacy `reviewing`, `awaiting-acceptance`, and `done` records normalize
+  conservatively without inventing Coordinator review or integration evidence;
+- final Meeting delivery and accept/rework decision restore exactly;
 - event sequence continues after restart;
 - task snapshot and renderer replay agree.
 
@@ -1044,7 +1475,10 @@ Include:
 - mailbox cursors;
 - review sessions;
 - integration queue;
+- integration branch/worktree, staged tree hash, verified head, expected base,
+  and publication state;
 - budget;
+- final Meeting delivery and decision;
 - Coordinator identity and plan version.
 
 Snapshot remains a projection. Replay must reconstruct equivalent state.
@@ -1074,7 +1508,7 @@ git commit -m "feat(collaboration): recover meeting tasks safely"
 
 ## Milestone 7: Capability gates and real vertical acceptance
 
-### Task 14: Gate stable Worker Backends and run the full workflow
+### Task 17: Gate stable Worker Backends and run the full workflow
 
 **Files:**
 
@@ -1092,18 +1526,20 @@ Use a deterministic Claude Coordinator fixture to:
 
 1. propose four tasks;
 2. edit and approve the plan;
-3. grant bounded authority;
-4. spawn Claude and Codex Workers in parallel;
-5. queue a follow-up;
-6. steer one turn;
-7. handle one high-risk user permission;
-8. accept valid reports;
-9. verify;
-10. review every diff chunk;
-11. request one rework;
-12. integrate two parallel commits serially;
-13. release dependencies only after accepted;
-14. produce one final Meeting delivery.
+3. normalize the plan and freeze one authorized Context Package per attempt;
+4. grant bounded authority;
+5. spawn Claude and Codex Workers in parallel;
+6. queue a follow-up;
+7. steer one turn;
+8. normalize and handle one high-risk user permission;
+9. accept valid reports;
+10. verify;
+11. resume a partial Coordinator review and cover every diff chunk;
+12. request one rework;
+13. stage and verify two parallel commits serially;
+14. publish the verified integration branch;
+15. release dependencies only after accepted;
+16. produce and accept one final Meeting delivery.
 
 Assert no Worker-to-Worker message and no Coordinator file write.
 
@@ -1119,6 +1555,7 @@ WorkReport
 interrupt
 resume
 permission bridge
+canonical permission normalization
 recovery
 real vertical smoke
 ```
@@ -1150,8 +1587,9 @@ Expected: zero failures.
 - Coordinator reconnect.
 - Application restart with side-effecting tasks.
 - Integration conflict.
+- Staged verification failure leaves base unchanged.
 - Budget pause and user extension.
-- Final Meeting acceptance.
+- Final Meeting acceptance and versioned rework request.
 
 Do not mark OpenCode or Kimi stable from mocked tests.
 
@@ -1172,20 +1610,28 @@ git commit -m "feat(collaboration): enable coordinated meeting tasks"
 - [ ] User-approved authority is structural and bounded.
 - [ ] High-risk actions always reach the user.
 - [ ] Requested and effective Backend profiles are visible.
+- [ ] Every attempt freezes one authorized, bounded Context Package before any
+      workspace or Backend side effect.
 - [ ] Dirty Git state blocks parallel writes.
 - [ ] Every task message is durable before delivery.
-- [ ] Snapshot plus `afterSeq` recovery is idempotent.
+- [ ] Snapshot, bounded `afterSeq` replay, and task-scoped live subscription
+      are idempotent.
 - [ ] WorkReport is the only completion signal.
 - [ ] Verification precedes Coordinator review.
 - [ ] Every frozen diff chunk is reviewed.
-- [ ] Automatic acceptance requires complete evidence.
-- [ ] Integration uses exact reviewed-commit cherry-picks.
+- [ ] Incomplete Coordinator review turns resume durably.
+- [ ] Automatic task acceptance requires complete review, staged verification,
+      publication, and durable evidence.
+- [ ] Integration stages exact reviewed-commit cherry-picks outside the user
+      base and publishes only verified state.
 - [ ] Conflicts do not auto-resolve.
 - [ ] Dependency release follows durable post-integration acceptance.
 - [ ] Rework is continuous but budgeted and convergence-aware.
 - [ ] Side effects never auto-replay after restart.
 - [ ] Claude and Codex pass real vertical tests.
 - [ ] OpenCode and Kimi remain experimental until their gates pass.
+- [ ] The user can accept one final Meeting delivery or request versioned
+      rework without implicit Git rollback.
 - [ ] Renderer and Electron typechecks pass.
 - [ ] Full Node test suite passes.
 - [ ] Production build passes.

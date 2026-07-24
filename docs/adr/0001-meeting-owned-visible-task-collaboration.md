@@ -12,7 +12,7 @@ verification, recovery, and a task rail.
 The product needs a deeper collaboration experience comparable to a main
 coding task coordinating several independent tasks: per-task contexts and
 execution profiles, durable follow-up and steering, complete Coordinator
-review, automatic acceptance, and safe integration.
+review, evidence-gated task acceptance, and safe integration.
 
 Creating separate sidebar chats or a second orchestration runtime would
 duplicate the existing Meeting domain and create competing fact sources.
@@ -24,7 +24,9 @@ current Meeting.
 
 One Claude Code Host is the first-release Coordinator. It owns planning,
 context selection, message routing, complete diff review, rework decisions,
-and task acceptance. It cannot edit files or directly update the main branch.
+and reviewed-candidate approval. It cannot edit files or directly update the
+main branch. Only verified Integration Queue publication produces task
+acceptance.
 
 The existing `WorkerScheduler` remains the only execution owner. Backend
 Adapters compile a provider-neutral execution intent and run isolated task
@@ -32,19 +34,26 @@ attempts. Workers cannot communicate directly.
 
 Task messages, attempts, permission decisions, review coverage, and integration
 events are appended to the existing Meeting journal. The renderer hydrates
-from snapshots and incrementally applies events.
+from snapshots, bounded replay, and task-scoped live events.
 
 The user approves the plan and a bounded task authority grant. The Coordinator
 may auto-approve only operations within that grant. High-risk operations always
 require the user.
 
 A valid WorkReport is followed by deterministic verification and complete,
-chunked Coordinator diff review. Passing candidates enter a serialized
-Integration Queue. The queue cherry-picks the exact reviewed commit, verifies
-the integrated state, durably marks the task accepted, and only then releases
-dependent tasks.
+chunked Coordinator diff review. The review is a durable session that survives
+incomplete Coordinator turns and restart. Passing candidates enter a
+serialized Integration Queue. The queue cherry-picks the exact reviewed commit
+onto a Meeting-owned integration branch, verifies the integrated state, and
+only then fast-forwards a clean, unchanged user base. Durable task acceptance
+releases dependent tasks.
 
-The user accepts the final Meeting result rather than every task.
+The user accepts one final Meeting delivery rather than every task. Rejecting
+that delivery creates a versioned rework plan; it does not implicitly reset or
+revert already integrated user work.
+
+Plan and event schema migration is additive. Legacy task statuses and plan
+records remain replayable until every producer and consumer has migrated.
 
 ## Alternatives considered
 
@@ -67,12 +76,16 @@ delegation, and multi-owner planning. Rejected.
 ### User accepts every task
 
 This is safe but stalls multi-task DAGs. Rejected in favor of bounded
-Coordinator acceptance plus final Meeting acceptance.
+Coordinator candidate approval, verified Integration Queue task acceptance,
+and final Meeting acceptance.
 
 ### Fast-forward integration
 
-It works for one task but fails when parallel branches share a base. Replaced
-with serialized exact-commit cherry-picks.
+Directly fast-forwarding each task worktree works for one task but fails when
+parallel branches share a base. Directly cherry-picking into the user branch
+also exposes failed post-integration checks. Replaced with serialized
+exact-commit cherry-picks on a Meeting integration branch followed by verified
+fast-forward publication.
 
 ### SQLite event store
 
@@ -90,6 +103,7 @@ Positive:
 - Supports parallel work without unsafe shared writes.
 - Removes per-task user acceptance friction.
 - Provides explicit recovery and non-convergence behavior.
+- Keeps failed post-integration candidates off the user's base branch.
 
 Negative:
 
@@ -97,6 +111,7 @@ Negative:
 - Complete Coordinator diff review consumes context and model budget.
 - Task state and event schemas become more sophisticated.
 - Cherry-pick integration needs conflict and rollback handling.
+- A Meeting-owned integration worktree consumes additional local disk space.
 - Backend capability compilation requires per-version contract testing.
 
 ## Safety invariants
@@ -109,12 +124,16 @@ Negative:
 6. High-risk operations require the user.
 7. Incomplete review coverage cannot accept a task.
 8. Only the Integration Queue writes the base branch.
-9. Only durable post-integration acceptance releases dependencies.
-10. Recovery never auto-replays side effects.
+9. Post-integration checks complete before the user's base branch advances.
+10. Only durable post-integration acceptance releases dependencies.
+11. Final Meeting rejection creates explicit rework and never auto-rolls back.
+12. Recovery never auto-replays side effects.
 
 ## Rollback
 
 The feature ships behind a Meeting collaboration capability gate. Rollback
 disables task profiles, mailbox commands, Coordinator auto-review, and the
 Integration Queue, then returns to the current Scheduler and per-delivery user
-acceptance. Versioned events remain readable as historical evidence.
+acceptance. Any unpublished Meeting integration branch remains recoverable and
+does not mutate the user base. Versioned events remain readable as historical
+evidence.
