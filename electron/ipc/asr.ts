@@ -1,13 +1,21 @@
 import { ipcMain } from 'electron';
-import { transcribePcm, isWhisperAvailable } from '../whisper.js';
+import { transcribePcm, isWhisperAvailable, encodeWavPcm16 } from '../whisper.js';
 import { polishAsrText } from '../asr-polish.js';
 import { errorMessage } from '../format-error.js';
+import { getSettings } from '../store.js';
+import { transcribeCloud } from '../cloud-asr.js';
 
 export function registerAsrIpc(): void {
   const MAX_PCM_BYTES = 5 * 60 * 16_000 * Float32Array.BYTES_PER_ELEMENT;
   const MAX_POLISH_CHARS = 20_000;
   let activeTranscriptions = 0;
   ipcMain.handle('asr:available', async () => {
+    const s = getSettings();
+    // Cloud mode needs only an apiKey — the whole point is hosts where the
+    // local whisper binary can't run (RK3588 / glibc 2.31).
+    if ((s.asrProvider ?? 'local') === 'cloud') {
+      return { ok: true, available: Boolean(s.cloudAsr?.apiKey?.trim()) };
+    }
     return { ok: true, available: isWhisperAvailable() };
   });
 
@@ -28,6 +36,19 @@ export function registerAsrIpc(): void {
       const samples = new Float32Array(pcmBuffer);
       activeTranscriptions += 1;
       acquired = true;
+      // Provider split: 'cloud' POSTs the same 16 kHz mono PCM16 WAV to an
+      // OpenAI-compatible endpoint; 'local' (default) keeps the existing
+      // whisper.cpp path untouched. A cloud failure is surfaced as-is — we
+      // deliberately do NOT fall back to local, which would trigger an
+      // unexpected local model load on hosts that can't run it.
+      if ((getSettings().asrProvider ?? 'local') === 'cloud') {
+        try {
+          const text = await transcribeCloud(encodeWavPcm16(samples), getSettings().cloudAsr ?? {});
+          return { ok: true, text };
+        } catch (err: unknown) {
+          return { ok: false, error: errorMessage(err) };
+        }
+      }
       const r = await Promise.race([
         transcribePcm(samples, lang ?? 'auto'),
         new Promise<never>((_, reject) => setTimeout(() => reject(new Error('transcription timed out')), 120_000)),

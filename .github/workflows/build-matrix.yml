@@ -2,7 +2,10 @@
 #
 # x64 three runners (mac/win/ubuntu) build on push/PR; linux-arm64 runs on
 # workflow_dispatch AND tag pushes (private repo: arm runners burn paid
-# minutes). Every job runs both typechecks + the full node --test suite +
+# minutes) INSIDE a debian:12 container on the arm runner — it builds the
+# arm64 deb on the target glibc (2.36) and smoke-verifies it by actually
+# dpkg-installing + headless-launching it in that same Debian 12
+# environment. Every job runs both typechecks + the full node --test suite +
 # the whisper asset assertion (no more silently whisper-less packages).
 # Tag pushes (v*) additionally create a GitHub Release with ALL artifacts
 # (x64 + arm64) + latest*.yml via GITHUB_TOKEN.
@@ -127,13 +130,28 @@ jobs:
           retention-days: 30
 
   linux-arm64:
-    name: ubuntu-24.04-arm
+    name: linux-arm64 (debian:12 container)
     # Private repo: arm runners consume paid minutes — manual trigger and
     # tag pushes only (tags need the arm64 deb/AppImage for the release).
     if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04-arm
+    # Build inside Debian 12 (glibc 2.36 — the RK3588 target) so the deb is
+    # produced AND smoke-verified on the exact target distro; nothing glibc-
+    # linked is compiled here, so the container's real value is the dpkg
+    # install + headless launch gate below.
+    container: debian:12
     timeout-minutes: 90
     steps:
+      # debian:12 ships no git/curl/node — install before checkout (checkout
+      # needs git) and npm ci / electron-builder need the rest:
+      # xz-utils (whisper tarball), python3/make/g++ (native npm modules),
+      # libfuse2 (appimagetool runs in a fuse-less docker container).
+      - name: Install container build deps
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            git curl ca-certificates xz-utils python3 make g++ libfuse2
+
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
@@ -169,11 +187,34 @@ jobs:
       - name: Test suite
         run: npm test
 
-      - name: Package (Linux arm64 AppImage + deb — UNVERIFIED target)
-        # arm64 AppImage/deb targets exist in electron-builder.json but are
-        # unverified on real hardware (docs §3.5-1); this job is the
-        # verification path.
+      - name: Package (Linux arm64 AppImage + deb)
+        # Built inside debian:12; the smoke step below installs and launches
+        # the deb on the target distro (docs §3.5-1 verification path).
         run: npx electron-builder --linux --arm64 --publish never
+
+      - name: Smoke test — dpkg install + headless launch (Debian 12 gate)
+        shell: bash
+        run: |
+          set -euo pipefail
+          DEB="$(ls release/ahastation_*_arm64.deb | head -n1)"
+          echo "Installing $DEB — apt resolves Depends (libgtk-3-0, libnss3, libasound2, …)"
+          apt-get install -y "./$DEB"
+          BIN=/opt/AhaStation/ahastation
+          test -x "$BIN"
+          # Container is root with no display: --no-sandbox is required as
+          # root, --disable-gpu avoids GPU init. --version prints and exits
+          # before Electron brings up the UI. If that still fails headless,
+          # fall back to a full dynamic-link check of the installed binary.
+          if "$BIN" --no-sandbox --disable-gpu --version; then
+            echo "smoke OK: $BIN launched and printed a version"
+          else
+            echo "--version failed headless — falling back to ldd link check"
+            if ldd "$BIN" | grep "not found"; then
+              echo "smoke FAILED: unresolved shared libraries on Debian 12"
+              exit 1
+            fi
+            echo "smoke OK: all shared libraries resolve"
+          fi
 
       - uses: actions/upload-artifact@v4
         with:

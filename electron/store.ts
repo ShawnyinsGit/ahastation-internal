@@ -64,6 +64,19 @@ export interface CustomBackendEntry {
   createdAt: number;
 }
 
+export type AsrProvider = 'local' | 'cloud';
+
+export interface CloudAsrSettings {
+  /** OpenAI-compatible API root, e.g. https://api.openai.com/v1 or
+   *  https://api.groq.com/openai/v1. Empty = built-in default (OpenAI). */
+  baseUrl?: string;
+  /** Bearer key for the cloud endpoint. Never logged; persisted in
+   *  settings.json like other non-Anthropic credentials. */
+  apiKey?: string;
+  /** Model name sent in the multipart form. Empty = 'whisper-1'. */
+  model?: string;
+}
+
 export interface Settings {
   /** @deprecated Migrated into recentCwds + lastActiveCwd at first load. Kept
    *  in the type so JSON files written by old versions parse without warnings. */
@@ -108,6 +121,13 @@ export interface Settings {
   // sending to the Talker. Uses the same API credentials as the rest of the
   // app. Persists via settings:get/set-voice-pref.
   voicePolishEnabled?: boolean;
+  // ASR provider: 'local' (default) runs the bundled whisper.cpp binary;
+  // 'cloud' POSTs segments to an OpenAI-compatible /audio/transcriptions
+  // endpoint instead — for hosts that can't run local inference (RK3588 /
+  // glibc 2.31) or users who want a hosted model. Persisted via
+  // settings:get/set-voice-pref.
+  asrProvider?: AsrProvider;
+  cloudAsr?: CloudAsrSettings;
   // Claude authentication: 'apikey' uses a manually-entered API key;
   // 'subscription' relies on the claude CLI's own OAuth credentials.
   authMode?: 'apikey' | 'subscription';

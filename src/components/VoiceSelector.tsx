@@ -7,6 +7,7 @@
 import { listChineseVoices, tierLabel, type ListedVoice } from '../lib/voice-quality';
 import type { SpeechFilterMode } from '../lib/speech-format';
 import type { HandheldOverride } from '../lib/handheld-mode';
+import type { AsrProvider, CloudAsrSettings } from '../types';
 
 interface VoiceSelectorProps {
   voices: SpeechSynthesisVoice[];
@@ -21,6 +22,11 @@ interface VoiceSelectorProps {
   onChangeReportMode: (enabled: boolean) => void;
   handheldMode: HandheldOverride;
   onChangeHandheldMode: (mode: HandheldOverride) => void;
+  asrProvider: AsrProvider;
+  onChangeAsrProvider: (provider: AsrProvider) => void;
+  cloudAsr: CloudAsrSettings;
+  onCloudAsrInput: (patch: Partial<CloudAsrSettings>) => void;
+  onCloudAsrCommit: () => void;
 }
 
 function describeVoice(v: ListedVoice): string {
@@ -41,6 +47,11 @@ export function VoiceSelector({
   onChangeReportMode,
   handheldMode,
   onChangeHandheldMode,
+  asrProvider,
+  onChangeAsrProvider,
+  cloudAsr,
+  onCloudAsrInput,
+  onCloudAsrCommit,
 }: VoiceSelectorProps) {
   const chineseVoices = listChineseVoices(voices);
   const hasPremium = chineseVoices.some((v) => v.tier !== 'default');
@@ -102,6 +113,68 @@ export function VoiceSelector({
           <span className="drawer-toggle-knob" />
         </button>
       </div>
+
+      <div className="drawer-settings-row" style={{ marginTop: 12 }}>
+        <div className="drawer-settings-label">
+          <div className="drawer-settings-title">ASR 提供商</div>
+          <div className="drawer-settings-hint">
+            {asrProvider === 'cloud'
+              ? '云端 API 转写，适合无法运行本地模型的设备'
+              : '本地 whisper 转写，离线可用'}
+          </div>
+        </div>
+        <div className="handheld-mode-switch" role="group" aria-label="ASR 提供商">
+          {(['local', 'cloud'] as const).map((p) => (
+            <button
+              key={p}
+              type="button"
+              className={`handheld-mode-option ${asrProvider === p ? 'handheld-mode-option-active' : ''}`}
+              aria-pressed={asrProvider === p}
+              onClick={() => onChangeAsrProvider(p)}
+            >
+              {p === 'local' ? '本地' : '云端'}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {asrProvider === 'cloud' && (
+        <div className="asr-cloud-fields">
+          <input
+            className="asr-cloud-input"
+            type="text"
+            value={cloudAsr.baseUrl}
+            placeholder="Base URL（默认 https://api.openai.com/v1）"
+            aria-label="云端 ASR Base URL"
+            onChange={(e) => onCloudAsrInput({ baseUrl: e.target.value })}
+            onBlur={onCloudAsrCommit}
+          />
+          <input
+            className="asr-cloud-input"
+            type="password"
+            value={cloudAsr.apiKey}
+            placeholder="API Key"
+            aria-label="云端 ASR API Key"
+            autoComplete="off"
+            onChange={(e) => onCloudAsrInput({ apiKey: e.target.value })}
+            onBlur={onCloudAsrCommit}
+          />
+          <input
+            className="asr-cloud-input"
+            type="text"
+            value={cloudAsr.model}
+            placeholder="模型（默认 whisper-1）"
+            aria-label="云端 ASR 模型"
+            onChange={(e) => onCloudAsrInput({ model: e.target.value })}
+            onBlur={onCloudAsrCommit}
+          />
+          <div className="drawer-settings-hint">
+            兼容 OpenAI /audio/transcriptions 的端点都可用，例如 OpenAI（whisper-1）、
+            Groq（https://api.groq.com/openai/v1，whisper-large-v3）、硅基流动。
+            失焦自动保存；云端失败不会自动回退本地。
+          </div>
+        </div>
+      )}
 
       <div className="drawer-settings-row" style={{ marginTop: 12 }}>
         <div className="drawer-settings-label">

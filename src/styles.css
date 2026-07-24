@@ -2783,6 +2783,29 @@ html.popout-view #root {
 .voice-select:focus { border-color: var(--accent); }
 .voice-select:disabled { opacity: 0.5; cursor: not-allowed; }
 
+/* Cloud ASR provider fields — shown in VoiceSelector when asrProvider is
+   'cloud'. Mirrors .voice-select so the inputs read as one settings block. */
+.asr-cloud-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+}
+.asr-cloud-input {
+  width: 100%;
+  padding: 8px 10px;
+  background: var(--bg-stage);
+  border: 1px solid var(--border-soft);
+  color: var(--text-primary);
+  font-size: 12px;
+  border-radius: var(--radius-sm);
+  font-family: inherit;
+  outline: none;
+  box-sizing: border-box;
+  transition: border-color var(--transition);
+}
+.asr-cloud-input:focus { border-color: var(--accent); }
+
 .voice-select-guide {
   margin-top: 8px;
   width: 100%;
@@ -8917,6 +8940,7 @@ html.handheld { --density-scale: 1.2; }
   color: #fff;
 }
 .handheld .handheld-mode-option { min-height: 44px; }
+.handheld .asr-cloud-input { min-height: 44px; font-size: 14px; }
 
 /* Version tag in the IDE manager list (Phase 4 panel). */
 .ide-manager-ide-version { color: var(--text-secondary); font-size: 12px; }

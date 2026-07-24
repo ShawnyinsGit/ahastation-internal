@@ -1,8 +1,11 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { setSelectedVoiceName, setSpeechFilterMode, useVoices, warmupTTS } from './useSpeech';
 import type { SpeechFilterMode } from '../lib/speech-format';
 import type { HandheldOverride } from '../lib/handheld-mode';
 import { hasPremiumChineseVoice, listChineseVoices } from '../lib/voice-quality';
+import type { AsrProvider, CloudAsrSettings } from '../types';
+
+const DEFAULT_CLOUD_ASR: CloudAsrSettings = { baseUrl: '', apiKey: '', model: 'whisper-1' };
 
 export function useVoicePreferences() {
   const [selectedVoiceName, setSelectedVoiceNameState] = useState<string | null>(null);
@@ -13,6 +16,11 @@ export function useVoicePreferences() {
   const [voicePolishEnabled, setVoicePolishEnabled] = useState(false);
   const [reportModeEnabled, setReportModeEnabled] = useState(false);
   const [handheldMode, setHandheldMode] = useState<HandheldOverride>('auto');
+  const [asrProvider, setAsrProvider] = useState<AsrProvider>('local');
+  const [cloudAsr, setCloudAsr] = useState<CloudAsrSettings>(DEFAULT_CLOUD_ASR);
+  // Latest cloud form values for the onBlur commit — state inside a callback
+  // would go stale between keystrokes.
+  const cloudAsrRef = useRef(cloudAsr);
 
   const { voices, ready: voicesReady } = useVoices();
   const isMac = typeof navigator !== 'undefined' && /Mac/i.test(navigator.platform);
@@ -27,6 +35,9 @@ export function useVoicePreferences() {
       setVoicePolishEnabled(pref.voicePolishEnabled);
       setReportModeEnabled(pref.reportModeEnabled);
       setHandheldMode(pref.handheldMode);
+      setAsrProvider(pref.asrProvider);
+      setCloudAsr(pref.cloudAsr);
+      cloudAsrRef.current = pref.cloudAsr;
       setSelectedVoiceName(pref.selectedVoiceName);
       setSpeechFilterMode(pref.speechFilterMode);
     }).catch(() => {});
@@ -78,6 +89,25 @@ export function useVoicePreferences() {
     void window.vibeMeet.setVoicePref({ handheldMode: mode });
   }, []);
 
+  const handleAsrProviderChange = useCallback((provider: AsrProvider) => {
+    setAsrProvider(provider);
+    void window.vibeMeet.setVoicePref({ asrProvider: provider });
+  }, []);
+
+  // Typing only updates local state; the write to settings.json happens on
+  // blur (handleCloudAsrCommit) so each keystroke doesn't hit disk.
+  const handleCloudAsrInput = useCallback((patch: Partial<CloudAsrSettings>) => {
+    setCloudAsr((prev) => {
+      const next = { ...prev, ...patch };
+      cloudAsrRef.current = next;
+      return next;
+    });
+  }, []);
+
+  const handleCloudAsrCommit = useCallback(() => {
+    void window.vibeMeet.setVoicePref({ cloudAsr: cloudAsrRef.current });
+  }, []);
+
   const handleOpenGuide = useCallback(() => setGuideOpen(true), []);
   const handleGuideClose = useCallback(() => {
     setGuideOpen(false);
@@ -96,6 +126,8 @@ export function useVoicePreferences() {
     voicePolishEnabled,
     reportModeEnabled,
     handheldMode,
+    asrProvider,
+    cloudAsr,
     voices,
     voicesReady,
     guideOpen,
@@ -104,6 +136,9 @@ export function useVoicePreferences() {
     handleVoicePolishChange,
     handleReportModeChange,
     handleHandheldModeChange,
+    handleAsrProviderChange,
+    handleCloudAsrInput,
+    handleCloudAsrCommit,
     handleOpenGuide,
     handleGuideClose,
     handleDismissForever,
