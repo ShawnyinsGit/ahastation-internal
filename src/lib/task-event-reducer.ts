@@ -92,6 +92,45 @@ function applyTaskEvent(
       lastSeq: event.seq,
     };
   }
+  if (event.type.startsWith('coordinator-review-')) {
+    const review = data.review && typeof data.review === 'object'
+      ? data.review as Record<string, unknown>
+      : null;
+    if (review && typeof review.id === 'string' && typeof review.status === 'string') {
+      const confirmations = Array.isArray(review.confirmations)
+        ? review.confirmations.filter(
+            (entry): entry is Record<string, unknown> => Boolean(entry && typeof entry === 'object'),
+          )
+        : [];
+      const confirmed = new Set(confirmations.map((entry) => (
+        `${String(entry.chunkId ?? '')}\0${String(entry.chunkHash ?? '')}`
+      )));
+      const pending = (Array.isArray(review.chunkEvidence) ? review.chunkEvidence : [])
+        .filter(
+          (entry): entry is Record<string, unknown> => Boolean(entry && typeof entry === 'object'),
+        )
+        .filter((chunk) => chunk.requiresUserConfirmation === true)
+        .filter((chunk) => !confirmed.has(`${String(chunk.id ?? '')}\0${String(chunk.hash ?? '')}`))
+        .map((chunk) => ({
+          chunkId: String(chunk.id ?? ''),
+          chunkHash: String(chunk.hash ?? ''),
+          path: String(chunk.path ?? 'withheld evidence'),
+          kind: String(chunk.kind ?? 'withheld'),
+          byteLength: typeof chunk.byteLength === 'number' ? chunk.byteLength : 0,
+          lineCount: typeof chunk.lineCount === 'number' ? chunk.lineCount : 0,
+        }))
+        .filter((chunk) => chunk.chunkId && /^[a-f0-9]{64}$/i.test(chunk.chunkHash));
+      return {
+        ...snapshot,
+        reviewEvidence: {
+          reviewId: review.id,
+          status: review.status,
+          pending,
+        },
+        lastSeq: event.seq,
+      };
+    }
+  }
   return { ...snapshot, lastSeq: event.seq };
 }
 

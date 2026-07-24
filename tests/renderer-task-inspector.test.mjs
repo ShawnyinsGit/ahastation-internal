@@ -60,6 +60,9 @@ test('high-risk approval is visible and normal mode has no per-task accept actio
   assert.match(inspector, /高风险确认/);
   assert.match(permission, /High-risk approval/);
   assert.match(permission, /高风险操作不会被 Coordinator 自动批准/);
+  assert.match(inspector, /确认已人工检查/);
+  assert.match(inspector, /tasks\.confirmReviewEvidence/);
+  assert.match(inspector, /该内容不会发送给 Coordinator 模型/);
   assert.match(review, /没有逐任务用户验收按钮/);
   assert.doesNotMatch(inspector, /acceptDelivery|通过 · 验收/);
 });

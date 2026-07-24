@@ -18,6 +18,11 @@ export const MEETING_TOOLS = {
   STEER_TASK: 'steer_task',
   INTERRUPT_TASK: 'interrupt_task',
   FORWARD_TASK_MESSAGE: 'forward_task_message',
+  INSPECT_DELIVERY_REVIEW: 'inspect_delivery_review',
+  GET_DELIVERY_REVIEW_CHUNK: 'get_delivery_review_chunk',
+  SUBMIT_DELIVERY_CHUNK_REVIEW: 'submit_delivery_chunk_review',
+  COMPLETE_DELIVERY_REVIEW: 'complete_delivery_review',
+  REQUEST_DELIVERY_REWORK: 'request_delivery_rework',
   ASK_COORDINATOR: 'ask_coordinator',
   TASK_DONE: 'task_done',
   SUBMIT_WORK_REPORT: 'submit_work_report',
@@ -237,6 +242,39 @@ export const forwardTaskMessageArgsSchema = {
   fromTaskId: z.string().trim().min(1).max(64),
   toTaskId: z.string().trim().min(1).max(64),
   messageId: z.string().trim().min(1).max(500),
+};
+
+const coordinatorReviewFindingSchema = z.object({
+  code: z.string().trim().min(1).max(200),
+  message: z.string().trim().min(1).max(4_000),
+  blocking: z.boolean(),
+  path: z.string().trim().min(1).max(4_096).optional(),
+}).strict();
+
+export const inspectDeliveryReviewArgsSchema = {
+  reviewId: z.string().trim().min(1).max(500),
+};
+
+export const getDeliveryReviewChunkArgsSchema = {
+  reviewId: z.string().trim().min(1).max(500),
+  chunkId: z.string().trim().min(1).max(500).optional(),
+};
+
+export const submitDeliveryChunkReviewArgsSchema = {
+  reviewId: z.string().trim().min(1).max(500),
+  chunkId: z.string().trim().min(1).max(500),
+  chunkHash: z.string().regex(/^[a-f0-9]{64}$/u),
+  verdict: z.enum(['passed', 'blocking']),
+  findings: z.array(coordinatorReviewFindingSchema).max(100),
+};
+
+export const completeDeliveryReviewArgsSchema = {
+  reviewId: z.string().trim().min(1).max(500),
+};
+
+export const requestDeliveryReworkArgsSchema = {
+  reviewId: z.string().trim().min(1).max(500),
+  findings: z.array(coordinatorReviewFindingSchema).min(1).max(100),
 };
 
 export const askHostArgsSchema = {

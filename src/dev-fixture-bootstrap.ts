@@ -458,6 +458,22 @@ function installFixture(fixture: string): void {
             reviewCoverage: { reviewedChunks: 7, totalChunks: 9, complete: false },
             candidateCommit: '514ee30a144ce8a4',
           }],
+          ...(taskId === 'task-claude'
+            ? {
+                reviewEvidence: {
+                  reviewId: 'fixture-review',
+                  status: 'active',
+                  pending: [{
+                    chunkId: 'fixture-binary-chunk',
+                    chunkHash: 'a'.repeat(64),
+                    path: 'release/AhaMeet-arm64.dmg',
+                    kind: 'binary',
+                    byteLength: 128_000,
+                    lineCount: 0,
+                  }],
+                },
+              }
+            : {}),
           diagnostics: [],
           lastSeq: 0,
         },
@@ -470,6 +486,7 @@ function installFixture(fixture: string): void {
       followUp: ok,
       steer: async () => ({ ok: true, queued: true }),
       interrupt: ok,
+      confirmReviewEvidence: ok,
     },
     auth: {
       loginSubscription: ok,

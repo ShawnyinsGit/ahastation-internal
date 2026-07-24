@@ -10414,6 +10414,56 @@ html.handheld { --density-scale: 1.2; }
 .task-activity-timeline strong { color: var(--text-secondary); font-size: 9px; }
 .task-activity-timeline small,
 .task-activity-timeline time { color: var(--text-muted); font-size: 8px; }
+.task-permission-stack { display: grid; gap: 12px; }
+.task-review-evidence-confirmation {
+  display: grid;
+  gap: 9px;
+  padding: 12px;
+  border: 1px solid rgba(255, 189, 102, .32);
+  border-radius: 10px;
+  background: rgba(255, 173, 66, .055);
+}
+.task-review-evidence-confirmation header {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: #ffbd66;
+}
+.task-review-evidence-confirmation header div {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+.task-review-evidence-confirmation header strong { color: var(--text-primary); font-size: 11px; }
+.task-review-evidence-confirmation header small { color: #ffbd66; font-size: 8px; text-transform: uppercase; }
+.task-review-evidence-confirmation > code,
+.task-review-evidence-hash {
+  overflow-wrap: anywhere;
+  color: #aebeff;
+  font-size: 8px;
+}
+.task-review-evidence-confirmation > p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 9px;
+  line-height: 1.55;
+}
+.task-review-evidence-confirmation > button {
+  justify-self: start;
+  padding: 7px 10px;
+  border: 1px solid rgba(255, 189, 102, .38);
+  border-radius: 7px;
+  background: rgba(255, 189, 102, .12);
+  color: #ffd39a;
+  font: inherit;
+  font-size: 9px;
+  cursor: pointer;
+}
+.task-review-evidence-confirmation > button:hover:not(:disabled) {
+  background: rgba(255, 189, 102, .2);
+}
+.task-review-evidence-confirmation > button:disabled { cursor: wait; opacity: .6; }
 .task-permission-clear {
   display: grid;
   min-height: 220px;

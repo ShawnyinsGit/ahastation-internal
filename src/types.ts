@@ -311,6 +311,18 @@ export interface RendererTaskSnapshot {
     delivery?: DeliveryView;
   }>;
   diagnostics: Array<{ code: string; message: string }>;
+  reviewEvidence?: {
+    reviewId: string;
+    status: string;
+    pending: Array<{
+      chunkId: string;
+      chunkHash: string;
+      path: string;
+      kind: string;
+      byteLength: number;
+      lineCount: number;
+    }>;
+  };
   lastSeq: number;
 }
 
@@ -359,6 +371,13 @@ export interface TasksApi {
     taskId: string,
     reason?: string,
   ) => Promise<{ ok: boolean; error?: string }>;
+  confirmReviewEvidence: (
+    sessionId: string,
+    taskId: string,
+    reviewId: string,
+    chunkId: string,
+    chunkHash: string,
+  ) => Promise<{ ok: boolean; error?: string; review?: unknown }>;
 }
 
 export interface TaskWorkspaceSnapshot {

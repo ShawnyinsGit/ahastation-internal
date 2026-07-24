@@ -31,6 +31,7 @@ import { WorkerScheduler, type SessionFactory } from './worker-scheduler.js';
 import {
   TALKER_PROMPT,
   COORDINATOR_ROLE_PROMPT,
+  COORDINATOR_REVIEW_PROMPT,
   EXPERT_ROLE_PROMPT,
   REPORT_MODE_SUFFIX,
 } from './orchestrator-prompts.js';
@@ -276,7 +277,9 @@ export class HostGroup {
     this.ready = false;
     const meetingMcp = buildTalkerMcp(this.bridge, this.isCoordinator, this.id);
 
-    const rolePrompt = this.isCoordinator() ? COORDINATOR_ROLE_PROMPT : EXPERT_ROLE_PROMPT;
+    const rolePrompt = this.isCoordinator()
+      ? `${COORDINATOR_ROLE_PROMPT}${COORDINATOR_REVIEW_PROMPT}`
+      : EXPERT_ROLE_PROMPT;
     let systemPrompt: string = TALKER_PROMPT + rolePrompt;
     try {
       const memoryEntries = await selectRelevant(this.projectId, {

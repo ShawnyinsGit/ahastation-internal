@@ -74,6 +74,15 @@ import { DeliveryHarness } from './delivery-harness.js';
 import { CommandDeliveryVerifier } from './delivery-verifier.js';
 import { DeterministicDeliveryReviewer } from './delivery-reviewer.js';
 import { WorkspaceDeliveryIntegrator } from './delivery-integrator.js';
+import { prepareFrozenDeliveryCandidate } from './delivery-candidate.js';
+import {
+  CoordinatorReviewDriver,
+  type CoordinatorReviewBriefing,
+} from './coordinator-review-driver.js';
+import {
+  safeCoordinatorReviewProjection,
+  type CoordinatorReviewFinding,
+} from './coordinator-review.js';
 import { authorizeMeetingCommand, type MeetingCommandResult } from './meeting-command.js';
 import { TaskWorkspaceManager } from './task-workspace.js';
 import { DiagnosticLogger } from './diagnostic-logger.js';
@@ -155,6 +164,10 @@ interface OrchestratorOpts {
   resumeBackendSessions?: Record<string, BackendSessionSnapshot>;
   recoveredTasks?: Array<Record<string, unknown>>;
   recoveredPlanVersion?: number;
+  /** Optional workspace allocator override. Production uses the Meeting-owned
+   * manager created below; tests with stub sessions may inject one to exercise
+   * the real managed-worktree delivery path without spawning a backend CLI. */
+  workspaceManager?: TaskWorkspaceManager;
 }
 
 export class Orchestrator implements OrchestratorBridge {
@@ -179,7 +192,9 @@ export class Orchestrator implements OrchestratorBridge {
   private taskMailbox: TaskMailbox;
   private taskProjection: TaskProjectionResult = { tasks: [], diagnostics: [] };
   private deliveryHarness: DeliveryHarness;
+  private coordinatorReviewDriver: CoordinatorReviewDriver;
   private workspaceManager: TaskWorkspaceManager;
+  private customWorkspaceManager: boolean;
   private diagnostics: DiagnosticLogger;
   private resumeBackendSessions: Record<string, BackendSessionSnapshot>;
   private recoveredTasks: Array<Record<string, unknown>>;
@@ -252,11 +267,39 @@ export class Orchestrator implements OrchestratorBridge {
       : 0;
     this.repository = new MeetingRepository(this.meetingId, opts.recoverySeq);
     this.taskMailbox = new TaskMailbox(this.repository);
-    this.workspaceManager = new TaskWorkspaceManager(this.meetingId, this.cwd);
+    this.customWorkspaceManager = opts.workspaceManager !== undefined;
+    this.workspaceManager = opts.workspaceManager
+      ?? new TaskWorkspaceManager(this.meetingId, this.cwd);
+    this.coordinatorReviewDriver = new CoordinatorReviewDriver({
+      append: async (type, payload) => {
+        const projection = (payload as {
+          session?: { taskId?: string; deliveryId?: string; attempt?: number };
+        }).session;
+        await this.repository.appendTaskEvent(type, {
+          schemaVersion: 1,
+          taskId: projection?.taskId ?? projection?.deliveryId ?? 'unknown-delivery',
+          ...(projection?.attempt ? { attempt: projection.attempt } : {}),
+          data: payload,
+        });
+      },
+      flush: () => this.repository.flush(),
+      notifyCoordinator: (briefing) => this.notifyCoordinatorReview(briefing),
+      onCompleted: async (session) => {
+        await this.deliveryHarness.completeCoordinatorReview(session.deliveryId, session);
+      },
+      onReworkRequested: async (session) => {
+        await this.deliveryHarness.requestCoordinatorRework(session.deliveryId, session);
+      },
+    });
     this.deliveryHarness = new DeliveryHarness({
       executionMode: 'external',
       verifier: new CommandDeliveryVerifier(),
       reviewer: new DeterministicDeliveryReviewer(),
+      candidatePreparer: {
+        prepare: (order, report, verification) =>
+          prepareFrozenDeliveryCandidate({ order, report, verification }),
+      },
+      reviewDriver: this.coordinatorReviewDriver,
       integrator: new WorkspaceDeliveryIntegrator(this.cwd),
     });
     this.diagnostics = new DiagnosticLogger(this.meetingId);
@@ -408,7 +451,10 @@ export class Orchestrator implements OrchestratorBridge {
       isClosed: () => this.closed,
       getSpeechFilterMode: () => (getSettings().speechFilterMode === 'off' ? 'off' : 'strict'),
       isCoordinator: () => this.coordinatorHostId === id,
-      workspaceManager: id === DEFAULT_HOST_ID && this.sessionFactory === Orchestrator.defaultClaudeFactory
+      workspaceManager: id === DEFAULT_HOST_ID && (
+        this.sessionFactory === Orchestrator.defaultClaudeFactory
+        || this.customWorkspaceManager
+      )
         ? this.workspaceManager
         : undefined,
       meetingId: this.meetingId,
@@ -1617,6 +1663,54 @@ export class Orchestrator implements OrchestratorBridge {
     return view;
   }
 
+  inspectDeliveryReview(reviewId: string) {
+    return safeCoordinatorReviewProjection(this.coordinatorReviewDriver.inspect(reviewId));
+  }
+
+  getDeliveryReviewChunk(reviewId: string, chunkId?: string) {
+    const chunk = this.coordinatorReviewDriver.getChunk(reviewId, chunkId);
+    if (!chunk) return null;
+    if (chunk.requiresUserConfirmation) {
+      const { content: _content, ...safe } = chunk;
+      return safe;
+    }
+    return chunk;
+  }
+
+  async submitDeliveryChunkReview(
+    reviewId: string,
+    input: {
+      chunkId: string;
+      chunkHash: string;
+      verdict: 'passed' | 'blocking';
+      findings: CoordinatorReviewFinding[];
+    },
+  ) {
+    const session = await this.coordinatorReviewDriver.submitChunkReview(reviewId, input);
+    return safeCoordinatorReviewProjection(session);
+  }
+
+  async completeDeliveryReview(reviewId: string) {
+    const session = await this.coordinatorReviewDriver.complete(reviewId);
+    return safeCoordinatorReviewProjection(session);
+  }
+
+  async requestDeliveryRework(
+    reviewId: string,
+    findings: CoordinatorReviewFinding[],
+  ) {
+    const session = await this.coordinatorReviewDriver.requestRework(reviewId, findings);
+    return safeCoordinatorReviewProjection(session);
+  }
+
+  async confirmDeliveryReviewEvidence(
+    reviewId: string,
+    input: { chunkId: string; chunkHash: string; decisionId: string },
+  ) {
+    const session = await this.coordinatorReviewDriver.confirmEvidence(reviewId, input);
+    return safeCoordinatorReviewProjection(session);
+  }
+
   submitWorkerReport(workerId: string, report: import('./worker-protocol.js').WorkReport): void {
     this.meetingScheduler.submitWorkerReport(workerId, report);
   }
@@ -1631,6 +1725,18 @@ export class Orchestrator implements OrchestratorBridge {
 
   submitWorkerDelivery(workerId: string, files: string[]): void {
     this.meetingScheduler.submitWorkerDelivery(workerId, files);
+  }
+
+  private notifyCoordinatorReview(briefing: CoordinatorReviewBriefing): void {
+    const host = this.hostGroups.get(this.coordinatorHostId)?.getHost();
+    if (!host) {
+      void this.coordinatorReviewDriver.pauseForDisconnect(briefing.reviewId);
+      return;
+    }
+    host.sendUserText(
+      `(coordinator review)\n${JSON.stringify(briefing)}`,
+      'high',
+    );
   }
 
   // ===========================================================================

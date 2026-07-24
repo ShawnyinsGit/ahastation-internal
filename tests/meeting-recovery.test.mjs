@@ -1,10 +1,15 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
 
 import { MeetingRepository } from '../dist-electron/meeting-repository.js';
 import { Orchestrator } from '../dist-electron/orchestrator.js';
+import { TaskWorkspaceManager } from '../dist-electron/task-workspace.js';
 
 function fakeSessionFactory() {
   return {
@@ -112,10 +117,19 @@ test('canonical WorkerEvent and delivery state are journaled before renderer emi
   const events = [];
   const sessions = [];
   const meetingId = `journal-first-${randomUUID()}`;
+  const cwd = mkdtempSync(join(tmpdir(), 'ahastation-journal-review-'));
+  const worktreeRoot = mkdtempSync(join(tmpdir(), 'ahastation-journal-worktrees-'));
+  execFileSync('git', ['init'], { cwd });
+  execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd });
+  execFileSync('git', ['config', 'user.name', 'AhaStation Test'], { cwd });
+  writeFileSync(join(cwd, 'README.md'), '# Base\n');
+  execFileSync('git', ['add', '--', 'README.md'], { cwd });
+  execFileSync('git', ['commit', '-m', 'base'], { cwd });
   const orchestrator = new Orchestrator({
     emit(event) { events.push(event); },
-    cwd: '/tmp',
+    cwd,
     meetingId,
+    workspaceManager: new TaskWorkspaceManager(meetingId, cwd, { worktreeRoot }),
     sessionFactory(opts) {
       const session = {
         opts,
@@ -131,36 +145,103 @@ test('canonical WorkerEvent and delivery state are journaled before renderer emi
     },
   });
   try {
+    await orchestrator.start();
     await orchestrator.installPlan([{
       id: 'journal-task',
       title: 'Journal task',
       prompt: 'produce evidence',
       deps: [],
+      executorBackendId: 'claude-code',
+      writePaths: ['src'],
+      executionProfile: {
+        schemaVersion: 1,
+        backendId: 'claude-code',
+        workMode: 'balanced',
+        contextMode: 'meeting-summary',
+        timeoutMs: 1_800_000,
+        maxTokenBudget: 200_000,
+      },
+      contextSelection: {
+        mode: 'meeting-summary',
+        messageIds: [],
+        decisionIds: [],
+        dependencyTaskIds: [],
+        attachmentIds: [],
+      },
+      workspaceMode: 'git-worktree',
+      authorityRequest: {
+        writePaths: ['src'],
+        toolKinds: ['read', 'write'],
+        workingDirectories: ['.'],
+        commands: [],
+        environmentKeys: [],
+        maxCommandTimeoutMs: 1_800_000,
+        networkHosts: [],
+      },
     }]);
-    while (sessions.length === 0) await new Promise((resolve) => setImmediate(resolve));
-    sessions[0].opts.emit({
+    let workerSession;
+    while (!workerSession) {
+      workerSession = sessions.find((session) => session.opts.cwd !== cwd);
+      if (!workerSession) await new Promise((resolve) => setImmediate(resolve));
+    }
+    mkdirSync(join(workerSession.opts.cwd, 'src'), { recursive: true });
+    writeFileSync(join(workerSession.opts.cwd, 'src', 'result.ts'), 'export const result = true;\n');
+    workerSession.opts.emit({
       kind: 'worker-signal',
       signal: { kind: 'progress', message: 'started' },
     });
-    sessions[0].opts.emit({
+    workerSession.opts.emit({
       kind: 'worker-signal',
       signal: {
         kind: 'delivery',
         report: {
           status: 'completed',
           summary: 'done',
-          files: [],
+          files: [{ path: 'src/result.ts', action: 'created' }],
           tests: [],
           unresolved: [],
         },
       },
     });
-    const deadline = Date.now() + 2_000;
+    // Freezing and committing an exact delivery candidate can take several
+    // seconds on Windows worktrees. This is an integration timeout, not a
+    // scheduler polling budget.
+    const reviewDeadline = Date.now() + 15_000;
+    while (!events.some((event) => (
+      event.event.kind === 'delivery-status'
+      && event.event.delivery.status === 'coordinator-reviewing'
+    ))) {
+      if (Date.now() > reviewDeadline) {
+        const journal = await MeetingRepository.replay(meetingId);
+        const deliveryStatuses = events
+          .filter((event) => event.event.kind === 'delivery-status')
+          .map((event) => event.event.delivery);
+        assert.fail(
+          `Coordinator review event did not arrive; delivery=${JSON.stringify(deliveryStatuses)}`
+          + ` journal=${JSON.stringify(journal.map((event) => event.type))}`,
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    const reviewJournal = await MeetingRepository.replay(meetingId);
+    const requested = reviewJournal.find((event) => event.type === 'coordinator-review-requested');
+    assert.ok(requested);
+    const reviewId = requested.payload.data.session.id;
+    const chunk = orchestrator.getDeliveryReviewChunk(reviewId);
+    assert.ok(chunk);
+    await orchestrator.submitDeliveryChunkReview(reviewId, {
+      chunkId: chunk.id,
+      chunkHash: chunk.hash,
+      verdict: 'passed',
+      findings: [],
+    });
+    await orchestrator.completeDeliveryReview(reviewId);
+    const acceptanceDeadline = Date.now() + 15_000;
     while (!events.some((event) => (
       event.event.kind === 'delivery-status'
       && event.event.delivery.status === 'awaiting-delivery-acceptance'
     ))) {
-      if (Date.now() > deadline) assert.fail('renderer delivery event did not arrive');
+      if (Date.now() > acceptanceDeadline) assert.fail('renderer delivery event did not arrive');
       await new Promise((resolve) => setTimeout(resolve, 5));
     }
     const journal = await MeetingRepository.replay(meetingId);
@@ -176,6 +257,8 @@ test('canonical WorkerEvent and delivery state are journaled before renderer emi
     )), true);
   } finally {
     await orchestrator.end();
+    await rm(worktreeRoot, { recursive: true, force: true });
+    await rm(cwd, { recursive: true, force: true });
     await rm(`/tmp/meetings/${meetingId}`, { recursive: true, force: true });
   }
 });

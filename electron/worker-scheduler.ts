@@ -1673,6 +1673,7 @@ export class WorkerScheduler {
       executing: 'running',
       verifying: 'verifying',
       reviewing: 'reviewing',
+      'coordinator-reviewing': 'reviewing',
       'awaiting-delivery-acceptance': 'awaiting-acceptance',
       reworking: 'reworking',
       accepted: 'accepted',
@@ -2337,6 +2338,7 @@ export class WorkerScheduler {
             }];
         const proposed = await this.opts.deliveryHarness.propose({
           meetingId: this.opts.meetingId ?? 'meeting',
+          taskId: handle.currentTaskId,
           objective: handle.prompt,
           workspace: workerCwd,
           sourceRevision: handle.workspace?.sourceRevision ?? 'non-git',

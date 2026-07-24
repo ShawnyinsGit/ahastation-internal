@@ -1,4 +1,7 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import type { CoordinatorReviewDriver } from './coordinator-review-driver.js';
+import type { CoordinatorReviewSession } from './coordinator-review.js';
+import type { FrozenDeliveryCandidate } from './delivery-candidate.js';
 import type { AcceptanceCriterion, WorkReport } from './worker-protocol.js';
 
 export type { AcceptanceCriterion, WorkReport } from './worker-protocol.js';
@@ -9,6 +12,7 @@ export type DeliveryStatus =
   | 'executing'
   | 'verifying'
   | 'reviewing'
+  | 'coordinator-reviewing'
   | 'awaiting-delivery-acceptance'
   | 'integrating'
   | 'accepted'
@@ -19,6 +23,7 @@ export type DeliveryStatus =
 
 export interface DeliveryProposal {
   meetingId: string;
+  taskId?: string;
   objective: string;
   workspace: string;
   sourceRevision: string;
@@ -27,12 +32,14 @@ export interface DeliveryProposal {
 
 export interface DeliverySpec {
   version: number;
+  taskId?: string;
   objective: string;
   acceptanceCriteria: AcceptanceCriterion[];
 }
 
 export interface WorkOrder {
   deliveryId: string;
+  taskId?: string;
   attempt: number;
   meetingId: string;
   goal: string;
@@ -58,6 +65,11 @@ export interface DeliveryCandidate {
   report: WorkReport;
   verification: VerificationEvidence;
   review: ReviewVerdict;
+  frozen?: FrozenDeliveryCandidate;
+  reviewSession?: {
+    id: string;
+    reviewHash: string;
+  };
 }
 
 export interface DeliveryAttempt {
@@ -70,6 +82,7 @@ export interface DeliveryAttempt {
     | 'worker-incomplete'
     | 'verification-failed'
     | 'review-failed'
+    | 'coordinator-reviewing'
     | 'awaiting-acceptance'
     | 'returned'
     | 'accepted';
@@ -120,6 +133,14 @@ export interface DeliveryHarnessDependencies {
   reviewer: {
     review(order: WorkOrder, report: WorkReport, verification: VerificationEvidence): Promise<ReviewVerdict>;
   };
+  candidatePreparer?: {
+    prepare(
+      order: WorkOrder,
+      report: WorkReport,
+      verification: VerificationEvidence,
+    ): Promise<FrozenDeliveryCandidate>;
+  };
+  reviewDriver?: CoordinatorReviewDriver;
   integrator: {
     integrate(view: DeliveryView, candidate: DeliveryCandidate): Promise<Record<string, unknown>>;
   };
@@ -186,6 +207,7 @@ export class DeliveryHarness {
       status: 'awaiting-spec-approval',
       spec: {
         version: 1,
+        ...(input.taskId ? { taskId: input.taskId } : {}),
         objective: input.objective,
         acceptanceCriteria: structuredClone(input.acceptanceCriteria),
       },
@@ -310,6 +332,90 @@ export class DeliveryHarness {
   }
 
   async inspect(id: string): Promise<DeliveryView> { return cloneView(this.require(id).view); }
+
+  async completeCoordinatorReview(
+    deliveryId: string,
+    session: CoordinatorReviewSession & { reviewHash: string },
+  ): Promise<DeliveryView> {
+    const record = this.require(deliveryId);
+    if (record.view.status === 'awaiting-delivery-acceptance' && record.view.candidate) {
+      if (
+        record.view.candidate.reviewSession?.id === session.id
+        && record.view.candidate.reviewSession.reviewHash === session.reviewHash
+      ) {
+        return cloneView(record.view);
+      }
+      throw new Error('a different reviewed candidate already owns this delivery');
+    }
+    if (record.view.status !== 'coordinator-reviewing') {
+      throw new Error(`delivery is not awaiting Coordinator review in ${record.view.status}`);
+    }
+    if (session.status !== 'completed' || !session.reviewHash) {
+      throw new Error('Coordinator review is incomplete');
+    }
+    const attempt = record.view.attempts.find((item) => item.attempt === session.attempt);
+    if (!attempt?.verification) throw new Error('verified delivery attempt is missing');
+    if (
+      session.deliveryId !== deliveryId
+      || session.attempt !== record.view.attempt
+      || session.candidate.reportHash !== hashJson(attempt.report)
+      || session.candidate.verificationHash !== hashJson(attempt.verification)
+    ) {
+      throw new Error('Coordinator review does not match the verified delivery attempt');
+    }
+    const review: ReviewVerdict = {
+      passed: true,
+      findings: session.reviews.flatMap((item) => item.findings),
+    };
+    attempt.review = structuredClone(review);
+    attempt.outcome = 'awaiting-acceptance';
+    attempt.updatedAt = this.now();
+    record.view.candidate = {
+      id: session.candidate.id,
+      attempt: session.attempt,
+      report: structuredClone(attempt.report),
+      verification: structuredClone(attempt.verification),
+      review,
+      frozen: structuredClone(session.candidate),
+      reviewSession: {
+        id: session.id,
+        reviewHash: session.reviewHash,
+      },
+    };
+    record.view.error = undefined;
+    this.transition(record, 'awaiting-delivery-acceptance');
+    return cloneView(record.view);
+  }
+
+  async requestCoordinatorRework(
+    deliveryId: string,
+    session: CoordinatorReviewSession,
+  ): Promise<DeliveryView> {
+    const record = this.require(deliveryId);
+    if (record.view.status !== 'coordinator-reviewing') {
+      throw new Error(`delivery is not under Coordinator review in ${record.view.status}`);
+    }
+    if (session.status !== 'rework-requested' || !session.rework?.findings.length) {
+      throw new Error('Coordinator review has no blocking rework request');
+    }
+    const attempt = record.view.attempts.find((item) => item.attempt === session.attempt);
+    if (!attempt) throw new Error('reviewed delivery attempt is missing');
+    const review: ReviewVerdict = {
+      passed: false,
+      findings: structuredClone(session.rework.findings),
+    };
+    attempt.review = review;
+    attempt.outcome = 'review-failed';
+    attempt.feedback = session.rework.findings.map((finding) => finding.message).join('\n');
+    attempt.updatedAt = this.now();
+    record.view.error = 'Coordinator review requested rework';
+    record.view.candidate = undefined;
+    this.transition(record, 'reworking', 'delivery.status-changed', {
+      reason: record.view.error,
+      review,
+    });
+    return cloneView(record.view);
+  }
 
   /**
    * Submit a report produced by the Meeting Scheduler's already-running
@@ -441,6 +547,36 @@ export class DeliveryHarness {
       return;
     }
 
+    if (this.deps.candidatePreparer && this.deps.reviewDriver) {
+      let frozen: FrozenDeliveryCandidate;
+      try {
+        frozen = await this.deps.candidatePreparer.prepare(order, report, verification);
+      } catch (error) {
+        record.view.error = error instanceof Error ? error.message : String(error);
+        attempt.outcome = 'review-failed';
+        attempt.updatedAt = this.now();
+        this.transition(record, 'reworking', 'delivery.status-changed', {
+          reason: record.view.error,
+          stage: 'candidate-freeze',
+        });
+        return;
+      }
+      this.transition(record, 'coordinator-reviewing');
+      const session = await this.deps.reviewDriver.request({
+        candidate: frozen,
+        verification,
+      });
+      attempt.outcome = 'coordinator-reviewing';
+      attempt.updatedAt = this.now();
+      this.append(record, 'delivery.status-changed', {
+        reviewId: session.id,
+        candidateId: frozen.id,
+        commit: frozen.commit,
+        diffHash: frozen.diffHash,
+      });
+      return;
+    }
+
     record.view.error = undefined;
     record.view.candidate = {
       id: this.id(),
@@ -457,6 +593,7 @@ export class DeliveryHarness {
   private toWorkOrder(view: DeliveryView): WorkOrder {
     return {
       deliveryId: view.id,
+      ...(view.spec.taskId ? { taskId: view.spec.taskId } : {}),
       attempt: view.attempt,
       meetingId: view.meetingId,
       goal: view.spec.objective,
@@ -501,4 +638,19 @@ function cloneView(view: DeliveryView): DeliveryView { return structuredClone(vi
 
 function isTerminal(status: DeliveryStatus): boolean {
   return status === 'accepted' || status === 'failed' || status === 'cancelled';
+}
+
+function hashJson(value: unknown): string {
+  return createHash('sha256').update(stableStringify(value), 'utf8').digest('hex');
+}
+
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => `${JSON.stringify(key)}:${stableStringify(entry)}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value);
 }

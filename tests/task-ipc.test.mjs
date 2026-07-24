@@ -61,6 +61,7 @@ function createFixture() {
   let raceEvent = null;
   let durableRecord = null;
   let projectionDiagnostics = [];
+  let reviewTaskId = 'task-a';
   const task = {
     id: 'task-a',
     title: 'Task A',
@@ -133,6 +134,14 @@ function createFixture() {
       calls.push(['interrupt', taskId, reason]);
       return { ok: true };
     },
+    inspectDeliveryReview(reviewId) {
+      calls.push(['inspect-review', reviewId]);
+      return { id: reviewId, taskId: reviewTaskId, status: 'active' };
+    },
+    async confirmDeliveryReviewEvidence(reviewId, input) {
+      calls.push(['confirm-review-evidence', reviewId, input]);
+      return { id: reviewId, taskId: reviewTaskId, status: 'active' };
+    },
   };
   const slot = { id: 'session-a', orchestrator };
   const ctx = {
@@ -151,6 +160,7 @@ function createFixture() {
       durableRecord = value;
       projectionDiagnostics = diagnostics;
     },
+    setReviewTaskId(value) { reviewTaskId = value; },
     emit(value) {
       events.push(value);
       for (const listener of listeners) listener(structuredClone(value));
@@ -196,6 +206,78 @@ test('task snapshot is bounded and hides authority internals', async () => {
   const serialized = JSON.stringify(result.value);
   assert.doesNotMatch(serialized, /src\/secret|npm|internal\.example|SECRET_TOKEN|private\/worktree/);
   assert.match(serialized, /REDACTED/);
+});
+
+test('withheld review evidence is projected safely and confirmation is task-bound', async () => {
+  const setup = createFixture();
+  const chunkHash = 'f'.repeat(64);
+  setup.emit(event(10, 'coordinator-review-requested', {
+    session: {
+      schemaVersion: 1,
+      id: 'review-a',
+      deliveryId: 'delivery-a',
+      taskId: 'task-a',
+      attempt: 1,
+      status: 'active',
+      chunkEvidence: [{
+        id: 'chunk-a',
+        hash: chunkHash,
+        path: 'asset.bin',
+        kind: 'binary',
+        byteLength: 120,
+        lineCount: 0,
+        requiresUserConfirmation: true,
+      }],
+      confirmations: [],
+    },
+  }));
+
+  const snapshot = await setup.service.getSnapshot({
+    sessionId: 'session-a',
+    taskId: 'task-a',
+  });
+  assert.equal(snapshot.ok, true);
+  assert.deepEqual(snapshot.value.reviewEvidence, {
+    reviewId: 'review-a',
+    status: 'active',
+    pending: [{
+      chunkId: 'chunk-a',
+      chunkHash,
+      path: 'asset.bin',
+      kind: 'binary',
+      byteLength: 120,
+      lineCount: 0,
+    }],
+  });
+  assert.doesNotMatch(JSON.stringify(snapshot.value), /raw|content/i);
+
+  const confirmed = await setup.service.confirmReviewEvidence({
+    sessionId: 'session-a',
+    taskId: 'task-a',
+    reviewId: 'review-a',
+    chunkId: 'chunk-a',
+    chunkHash,
+  });
+  assert.equal(confirmed.ok, true);
+  assert.equal(setup.calls.some((call) => (
+    call[0] === 'confirm-review-evidence'
+    && call[1] === 'review-a'
+    && call[2].chunkId === 'chunk-a'
+    && call[2].chunkHash === chunkHash
+    && /^user-/.test(call[2].decisionId)
+  )), true);
+
+  setup.setReviewTaskId('task-other');
+  assert.deepEqual(
+    await setup.service.confirmReviewEvidence({
+      sessionId: 'session-a',
+      taskId: 'task-a',
+      reviewId: 'review-a',
+      chunkId: 'chunk-a',
+      chunkHash,
+    }),
+    { ok: false, error: 'Review does not belong to this task' },
+  );
 });
 
 test('task snapshot uses durable attempt evidence when available', async () => {

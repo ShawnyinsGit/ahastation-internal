@@ -125,6 +125,8 @@ export function TaskInspector({
   const [activeTab, setActiveTab] = useState<InspectorTab>('overview');
   const [loadError, setLoadError] = useState('');
   const [loading, setLoading] = useState(true);
+  const [reviewConfirmationError, setReviewConfirmationError] = useState('');
+  const [confirmingChunkId, setConfirmingChunkId] = useState('');
   const getProjection = useCallback(
     () => meetingStore.getTaskInspectorProjection(sessionId, taskId),
     [sessionId, taskId],
@@ -155,6 +157,35 @@ export function TaskInspector({
   const activity = projection?.activity ?? [];
   const status = snapshot?.task.status ?? worker?.status ?? 'pending';
   const pendingPermission = worker?.pendingPermission ?? null;
+  const pendingReviewEvidence = snapshot?.reviewEvidence?.pending ?? [];
+
+  const confirmReviewEvidence = useCallback(async (
+    reviewId: string,
+    chunkId: string,
+    chunkHash: string,
+  ) => {
+    setReviewConfirmationError('');
+    setConfirmingChunkId(chunkId);
+    try {
+      const result = await window.vibeMeet.tasks.confirmReviewEvidence(
+        sessionId,
+        taskId,
+        reviewId,
+        chunkId,
+        chunkHash,
+      );
+      if (!result.ok) {
+        setReviewConfirmationError(result.error ?? '确认失败');
+        return;
+      }
+      const refreshed = await meetingStore.openTaskInspector(sessionId, taskId);
+      if (!refreshed.ok) setReviewConfirmationError(refreshed.error);
+    } catch (error) {
+      setReviewConfirmationError(error instanceof Error ? error.message : '确认失败');
+    } finally {
+      setConfirmingChunkId('');
+    }
+  }, [sessionId, taskId]);
 
   return (
     <aside className="task-inspector" aria-label="Task Inspector">
@@ -200,7 +231,9 @@ export function TaskInspector({
           >
             <Icon size={14} />
             <span>{label}</span>
-            {id === 'permissions' && pendingPermission && <i aria-label="有待处理权限" />}
+            {id === 'permissions' && (pendingPermission || pendingReviewEvidence.length > 0) && (
+              <i aria-label="有待处理权限" />
+            )}
           </button>
         ))}
       </nav>
@@ -256,15 +289,51 @@ export function TaskInspector({
           <TaskReviewPanel snapshot={snapshot} mode="verification" />
         )}
         {snapshot && activeTab === 'permissions' && (
-          pendingPermission ? (
-            <PermissionCard pending={pendingPermission} onDecide={onResolvePermission} />
-          ) : (
+          <div className="task-permission-stack">
+            {pendingPermission && (
+              <PermissionCard pending={pendingPermission} onDecide={onResolvePermission} />
+            )}
+            {pendingReviewEvidence.map((evidence) => (
+              <section className="task-review-evidence-confirmation" key={evidence.chunkId}>
+                <header>
+                  <ShieldAlert size={18} />
+                  <div>
+                    <strong>需要人工检查的审查证据</strong>
+                    <small>{evidence.kind} · {evidence.byteLength.toLocaleString()} bytes</small>
+                  </div>
+                </header>
+                <code>{evidence.path}</code>
+                <p>
+                  该内容不会发送给 Coordinator 模型。请先在本机检查原始文件，
+                  再确认与哈希绑定的证据已人工验收。
+                </p>
+                <small className="task-review-evidence-hash">
+                  SHA-256 {evidence.chunkHash}
+                </small>
+                <button
+                  type="button"
+                  disabled={confirmingChunkId === evidence.chunkId}
+                  onClick={() => void confirmReviewEvidence(
+                    snapshot.reviewEvidence!.reviewId,
+                    evidence.chunkId,
+                    evidence.chunkHash,
+                  )}
+                >
+                  {confirmingChunkId === evidence.chunkId ? '正在记录…' : '确认已人工检查'}
+                </button>
+              </section>
+            ))}
+            {reviewConfirmationError && (
+              <div className="task-inspector-error" role="alert">{reviewConfirmationError}</div>
+            )}
+            {!pendingPermission && pendingReviewEvidence.length === 0 && (
             <div className="task-permission-clear">
               <CheckCircle2 size={24} />
               <strong>没有待处理权限</strong>
               <p>计划范围内的低风险操作由 Coordinator 自动批准；高风险操作始终在这里确认。</p>
             </div>
-          )
+            )}
+          </div>
         )}
         {snapshot && activeTab === 'integration' && (
           <TaskReviewPanel snapshot={snapshot} mode="integration" />

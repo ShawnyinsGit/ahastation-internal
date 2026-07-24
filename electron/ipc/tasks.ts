@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { ipcMain, type WebContents } from 'electron';
 
 import { redactSecrets } from '../format-error.js';
@@ -86,6 +87,18 @@ export interface RendererTaskSnapshot {
     delivery?: unknown;
   }>;
   diagnostics: Array<{ code: string; message: string }>;
+  reviewEvidence?: {
+    reviewId: string;
+    status: string;
+    pending: Array<{
+      chunkId: string;
+      chunkHash: string;
+      path: string;
+      kind: string;
+      byteLength: number;
+      lineCount: number;
+    }>;
+  };
   lastSeq: number;
 }
 
@@ -223,7 +236,46 @@ function summarizeTaskEnvelope(
       grantHash: safeText(data.grantHash, 100),
     };
   }
+  if (event.type.startsWith('coordinator-review-')) {
+    return {
+      review: redactRendererValue(data.session),
+    };
+  }
   return {};
+}
+
+function latestReviewEvidence(events: readonly RendererTaskEvent[]): RendererTaskSnapshot['reviewEvidence'] {
+  for (const event of [...events].reverse()) {
+    if (!event.type.startsWith('coordinator-review-')) continue;
+    const data = objectValue(event.data);
+    const review = objectValue(data.review);
+    const reviewId = safeText(review.id, 200);
+    const status = safeText(review.status, 100);
+    if (!reviewId || !status) continue;
+    const confirmations = Array.isArray(review.confirmations)
+      ? review.confirmations.map(objectValue)
+      : [];
+    const confirmed = new Set(confirmations.map((entry) => (
+      `${safeText(entry.chunkId, 500) ?? ''}\0${safeText(entry.chunkHash, 100) ?? ''}`
+    )));
+    const pending = (Array.isArray(review.chunkEvidence) ? review.chunkEvidence : [])
+      .map(objectValue)
+      .filter((chunk) => chunk.requiresUserConfirmation === true)
+      .filter((chunk) => !confirmed.has(
+        `${safeText(chunk.id, 500) ?? ''}\0${safeText(chunk.hash, 100) ?? ''}`,
+      ))
+      .map((chunk) => ({
+        chunkId: safeText(chunk.id, 500) ?? '',
+        chunkHash: safeText(chunk.hash, 100) ?? '',
+        path: safeText(chunk.path, 4_096) ?? 'withheld evidence',
+        kind: safeText(chunk.kind, 100) ?? 'withheld',
+        byteLength: typeof chunk.byteLength === 'number' ? chunk.byteLength : 0,
+        lineCount: typeof chunk.lineCount === 'number' ? chunk.lineCount : 0,
+      }))
+      .filter((chunk) => chunk.chunkId && /^[a-f0-9]{64}$/i.test(chunk.chunkHash));
+    return { reviewId, status, pending };
+  }
+  return undefined;
 }
 
 function projectMeetingEventData(
@@ -511,6 +563,7 @@ export class TaskIpcService {
         ...(rawTask.report ? { report: redactRendererValue(rawTask.report) } : {}),
         ...(rawTask.delivery ? { delivery: redactRendererValue(rawTask.delivery) } : {}),
       }];
+    const reviewEvidence = latestReviewEvidence(events);
     const snapshot: RendererTaskSnapshot = {
       schemaVersion: 1,
       sessionId: request.sessionId,
@@ -523,6 +576,7 @@ export class TaskIpcService {
         code: entry.code,
         message: safeText(entry.message, 2_000) ?? 'Task projection diagnostic',
       })),
+      ...(reviewEvidence ? { reviewEvidence } : {}),
       lastSeq: events.at(-1)?.seq ?? 0,
     };
     if (Buffer.byteLength(JSON.stringify(snapshot), 'utf8') > MAX_PAGE_BYTES) {
@@ -712,6 +766,45 @@ export class TaskIpcService {
     }
   }
 
+  async confirmReviewEvidence(payload: unknown): Promise<unknown> {
+    const request = parseRequest(payload);
+    const value = objectValue(payload);
+    const reviewId = safeText(value.reviewId, 200);
+    const chunkId = safeText(value.chunkId, 500);
+    const chunkHash = safeText(value.chunkHash, 100);
+    if (
+      !request
+      || !reviewId
+      || !chunkId
+      || !chunkHash
+      || !ACTOR_ID_RE.test(reviewId)
+      || !/^[a-f0-9]{64}$/i.test(chunkHash)
+    ) {
+      return { ok: false, error: 'Invalid review evidence confirmation' };
+    }
+    const slot = this.ctx.registry.get(request.sessionId);
+    if (!slot) return { ok: false, error: 'Session not found' };
+    try {
+      const review = objectValue(slot.orchestrator.inspectDeliveryReview(reviewId));
+      if (review.taskId !== request.taskId) {
+        return { ok: false, error: 'Review does not belong to this task' };
+      }
+      const confirmed = await slot.orchestrator.confirmDeliveryReviewEvidence(reviewId, {
+        chunkId,
+        chunkHash,
+        decisionId: `user-${randomUUID()}`,
+      });
+      return { ok: true, review: redactRendererValue(confirmed) };
+    } catch (error) {
+      return {
+        ok: false,
+        error: error instanceof Error
+          ? redactSecrets(error.message)
+          : 'Failed to confirm review evidence',
+      };
+    }
+  }
+
   private sendTaskEvent(
     sender: WebContents,
     subscriptionId: string,
@@ -733,4 +826,8 @@ export function registerTasksIpc(ctx: IpcContext): void {
   ipcMain.handle('tasks:follow-up', (_event, payload) => service.followUp(payload));
   ipcMain.handle('tasks:steer', (_event, payload) => service.steer(payload));
   ipcMain.handle('tasks:interrupt', (_event, payload) => service.interrupt(payload));
+  ipcMain.handle(
+    'tasks:confirm-review-evidence',
+    (_event, payload) => service.confirmReviewEvidence(payload),
+  );
 }

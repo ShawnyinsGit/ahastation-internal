@@ -19,6 +19,11 @@ import {
   taskMessageArgsSchema,
   interruptTaskArgsSchema,
   forwardTaskMessageArgsSchema,
+  inspectDeliveryReviewArgsSchema,
+  getDeliveryReviewChunkArgsSchema,
+  submitDeliveryChunkReviewArgsSchema,
+  completeDeliveryReviewArgsSchema,
+  requestDeliveryReworkArgsSchema,
   type PlanMeetingTaskInput,
   type PlanMeetingTask,
 } from './meeting-tools.js';
@@ -26,6 +31,7 @@ import type { WorkReport } from './worker-protocol.js';
 import type { CreateDecisionPayload } from './decisions.js';
 import type { MemoryCategory } from './memory.js';
 import type { WorkerSpecialtyKind } from './orchestrator-types.js';
+import type { CoordinatorReviewFinding } from './coordinator-review.js';
 import { listAssets } from './attachments/assets.js';
 
 export interface DecisionCreationResult {
@@ -62,6 +68,22 @@ export interface OrchestratorBridge {
   queueTaskFollowUp(taskId: string, message: string): Promise<{ id: string; status: string }>;
   interruptWorker(workerId: string, reason?: string): Promise<{ ok: true } | { ok: false; error: string }>;
   forwardTaskMessage(fromTaskId: string, toTaskId: string, messageId: string): Promise<{ id: string; status: string }>;
+  inspectDeliveryReview(reviewId: string): unknown;
+  getDeliveryReviewChunk(reviewId: string, chunkId?: string): unknown;
+  submitDeliveryChunkReview(
+    reviewId: string,
+    input: {
+      chunkId: string;
+      chunkHash: string;
+      verdict: 'passed' | 'blocking';
+      findings: CoordinatorReviewFinding[];
+    },
+  ): Promise<unknown>;
+  completeDeliveryReview(reviewId: string): Promise<unknown>;
+  requestDeliveryRework(
+    reviewId: string,
+    findings: CoordinatorReviewFinding[],
+  ): Promise<unknown>;
   hasWorker(workerId: string): boolean;
   activeWorkerIds(): string[];
   describeWorkers(workerId?: string): string;
@@ -245,6 +267,70 @@ export function buildTalkerMcp(
           if (!canCoordinate()) return denied();
           const forwarded = await bridge.forwardTaskMessage(fromTaskId, toTaskId, messageId);
           return { content: [{ type: 'text', text: `forwarded as ${forwarded.id}; target acknowledgement pending` }] };
+        },
+      ),
+      tool(
+        MEETING_TOOLS.INSPECT_DELIVERY_REVIEW,
+        'Inspect one durable Coordinator review session. Returns bounded metadata and coverage, never arbitrary workspace files.',
+        inspectDeliveryReviewArgsSchema,
+        async ({ reviewId }) => {
+          if (!canCoordinate()) return denied();
+          return {
+            content: [{
+              type: 'text',
+              text: JSON.stringify(bridge.inspectDeliveryReview(reviewId)),
+            }],
+          };
+        },
+      ),
+      tool(
+        MEETING_TOOLS.GET_DELIVERY_REVIEW_CHUNK,
+        'Read one bounded, hash-bound diff chunk from the frozen candidate. Secret, binary and oversized evidence stays withheld for user confirmation.',
+        getDeliveryReviewChunkArgsSchema,
+        async ({ reviewId, chunkId }) => {
+          if (!canCoordinate()) return denied();
+          const chunk = bridge.getDeliveryReviewChunk(reviewId, chunkId);
+          return {
+            content: [{
+              type: 'text',
+              text: chunk ? JSON.stringify(chunk) : 'review coverage is complete',
+            }],
+          };
+        },
+      ),
+      tool(
+        MEETING_TOOLS.SUBMIT_DELIVERY_CHUNK_REVIEW,
+        'Submit a verdict bound to the exact chunk hash. Blocking findings create a structured rework request.',
+        submitDeliveryChunkReviewArgsSchema,
+        async ({ reviewId, chunkId, chunkHash, verdict, findings }) => {
+          if (!canCoordinate()) return denied();
+          const session = await bridge.submitDeliveryChunkReview(reviewId, {
+            chunkId,
+            chunkHash,
+            verdict,
+            findings,
+          });
+          return { content: [{ type: 'text', text: JSON.stringify(session) }] };
+        },
+      ),
+      tool(
+        MEETING_TOOLS.COMPLETE_DELIVERY_REVIEW,
+        'Complete review only after every frozen chunk has hash-bound Coordinator coverage or explicit user confirmation.',
+        completeDeliveryReviewArgsSchema,
+        async ({ reviewId }) => {
+          if (!canCoordinate()) return denied();
+          const session = await bridge.completeDeliveryReview(reviewId);
+          return { content: [{ type: 'text', text: JSON.stringify(session) }] };
+        },
+      ),
+      tool(
+        MEETING_TOOLS.REQUEST_DELIVERY_REWORK,
+        'Request another Worker attempt with bounded blocking findings. This never edits files from the Coordinator.',
+        requestDeliveryReworkArgsSchema,
+        async ({ reviewId, findings }) => {
+          if (!canCoordinate()) return denied();
+          const session = await bridge.requestDeliveryRework(reviewId, findings);
+          return { content: [{ type: 'text', text: JSON.stringify(session) }] };
         },
       ),
       tool(

@@ -93,3 +93,34 @@ test('renderer ignores another task and projects plan status safely', () => {
   assert.equal(next.snapshot.task.status, 'verifying');
   assert.deepEqual(next.snapshot.task.deps, ['task-zero']);
 });
+
+test('live Coordinator review events update pending user evidence', () => {
+  const initial = hydrateTaskProjection(snapshot());
+  const chunkHash = 'a'.repeat(64);
+  const next = reduceTaskEvent(initial, event(8, 5, 'coordinator-review-requested', {
+    review: {
+      id: 'review-a',
+      status: 'active',
+      confirmations: [],
+      chunkEvidence: [{
+        id: 'chunk-a',
+        hash: chunkHash,
+        path: 'asset.bin',
+        kind: 'binary',
+        byteLength: 10,
+        lineCount: 0,
+        requiresUserConfirmation: true,
+      }],
+    },
+  }));
+
+  assert.equal(next.snapshot.reviewEvidence.reviewId, 'review-a');
+  assert.deepEqual(next.snapshot.reviewEvidence.pending, [{
+    chunkId: 'chunk-a',
+    chunkHash,
+    path: 'asset.bin',
+    kind: 'binary',
+    byteLength: 10,
+    lineCount: 0,
+  }]);
+});
