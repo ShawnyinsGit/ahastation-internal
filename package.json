@@ -3,7 +3,8 @@
   "version": "0.17.0",
   "description": "AhaStation — 语音会议式 AI 编程协作（数字员工开会）",
   "author": {
-    "name": "AhaStation"
+    "name": "AhaStation",
+    "email": "contact@ahastation.com"
   },
   "private": true,
   "type": "module",
