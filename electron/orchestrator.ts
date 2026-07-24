@@ -91,6 +91,7 @@ import {
 import {
   safeCoordinatorReviewProjection,
   type CoordinatorReviewFinding,
+  type CoordinatorReviewSession,
 } from './coordinator-review.js';
 import { authorizeMeetingCommand, type MeetingCommandResult } from './meeting-command.js';
 import { TaskWorkspaceManager } from './task-workspace.js';
@@ -130,6 +131,11 @@ import {
   hashTaskAuthorityRequest,
 } from './task-authority.js';
 import { taskBudgetSchema, type TaskBudget } from './task-budget.js';
+import {
+  assertRecoveryActionAllowed,
+  assessTaskRecovery,
+  type TaskRecoveryAction,
+} from './task-recovery.js';
 
 export const MAX_HOSTS = 3;
 
@@ -174,6 +180,7 @@ interface OrchestratorOpts {
   resumeBackendSessions?: Record<string, BackendSessionSnapshot>;
   recoveredTasks?: Array<Record<string, unknown>>;
   recoveredPlanVersion?: number;
+  recoveredReviewSessions?: CoordinatorReviewSession[];
   /** Optional workspace allocator override. Production uses the Meeting-owned
    * manager created below; tests with stub sessions may inject one to exercise
    * the real managed-worktree delivery path without spawning a backend CLI. */
@@ -343,6 +350,13 @@ export class Orchestrator implements OrchestratorBridge {
         await this.meetingScheduler.requestCoordinatorRework(session.deliveryId, session);
       },
     });
+    for (const session of opts.recoveredReviewSessions ?? []) {
+      try {
+        this.coordinatorReviewDriver.restore(session);
+      } catch {
+        // A malformed review projection is never made authoritative.
+      }
+    }
     this.deliveryHarness = new DeliveryHarness({
       executionMode: 'external',
       verifier: deliveryVerifier,
@@ -947,12 +961,24 @@ export class Orchestrator implements OrchestratorBridge {
     this.repository.assertWritable();
     const journal = await MeetingRepository.replay(this.meetingId);
     this.integrationQueue.restore(journal);
+    const interruptedIntegration = await this.integrationQueue.detectInterruptedOperation();
+    if (interruptedIntegration) {
+      const integrationTaskId = this.integrationQueue.snapshot().activeTaskId;
+      const recovered = this.recoveredTasks.find((task) => task.id === integrationTaskId);
+      if (recovered) {
+        recovered.status = 'integration-conflict';
+        recovered.recovery = assessTaskRecovery(recovered);
+        this.meetingScheduler.markRecoveredIntegrationConflict(String(integrationTaskId));
+      }
+    }
     this.restoreFinalMeetingDelivery(journal);
+    await this.reconcileInterruptedFinalAcceptance(journal);
     this.taskMailbox.restore(journal);
     this.taskProjection = projectMeetingTasks(journal);
     await this.defaultHost().start(greeting);
     if (this.recoveredTasks.length > 0) {
       this.meetingScheduler.emitRecoveredState();
+      await this.autoResumeRecoveredReadOnlyTasks();
     }
     if (this.finalMeetingDelivery || this.finalMeetingDecision) {
       this.safeEmit({
@@ -975,27 +1001,97 @@ export class Orchestrator implements OrchestratorBridge {
 
   async resolveRecoveredTask(
     taskId: string,
-    action: 'continue' | 'retry' | 'abandon',
+    action: TaskRecoveryAction,
+  ): Promise<{ ok: true } | { ok: false; error: string }> {
+    return this.resolveRecoveredTaskWithActor(taskId, action, 'user');
+  }
+
+  private async autoResumeRecoveredReadOnlyTasks(): Promise<void> {
+    const candidates = this.recoveredTasks
+      .filter((task) => assessTaskRecovery(task).autoResume)
+      .map((task) => String(task.id ?? ''))
+      .filter(Boolean);
+    for (const taskId of candidates) {
+      const result = await this.resolveRecoveredTaskWithActor(
+        taskId,
+        'continue-read-only',
+        'system-auto-read-only',
+      );
+      if (!result.ok) {
+        await this.repository.append('recovered-task-auto-resume-failed', {
+          schemaVersion: 1,
+          taskId,
+          error: result.error.slice(0, 2_000),
+        });
+      }
+    }
+  }
+
+  private async resolveRecoveredTaskWithActor(
+    taskId: string,
+    action: TaskRecoveryAction,
+    actor: 'user' | 'system-auto-read-only',
   ): Promise<{ ok: true } | { ok: false; error: string }> {
     const index = this.recoveredTasks.findIndex((task) => task.id === taskId);
     if (index < 0) return { ok: false, error: 'interrupted task not found' };
     const current = this.recoveredTasks[index];
-    if (current.status !== 'interrupted' && current.status !== 'running') {
+    if (
+      current.status !== 'interrupted'
+      && current.status !== 'running'
+      && current.status !== 'budget-paused'
+      && current.status !== 'integration-conflict'
+    ) {
       return { ok: false, error: `task is already ${String(current.status)}` };
+    }
+    let recovery;
+    try {
+      recovery = assertRecoveryActionAllowed(current, action);
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+    if (actor === 'system-auto-read-only' && !recovery.autoResume) {
+      return { ok: false, error: 'only explicit read-only tasks may auto-resume' };
+    }
+    if (actor !== 'user' && action !== 'continue-read-only') {
+      return { ok: false, error: 'side-effecting recovery requires a user decision' };
+    }
+    if (action === 'resolve-integration-conflict') {
+      const resolution = await this.integrationQueue.resolveInterruptedOperation(taskId);
+      if (!resolution.ok) return resolution;
+      await this.repository.append('recovered-integration-conflict-resolved', {
+        schemaVersion: 1,
+        taskId,
+        action,
+        actor,
+        recovery,
+      });
+      await this.repository.flush();
+      this.recoveredTasks[index] = { ...current, status: 'interrupted' };
+      this.meetingScheduler.clearRecoveredIntegrationConflict(taskId);
+      await this.snapshotActiveMeeting();
+      return { ok: true };
     }
 
     const recoveredTask: PlanMeetingTaskInput = {
       id: String(current.id ?? ''),
       title: String(current.title ?? current.id ?? 'Recovered task'),
       prompt: String(current.prompt ?? ''),
-      // An interrupted dependency graph is not silently replayed. A user
-      // explicitly resumes each side-effecting task, so this retry is a new
-      // independent execution at the same durable task identity.
-      deps: [],
+      deps: Array.isArray(current.deps) ? current.deps.map(String) : [],
       executorBackendId: typeof current.executorBackendId === 'string'
         ? current.executorBackendId
         : undefined,
       writePaths: Array.isArray(current.writePaths) ? current.writePaths.map(String) : undefined,
+      executionProfile: current.executionProfile as PlanMeetingTaskInput['executionProfile'],
+      contextSelection: current.contextSelection as PlanMeetingTaskInput['contextSelection'],
+      workspaceMode: current.workspaceMode as PlanMeetingTaskInput['workspaceMode'],
+      authorityRequest: current.authorityRequest as PlanMeetingTaskInput['authorityRequest'],
+      budget: current.budget as PlanMeetingTaskInput['budget'],
+      acceptanceCriteria: Array.isArray(current.acceptanceCriteria)
+        ? current.acceptanceCriteria
+        : undefined,
+      requiresDecision: typeof current.requiresDecision === 'boolean'
+        ? current.requiresDecision
+        : undefined,
     };
     let task: PlanMeetingTask;
     try {
@@ -1004,16 +1100,37 @@ export class Orchestrator implements OrchestratorBridge {
       return { ok: false, error: error instanceof Error ? error.message : String(error) };
     }
     if (!task.id || !task.prompt) return { ok: false, error: 'recovered task is missing its id or prompt' };
-    const backendError = await this.validateExecutionBackends([task]);
-    if (backendError) return { ok: false, error: backendError };
-    const result = await this.meetingScheduler.resolveRecoveredTask(taskId, action);
+    if (action !== 'abandon-task') {
+      const backendError = await this.validateExecutionBackends([task]);
+      if (backendError) return { ok: false, error: backendError };
+    }
+    // Persist and fsync the exact user/automatic authorization before any
+    // Backend prompt can be sent by Scheduler.spawnReadyWorkers().
+    await this.repository.append('recovered-task-resolution-authorized', {
+      schemaVersion: 1,
+      taskId,
+      action,
+      actor,
+      recovery,
+      attempt: typeof current.attempt === 'number' ? current.attempt : 1,
+    });
+    await this.repository.flush();
+    const result = await this.meetingScheduler.resolveRecoveredTask(
+      taskId,
+      action as Exclude<TaskRecoveryAction, 'resolve-integration-conflict'>,
+    );
     if (!result.ok) return result;
-    if (action === 'abandon') {
+    if (action === 'abandon-task') {
       this.recoveredTasks[index] = { ...current, status: 'failed' };
     } else {
       this.recoveredTasks.splice(index, 1);
     }
-    await this.repository.append('recovered-task-resolved', { taskId, action });
+    await this.repository.append('recovered-task-resolved', {
+      schemaVersion: 1,
+      taskId,
+      action,
+      actor,
+    });
     await this.snapshotActiveMeeting();
     return { ok: true };
   }
@@ -1042,6 +1159,28 @@ export class Orchestrator implements OrchestratorBridge {
       coordinatorHostId: this.coordinatorHostId,
       hosts: this.listHosts(),
       tasks: liveTasks.length > 0 ? liveTasks : this.recoveredTasks,
+      taskMailboxes: (liveTasks.length > 0 ? liveTasks : this.recoveredTasks)
+        .map((task) => {
+          const taskId = String(task.id ?? '');
+          const messages = taskId ? this.taskMailbox.list(taskId) : [];
+          return {
+            taskId,
+            cursor: messages.at(-1)?.seq ?? 0,
+            pending: messages
+              .filter((message) => message.status !== 'acknowledged')
+              .slice(-500)
+              .map((message) => ({
+                id: message.id,
+                seq: message.seq,
+                attempt: message.attempt,
+                kind: message.kind,
+                status: message.status,
+              })),
+          };
+        })
+        .filter((mailbox) => mailbox.taskId),
+      reviewSessions: this.coordinatorReviewDriver.snapshot(),
+      integrationQueue: this.integrationQueue.snapshot(),
       planVersion: this.meetingScheduler.getPlanVersion(),
       autoOrchestration: this.autoOrchestration,
       finalMeetingDelivery: this.finalMeetingDelivery
@@ -2060,6 +2199,59 @@ export class Orchestrator implements OrchestratorBridge {
         if (decision?.kind === 'rework') this.finalMeetingDecision = decision;
       }
     }
+  }
+
+  private async reconcileInterruptedFinalAcceptance(
+    events: PersistedMeetingEvent[],
+  ): Promise<void> {
+    if (!this.finalMeetingDelivery || this.finalMeetingDecision) return;
+    const intentEvent = [...events].reverse().find(
+      (event) => event.type === 'meeting-delivery-accept-intent',
+    );
+    if (!intentEvent || !intentEvent.payload || typeof intentEvent.payload !== 'object') return;
+    const intent = intentEvent.payload as Record<string, unknown>;
+    const queue = this.integrationQueue.snapshot();
+    const request = queue.publicationRequest;
+    const publication = queue.publication;
+    const delivery = this.finalMeetingDelivery;
+    if (
+      queue.publicationState !== 'published'
+      || !request
+      || !publication
+      || intent.deliveryId !== delivery.id
+      || intent.contentHash !== delivery.contentHash
+      || intent.integrationHead !== delivery.integrationHead
+      || request.deliveryId !== delivery.id
+      || request.contentHash !== delivery.contentHash
+      || request.integrationHead !== delivery.integrationHead
+      || request.expectedUserBaseRevision !== delivery.expectedUserBaseRevision
+      || publication.expectedUserBaseRevision !== delivery.expectedUserBaseRevision
+      || publication.integrationHead !== delivery.integrationHead
+      || publication.publishedHead !== delivery.integrationHead
+    ) return;
+    const decidedAt = typeof intent.decidedAt === 'number' && Number.isFinite(intent.decidedAt)
+      ? intent.decidedAt
+      : intentEvent.ts;
+    const published = publishedMeetingDelivery(delivery);
+    const decision: FinalMeetingDecision = {
+      kind: 'accept',
+      deliveryId: delivery.id,
+      contentHash: delivery.contentHash,
+      integrationHead: publication.publishedHead,
+      decidedAt,
+    };
+    await this.repository.append('meeting-delivery-accepted', {
+      schemaVersion: 1,
+      delivery: published,
+      decision,
+      publication,
+      recoveredFromAcceptIntentSeq: intentEvent.seq,
+    });
+    await this.repository.flush();
+    this.finalMeetingDelivery = published;
+    this.finalMeetingDecision = decision;
+    await this.snapshotActiveMeeting();
+    await this.integrationQueue.cleanupPublishedIntegration(publication.publishedHead);
   }
 
   async acceptDelivery(deliveryId: string, candidateId: string) {

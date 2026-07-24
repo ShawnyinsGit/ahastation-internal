@@ -2,6 +2,10 @@ import { app } from 'electron';
 import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { dirname, join } from 'node:path';
+import {
+  assessTaskRecovery,
+  normalizeRecoveredTaskStatus,
+} from './task-recovery.js';
 
 export interface PersistedMeetingEvent {
   id: string;
@@ -234,7 +238,7 @@ export class MeetingRepository {
     let serialized: string;
     try {
       assertBoundedJson(state);
-      serialized = JSON.stringify({ schemaVersion: 2, seq: this.seq, state }, null, 2);
+      serialized = JSON.stringify({ schemaVersion: 3, seq: this.seq, state }, null, 2);
       if (Buffer.byteLength(serialized, 'utf8') > MAX_SNAPSHOT_BYTES) {
         throw new Error('Meeting snapshot exceeds the durable storage limit');
       }
@@ -364,21 +368,58 @@ export class MeetingRepository {
           const raw = await fs.readFile(join(root, entry.name, 'snapshot.json'), 'utf8');
           const parsed = JSON.parse(raw) as { seq?: unknown; state?: Record<string, unknown> };
           if (!parsed.state || parsed.state.status !== 'active') continue;
+          const journal = await MeetingRepository.replay(
+            entry.name,
+            join(root, entry.name),
+          );
+          const journalTailSeq = journal.at(-1)?.seq ?? 0;
+          const latestTaskStatuses = new Map<string, unknown>();
+          for (const event of journal) {
+            if (event.type !== 'event:plan-updated') continue;
+            if (!event.payload || typeof event.payload !== 'object') continue;
+            const rendererEvent = (event.payload as Record<string, unknown>).event;
+            if (!rendererEvent || typeof rendererEvent !== 'object') continue;
+            const plan = (rendererEvent as Record<string, unknown>).plan;
+            if (!plan || typeof plan !== 'object') continue;
+            const nodes = (plan as Record<string, unknown>).nodes;
+            if (!Array.isArray(nodes)) continue;
+            for (const node of nodes) {
+              if (!node || typeof node !== 'object') continue;
+              const record = node as Record<string, unknown>;
+              if (typeof record.id !== 'string') continue;
+              // Acceptance is monotonic: a delayed renderer/projection event
+              // cannot take a durably accepted task back to a live state.
+              if (latestTaskStatuses.get(record.id) === 'accepted') continue;
+              latestTaskStatuses.set(record.id, record.status);
+            }
+          }
           const tasks = Array.isArray(parsed.state.tasks)
-            ? parsed.state.tasks.map((task: Record<string, unknown>) => ({
-                ...task,
-                status: (
-                  task.status === 'accepted'
-                  || task.status === 'done'
-                  || task.status === 'failed'
-                ) ? task.status : 'interrupted',
-              }))
+            ? parsed.state.tasks
+              .filter((task): task is Record<string, unknown> => (
+                Boolean(task && typeof task === 'object' && !Array.isArray(task))
+              ))
+              .map((task) => {
+                const latestStatus = typeof task.id === 'string'
+                  ? latestTaskStatuses.get(task.id)
+                  : undefined;
+                const normalized = {
+                  ...task,
+                  status: normalizeRecoveredTaskStatus(latestStatus ?? task.status),
+                };
+                return {
+                  ...normalized,
+                  recovery: assessTaskRecovery(normalized),
+                };
+              })
             : [];
           out.push({
             meetingId: entry.name,
-            seq: typeof parsed.seq === 'number' && Number.isSafeInteger(parsed.seq) && parsed.seq >= 0
-              ? parsed.seq
-              : 0,
+            seq: Math.max(
+              journalTailSeq,
+              typeof parsed.seq === 'number' && Number.isSafeInteger(parsed.seq) && parsed.seq >= 0
+                ? parsed.seq
+                : 0,
+            ),
             state: { ...parsed.state, status: 'recovering', tasks },
           });
         } catch {

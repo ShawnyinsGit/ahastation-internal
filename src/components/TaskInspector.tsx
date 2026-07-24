@@ -129,6 +129,8 @@ export function TaskInspector({
   const [confirmingChunkId, setConfirmingChunkId] = useState('');
   const [budgetExtensionError, setBudgetExtensionError] = useState('');
   const [extendingBudget, setExtendingBudget] = useState(false);
+  const [recoveryError, setRecoveryError] = useState('');
+  const [resolvingRecovery, setResolvingRecovery] = useState('');
   const getProjection = useCallback(
     () => meetingStore.getTaskInspectorProjection(sessionId, taskId),
     [sessionId, taskId],
@@ -241,6 +243,35 @@ export function TaskInspector({
     }
   }, [sessionId, snapshot, taskId]);
 
+  const resolveRecovery = useCallback(async (
+    action:
+      | 'continue-read-only'
+      | 'continue-side-effecting'
+      | 'retry-attempt'
+      | 'resolve-integration-conflict'
+      | 'abandon-task',
+  ) => {
+    setRecoveryError('');
+    setResolvingRecovery(action);
+    try {
+      const result = await window.vibeMeet.sessions.resolveRecoveredTask(
+        sessionId,
+        taskId,
+        action,
+      );
+      if (!result.ok) {
+        setRecoveryError(result.error);
+        return;
+      }
+      const refreshed = await meetingStore.openTaskInspector(sessionId, taskId);
+      if (!refreshed.ok) setRecoveryError(refreshed.error);
+    } catch (error) {
+      setRecoveryError(error instanceof Error ? error.message : '恢复失败');
+    } finally {
+      setResolvingRecovery('');
+    }
+  }, [sessionId, taskId]);
+
   return (
     <aside className="task-inspector" aria-label="Task Inspector">
       <header className="task-inspector-header">
@@ -308,6 +339,70 @@ export function TaskInspector({
               <article><span>Dependencies</span><strong>{snapshot.task.deps.length}</strong></article>
             </div>
             <TaskProfilePanel snapshot={snapshot} />
+            {snapshot.task.recovery && (
+              <section className="task-diagnostic-list">
+                <header>Crash recovery decision</header>
+                <p>
+                  <strong>{snapshot.task.recovery.classification}</strong>{' '}
+                  {snapshot.task.recovery.reasonCode}
+                </p>
+                <p>
+                  {snapshot.task.recovery.autoResume
+                    ? '该任务具备显式只读权限，可自动续接；若自动续接失败，可在这里重试。'
+                    : '在用户确认前不会向 Backend 发送 prompt，也不会重放命令、网络或外部副作用。'}
+                </p>
+                <div className="user-tasks-recovery-actions">
+                  {snapshot.task.recovery.allowedActions.includes('continue-read-only') && (
+                    <button
+                      type="button"
+                      disabled={Boolean(resolvingRecovery)}
+                      onClick={() => void resolveRecovery('continue-read-only')}
+                    >
+                      继续只读任务
+                    </button>
+                  )}
+                  {snapshot.task.recovery.allowedActions.includes('continue-side-effecting') && (
+                    <button
+                      type="button"
+                      disabled={Boolean(resolvingRecovery)}
+                      onClick={() => void resolveRecovery('continue-side-effecting')}
+                    >
+                      从现有 Attempt 继续
+                    </button>
+                  )}
+                  {snapshot.task.recovery.allowedActions.includes('retry-attempt') && (
+                    <button
+                      type="button"
+                      disabled={Boolean(resolvingRecovery)}
+                      onClick={() => void resolveRecovery('retry-attempt')}
+                    >
+                      新建 Attempt 重跑
+                    </button>
+                  )}
+                  {snapshot.task.recovery.allowedActions.includes('resolve-integration-conflict') && (
+                    <button
+                      type="button"
+                      disabled={Boolean(resolvingRecovery)}
+                      onClick={() => void resolveRecovery('resolve-integration-conflict')}
+                    >
+                      中止队列 Cherry-pick
+                    </button>
+                  )}
+                  {snapshot.task.recovery.allowedActions.includes('abandon-task') && (
+                    <button
+                      type="button"
+                      disabled={Boolean(resolvingRecovery)}
+                      onClick={() => void resolveRecovery('abandon-task')}
+                    >
+                      放弃任务
+                    </button>
+                  )}
+                </div>
+                {recoveryError && (
+                  <p className="task-inspector-error" role="alert">{recoveryError}</p>
+                )}
+              </section>
+            )}
             {snapshot.task.budget && (
               <section className="task-diagnostic-list">
                 <header>Bounded rework budget</header>

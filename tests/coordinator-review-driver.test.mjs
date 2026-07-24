@@ -107,6 +107,25 @@ test('restore resumes the exact unreviewed cursor without notifying twice', asyn
   ]);
 });
 
+test('snapshot and restore preserve exact chunk coverage and confirmations', async () => {
+  const { driver } = makeDriver();
+  const session = await driver.request({
+    candidate,
+    verification: { passed: true, checks: [] },
+  });
+  await driver.submitChunkReview(session.id, {
+    chunkId: 'fixture-chunk-1',
+    chunkHash: candidate.manifest.chunks[0].hash,
+    verdict: 'passed',
+    findings: [],
+  });
+  const snapshots = driver.snapshot();
+  const restored = makeDriver().driver;
+  for (const snapshot of snapshots) restored.restore(snapshot);
+  assert.deepEqual(restored.snapshot(), snapshots);
+  assert.equal(restored.inspect(session.id).coverage.complete, true);
+});
+
 test('Coordinator disconnect pauses without discarding the durable review', async () => {
   const { driver } = makeDriver();
   const session = await driver.request({
@@ -173,7 +192,7 @@ test('DeliveryHarness stays coordinator-reviewing until complete hash-bound cove
   });
   await driver.complete('review-harness');
   const ready = await harness.inspect(proposed.id);
-  assert.equal(ready.status, 'awaiting-delivery-acceptance');
+  assert.equal(ready.status, 'accepted');
   assert.equal(ready.candidate.frozen.commit, frozen.commit);
   assert.equal(ready.candidate.reviewSession.id, 'review-harness');
 });

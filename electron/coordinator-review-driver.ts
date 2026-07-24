@@ -109,6 +109,12 @@ export class CoordinatorReviewDriver {
     return found ? structuredClone(found) : null;
   }
 
+  snapshot(): CoordinatorReviewSession[] {
+    return [...this.sessions.values()]
+      .sort((left, right) => left.id.localeCompare(right.id))
+      .map((session) => structuredClone(session));
+  }
+
   getChunk(reviewId: string, chunkId?: string) {
     const chunk = getCoordinatorReviewChunk(this.require(reviewId), chunkId);
     return chunk ? structuredClone(chunk) : null;

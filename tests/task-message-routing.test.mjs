@@ -193,7 +193,7 @@ test('explicit interrupt preserves workspace and resumable Backend checkpoint', 
   });
   assert.deepEqual(setup.releases, [{ taskId: 'task-a', removeWorktree: false }]);
 
-  assert.deepEqual(await setup.scheduler.resolveRecoveredTask('task-a', 'continue'), { ok: true });
+  assert.deepEqual(await setup.scheduler.resolveRecoveredTask('task-a', 'continue-read-only'), { ok: true });
   await waitFor(() => setup.sessions.length === 2, 'continued worker did not start');
   assert.equal(setup.sessions[1].opts.sessionOptions.resumeSessionId, 'session-checkpoint');
 });

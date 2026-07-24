@@ -227,6 +227,28 @@ test('task snapshot is bounded and hides authority internals', async () => {
   assert.match(serialized, /REDACTED/);
 });
 
+test('task snapshot cursor and renderer replay describe the same durable journal prefix', async () => {
+  const setup = createFixture();
+  const snapshot = await setup.service.getSnapshot({
+    sessionId: 'session-a',
+    taskId: 'task-a',
+  });
+  const replay = await setup.service.getEvents({
+    sessionId: 'session-a',
+    taskId: 'task-a',
+    afterSeq: 0,
+    limit: 100,
+  });
+  assert.equal(snapshot.ok, true);
+  assert.equal(replay.ok, true);
+  assert.equal(snapshot.value.lastSeq, replay.value.nextAfterSeq);
+  assert.deepEqual(
+    replay.value.events.map((event) => event.eventId),
+    projectRendererTaskEvents(setup.events, 'task-a').map((event) => event.eventId),
+  );
+  assert.equal(replay.value.hasMore, false);
+});
+
 test('withheld review evidence is projected safely and confirmation is task-bound', async () => {
   const setup = createFixture();
   const chunkHash = 'f'.repeat(64);

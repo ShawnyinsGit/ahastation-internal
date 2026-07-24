@@ -112,6 +112,12 @@ import {
   type TaskBudgetAttempt,
 } from './task-budget.js';
 import type { CoordinatorReviewSession } from './coordinator-review.js';
+import {
+  assessTaskRecovery,
+  assertRecoveryActionAllowed,
+  recoveryRecordFromPlanTask,
+  type TaskRecoveryAction,
+} from './task-recovery.js';
 
 export type SessionFactory = (
   opts: ConstructorParameters<typeof ClaudeSession>[0],
@@ -722,8 +728,8 @@ export class WorkerScheduler {
       handle.status = (
         rawStatus === 'accepted'
         || rawStatus === 'failed'
-        || rawStatus === 'done'
         || rawStatus === 'budget-paused'
+        || rawStatus === 'integration-conflict'
       ) ? rawStatus : 'interrupted';
       handle.summary = typeof task.summary === 'string' ? task.summary : '';
       if (Array.isArray(task.budgetAttempts)) {
@@ -776,14 +782,37 @@ export class WorkerScheduler {
 
   async resolveRecoveredTask(
     taskId: string,
-    action: 'continue' | 'retry' | 'abandon',
+    action: Exclude<TaskRecoveryAction, 'resolve-integration-conflict'>,
   ): Promise<{ ok: true } | { ok: false; error: string }> {
     const handle = this.workers.get(taskId);
     if (!handle) return { ok: false, error: 'interrupted task not found' };
-    if (handle.status !== 'interrupted') {
+    if (handle.status !== 'interrupted' && handle.status !== 'budget-paused') {
       return { ok: false, error: `task is already ${handle.status}` };
     }
-    if (action === 'abandon') {
+    try {
+      assertRecoveryActionAllowed(
+        recoveryRecordFromPlanTask({
+          id: handle.id,
+          title: handle.title,
+          prompt: handle.prompt,
+          deps: [...handle.deps],
+          executorBackendId: handle.executorBackendId,
+          writePaths: handle.writePaths ? [...handle.writePaths] : undefined,
+          executionProfile: structuredClone(handle.executionProfile!),
+          contextSelection: structuredClone(handle.contextSelection!),
+          workspaceMode: handle.workspaceMode!,
+          authorityRequest: structuredClone(handle.authorityRequest!),
+          budget: structuredClone(handle.budget),
+          acceptanceCriteria: handle.acceptanceCriteria
+            ? structuredClone(handle.acceptanceCriteria)
+            : undefined,
+        }, handle.status),
+        action,
+      );
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+    if (action === 'abandon-task') {
       this.disposeWorker(handle, 'failed', 'Abandoned by the user after recovery.');
       this.emitPlanUpdate();
       this.cascadeFailure(handle.id);
@@ -794,7 +823,7 @@ export class WorkerScheduler {
       if (restored?.status === 'interrupted') {
         const view = await this.opts.deliveryHarness.decide(handle.deliveryId, {
           kind: 'resume-after-interruption',
-          mode: action,
+          mode: action === 'retry-attempt' ? 'retry' : 'continue',
         });
         handle.attempt = view.attempt;
         this.applyDeliveryView(handle, view);
@@ -805,14 +834,16 @@ export class WorkerScheduler {
       handle.deliveryId = null;
     }
     handle.report = null;
-    if (action === 'retry') handle.backendSession = undefined;
+    if (action === 'retry-attempt') handle.backendSession = undefined;
     handle.backendRuntime = undefined;
     handle.effectiveProfile = undefined;
     handle.authorityGrant = undefined;
     handle.transportEnded = false;
     handle.summary = '';
-    handle.prompt = action === 'continue'
-      ? `(recovery continuation) Inspect the existing workspace state and continue safely. Do not repeat external side effects without checking first.\n\n${handle.prompt}`
+    handle.prompt = action === 'continue-read-only'
+      ? `(read-only recovery continuation) Continue from the durable Backend session. This attempt has explicit read/search-only authority; do not request side effects.\n\n${handle.prompt}`
+      : action === 'continue-side-effecting'
+        ? `(user-authorized recovery continuation) Inspect the existing workspace and durable evidence before continuing. Do not repeat an external side effect unless its durable acknowledgement is absent.\n\n${handle.prompt}`
       : `(recovery retry) This is a new attempt. Re-check the workspace before repeating any external side effect.\n\n${handle.prompt}`;
     handle.status = 'pending';
     this.emitPlanUpdate();
@@ -904,6 +935,22 @@ export class WorkerScheduler {
       await mailbox.markFailed(handle.id, message.id).catch(() => undefined);
       return { ok: false, error: error instanceof Error ? error.message : String(error) };
     }
+  }
+
+  markRecoveredIntegrationConflict(taskId: string): boolean {
+    const handle = this.workers.get(taskId);
+    if (!handle || handle.status !== 'interrupted') return false;
+    handle.status = 'integration-conflict';
+    this.emitPlanUpdate();
+    return true;
+  }
+
+  clearRecoveredIntegrationConflict(taskId: string): boolean {
+    const handle = this.workers.get(taskId);
+    if (!handle || handle.status !== 'integration-conflict') return false;
+    handle.status = 'interrupted';
+    this.emitPlanUpdate();
+    return true;
   }
 
   /** Compatibility entry point used by the existing IPC. It is deliberately
@@ -3042,6 +3089,21 @@ export class WorkerScheduler {
       workspaceDiagnostic: h.workspaceDiagnostic
         ? structuredClone(h.workspaceDiagnostic)
         : undefined,
+      ...(
+        h.status === 'interrupted'
+        || h.status === 'integration-conflict'
+        || h.status === 'budget-paused'
+          ? {
+              recovery: assessTaskRecovery({
+                status: h.status,
+                workspaceMode: h.workspaceMode,
+                authorityRequest: h.authorityRequest
+                  ? structuredClone(h.authorityRequest)
+                  : undefined,
+              }),
+            }
+          : {}
+      ),
     }));
     const plan: MeetingPlan = { version: this.planVersion, nodes };
     this.opts.emit({ source: 'talker', event: { kind: 'plan-updated', plan } });

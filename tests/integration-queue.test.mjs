@@ -202,6 +202,63 @@ test('cherry-pick conflict aborts only the queue-owned operation', async () => {
   assert.equal(git(second.view.workspace, ['rev-parse', 'HEAD']), second.deliveryCandidate.frozen.commit);
 });
 
+test('restart detects and resolves only a queue-owned in-progress cherry-pick', async () => {
+  const repo = repository();
+  const first = await candidate(repo, 'recovery-left', 'README.md', '# Left\n');
+  const second = await candidate(repo, 'recovery-right', 'README.md', '# Right\n');
+  const initial = queue(repo);
+  await initial.instance.enqueue(first.view, first.deliveryCandidate);
+  const integrationState = await initial.instance.inspectState();
+  assert.throws(
+    () => git(integrationState.workspace, ['cherry-pick', second.deliveryCandidate.frozen.commit]),
+  );
+  assert.equal(
+    git(integrationState.workspace, ['rev-parse', '--verify', 'CHERRY_PICK_HEAD']),
+    second.deliveryCandidate.frozen.commit,
+  );
+
+  const restarted = queue(repo);
+  restarted.instance.restore([{
+    id: 'evt-staging-conflict',
+    seq: 1,
+    ts: 1,
+    meetingId: 'meeting-a',
+    type: 'integration-staging',
+    payload: {
+      schemaVersion: 1,
+      taskId: second.view.spec.taskId,
+      attempt: 1,
+      data: {
+        schemaVersion: 1,
+        taskId: second.view.spec.taskId,
+        deliveryId: second.view.id,
+        attempt: 1,
+        data: { integrationHead: integrationState.durableHead },
+      },
+    },
+  }]);
+  const interrupted = await restarted.instance.detectInterruptedOperation();
+  assert.ok(interrupted);
+  assert.equal(interrupted.workspace, integrationState.workspace);
+  assert.equal(
+    restarted.instance.snapshot().activeTaskId,
+    second.view.spec.taskId,
+  );
+  assert.deepEqual(
+    await restarted.instance.resolveInterruptedOperation('unrelated-task'),
+    { ok: false, error: 'interrupted integration task does not match' },
+  );
+  assert.deepEqual(
+    await restarted.instance.resolveInterruptedOperation(second.view.spec.taskId),
+    { ok: true },
+  );
+  assert.equal(
+    git(integrationState.workspace, ['rev-parse', 'HEAD']),
+    integrationState.durableHead,
+  );
+  assert.equal(git(repo.base, ['rev-parse', 'HEAD']), repo.revision);
+});
+
 test('a staged integration is recovered idempotently after restart', async () => {
   const repo = repository();
   const change = await candidate(repo, 'resume', 'src/resume.ts', 'export const resumed = true;\n');

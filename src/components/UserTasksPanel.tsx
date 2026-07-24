@@ -25,6 +25,7 @@ interface TaskRow {
   status: WorkerStatus | 'idle';
   owner: string;
   detail: string;
+  recovery?: MeetingPlan['nodes'][number]['recovery'];
 }
 
 const STATUS_LABEL: Record<TaskRow['status'], string> = {
@@ -64,6 +65,7 @@ const STATUS_TONE: Record<TaskRow['status'], string> = {
 };
 
 function buildRows(workers: WorkerState[], plan?: MeetingPlan | null): TaskRow[] {
+  const planById = new Map((plan?.nodes ?? []).map((node) => [node.id, node]));
   const rows = workers
     .filter((w) => w.role !== 'talker')
     .map((w) => ({
@@ -72,13 +74,16 @@ function buildRows(workers: WorkerState[], plan?: MeetingPlan | null): TaskRow[]
       status: w.status,
       owner: w.id,
       detail: w.summary || w.lastText || '',
+      recovery: planById.get(w.id)?.recovery,
     }))
     .reverse();
   const known = new Set(rows.map((row) => row.id));
   for (const node of plan?.nodes ?? []) {
     if (!known.has(node.id)) rows.push({
       id: node.id, title: node.title, status: node.status,
-      owner: 'recovery', detail: node.status === 'interrupted' ? 'Recovered after restart; choose how to proceed.' : '',
+      owner: 'recovery',
+      detail: node.status === 'interrupted' ? 'Recovered after restart; choose how to proceed.' : '',
+      recovery: node.recovery,
     });
   }
   return rows;
@@ -88,11 +93,18 @@ export function UserTasksPanel({ workers, plan, sessionId }: UserTasksPanelProps
   const rows = buildRows(workers, plan);
   const [pendingRecovery, setPendingRecovery] = useState<{
     taskId: string;
-    action: 'continue' | 'retry';
+    action: 'continue-side-effecting' | 'retry-attempt';
   } | null>(null);
   const [recoveryError, setRecoveryError] = useState('');
 
-  const resolveInterrupted = async (taskId: string, action: 'continue' | 'retry' | 'abandon') => {
+  const resolveInterrupted = async (
+    taskId: string,
+    action:
+      | 'continue-side-effecting'
+      | 'retry-attempt'
+      | 'resolve-integration-conflict'
+      | 'abandon-task',
+  ) => {
     setRecoveryError('');
     const result = await window.vibeMeet.sessions.resolveRecoveredTask(sessionId ?? null, taskId, action);
     if (!result.ok) setRecoveryError(result.error);
@@ -141,14 +153,30 @@ export function UserTasksPanel({ workers, plan, sessionId }: UserTasksPanelProps
                     {row.status === 'interrupted' && (
                       <>
                         <div className="user-tasks-recovery-actions">
-                          <button type="button" onClick={() => setPendingRecovery({ taskId: row.id, action: 'continue' })}>继续</button>
-                          <button type="button" onClick={() => setPendingRecovery({ taskId: row.id, action: 'retry' })}>重跑</button>
-                          <button type="button" onClick={() => { void resolveInterrupted(row.id, 'abandon'); }}>放弃</button>
+                          {row.recovery?.allowedActions.includes('continue-side-effecting') && (
+                            <button type="button" onClick={() => setPendingRecovery({ taskId: row.id, action: 'continue-side-effecting' })}>继续</button>
+                          )}
+                          {row.recovery?.allowedActions.includes('continue-read-only') && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                void window.vibeMeet.sessions.resolveRecoveredTask(
+                                  sessionId ?? null,
+                                  row.id,
+                                  'continue-read-only',
+                                );
+                              }}
+                            >
+                              继续只读任务
+                            </button>
+                          )}
+                          <button type="button" onClick={() => setPendingRecovery({ taskId: row.id, action: 'retry-attempt' })}>重跑</button>
+                          <button type="button" onClick={() => { void resolveInterrupted(row.id, 'abandon-task'); }}>放弃</button>
                         </div>
                         {pendingRecovery?.taskId === row.id && (
                           <div className="user-tasks-recovery-confirm" role="alert">
-                            <strong>{pendingRecovery.action === 'continue' ? '从现有工作区继续' : '创建新的重跑 attempt'}</strong>
-                            <p>执行前会检查现有文件，但仍可能重复网络请求、发布或其他外部副作用。</p>
+                            <strong>{pendingRecovery.action === 'continue-side-effecting' ? '从现有工作区继续' : '创建新的重跑 attempt'}</strong>
+                            <p>这是显式的用户恢复决定。系统不会在确认前发送 Backend prompt，也不会重放命令、网络或外部副作用。</p>
                             <div>
                               <button type="button" onClick={() => setPendingRecovery(null)}>取消</button>
                               <button
@@ -158,12 +186,28 @@ export function UserTasksPanel({ workers, plan, sessionId }: UserTasksPanelProps
                                   void resolveInterrupted(row.id, pendingRecovery.action);
                                 }}
                               >
-                                确认{pendingRecovery.action === 'continue' ? '继续' : '重跑'}
+                                确认{pendingRecovery.action === 'continue-side-effecting' ? '继续' : '重跑'}
                               </button>
                             </div>
                           </div>
                         )}
                       </>
+                    )}
+                    {row.status === 'integration-conflict' && (
+                      <div className="user-tasks-recovery-actions">
+                        <button
+                          type="button"
+                          onClick={() => { void resolveInterrupted(row.id, 'resolve-integration-conflict'); }}
+                        >
+                          中止队列冲突并恢复
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => { void resolveInterrupted(row.id, 'abandon-task'); }}
+                        >
+                          放弃
+                        </button>
+                      </div>
                     )}
                   </td>
                   <td className="user-tasks-col-owner">

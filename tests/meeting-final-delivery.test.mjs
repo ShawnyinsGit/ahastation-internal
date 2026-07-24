@@ -469,3 +469,91 @@ test('final delivery and decision recover exactly and duplicate acceptance is id
   assert.deepEqual(duplicate, published);
   assert.equal(publications, 0);
 });
+
+test('crash after publication completes the durable accept intent only with exact evidence', async () => {
+  const ready = buildMeetingDelivery({
+    meetingId: 'meeting-a',
+    planVersion: 2,
+    tasks: [acceptedTask()],
+    integrationHead: sha('b'),
+    expectedUserBaseRevision: sha('a'),
+  });
+  const publication = {
+    schemaVersion: 1,
+    expectedUserBaseRevision: ready.expectedUserBaseRevision,
+    integrationHead: ready.integrationHead,
+    publishedHead: ready.integrationHead,
+    alreadyPublished: true,
+  };
+  const appended = [];
+  const fake = {
+    finalMeetingDelivery: ready,
+    finalMeetingDecision: null,
+    integrationQueue: {
+      snapshot() {
+        return {
+          publicationState: 'published',
+          publicationRequest: {
+            deliveryId: ready.id,
+            contentHash: ready.contentHash,
+            integrationHead: ready.integrationHead,
+            expectedUserBaseRevision: ready.expectedUserBaseRevision,
+          },
+          publication,
+        };
+      },
+      async cleanupPublishedIntegration(head) {
+        assert.equal(head, ready.integrationHead);
+      },
+    },
+    repository: {
+      async append(type, payload) { appended.push({ type, payload }); },
+      async flush() {},
+    },
+    async snapshotActiveMeeting() {},
+  };
+  const intent = {
+    id: 'intent',
+    seq: 8,
+    ts: 100,
+    meetingId: 'meeting-a',
+    type: 'meeting-delivery-accept-intent',
+    payload: {
+      schemaVersion: 1,
+      deliveryId: ready.id,
+      contentHash: ready.contentHash,
+      integrationHead: ready.integrationHead,
+      decidedAt: 99,
+    },
+  };
+  await Orchestrator.prototype.reconcileInterruptedFinalAcceptance.call(fake, [intent]);
+  assert.equal(appended.length, 1);
+  assert.equal(appended[0].type, 'meeting-delivery-accepted');
+  assert.equal(appended[0].payload.recoveredFromAcceptIntentSeq, 8);
+  assert.equal(fake.finalMeetingDecision.decidedAt, 99);
+  assert.equal(fake.finalMeetingDelivery.publicationState, 'published');
+
+  const mismatched = {
+    ...fake,
+    finalMeetingDelivery: ready,
+    finalMeetingDecision: null,
+    repository: {
+      async append() { assert.fail('mismatched evidence must not complete acceptance'); },
+      async flush() {},
+    },
+    integrationQueue: {
+      ...fake.integrationQueue,
+      snapshot() {
+        return {
+          ...fake.integrationQueue.snapshot(),
+          publicationRequest: {
+            ...fake.integrationQueue.snapshot().publicationRequest,
+            contentHash: sha('different'),
+          },
+        };
+      },
+    },
+  };
+  await Orchestrator.prototype.reconcileInterruptedFinalAcceptance.call(mismatched, [intent]);
+  assert.equal(mismatched.finalMeetingDecision, null);
+});

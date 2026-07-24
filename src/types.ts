@@ -312,6 +312,12 @@ export interface RendererTaskSnapshot {
       stagnantAttempts: number;
       reason?: string;
     };
+    recovery?: {
+      classification: string;
+      reasonCode: string;
+      allowedActions: string[];
+      autoResume: boolean;
+    };
   };
   mailbox: TaskMessage[];
   mailboxTruncated: boolean;
@@ -479,6 +485,12 @@ export interface MeetingPlanNode {
       truncated: boolean;
     };
     actions: Array<'handle-outside-ahastation' | 'revise-to-shared-locked' | 'cancel-task'>;
+  };
+  recovery?: {
+    classification: string;
+    reasonCode: string;
+    allowedActions: string[];
+    autoResume: boolean;
   };
 }
 
@@ -978,7 +990,12 @@ export interface SessionsApi {
   resolveRecoveredTask: (
     sessionId: string | null,
     taskId: string,
-    action: 'continue' | 'retry' | 'abandon',
+    action:
+      | 'continue-read-only'
+      | 'continue-side-effecting'
+      | 'retry-attempt'
+      | 'resolve-integration-conflict'
+      | 'abandon-task',
   ) => Promise<{ ok: true } | { ok: false; error: string }>;
   addHost: (
     sessionId: string | null,

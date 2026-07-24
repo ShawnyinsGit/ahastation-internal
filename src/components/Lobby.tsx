@@ -581,6 +581,27 @@ export function Lobby({ lastError }: LobbyProps) {
                 const cwd = typeof meeting.state.cwd === 'string' ? meeting.state.cwd : '';
                 const { label, parent } = shortPath(cwd);
                 const tasks = Array.isArray(meeting.state.tasks) ? meeting.state.tasks.length : 0;
+                const savedTasks = Array.isArray(meeting.state.tasks)
+                  ? meeting.state.tasks.filter(
+                      (task): task is Record<string, unknown> => Boolean(task && typeof task === 'object'),
+                    )
+                  : [];
+                const autoReadOnly = savedTasks.filter((task) => {
+                  const recovery = task.recovery;
+                  return Boolean(
+                    recovery
+                    && typeof recovery === 'object'
+                    && (recovery as Record<string, unknown>).autoResume === true,
+                  );
+                }).length;
+                const needsConfirmation = savedTasks.filter((task) => {
+                  const recovery = task.recovery;
+                  return Boolean(
+                    recovery
+                    && typeof recovery === 'object'
+                    && (recovery as Record<string, unknown>).classification === 'requires-user',
+                  );
+                }).length;
                 return (
                   <li key={meeting.meetingId}>
                     <button
@@ -588,12 +609,16 @@ export function Lobby({ lastError }: LobbyProps) {
                       className="lobby-row"
                       onClick={() => { void recoverMeeting(meeting); }}
                       disabled={opening || !cwd}
-                      title="Resume Host context; running tasks stay interrupted"
+                      title="Restore durable Meeting state; only explicit read-only tasks may resume automatically"
                     >
                       <span className="lobby-row-icon" aria-hidden="true"><Clock size={16} /></span>
                       <span className="lobby-row-main">
                         <span className="lobby-row-name">Resume {label}</span>
-                        <span className="lobby-row-path">{parent} · {tasks} saved tasks</span>
+                        <span className="lobby-row-path">
+                          {parent} · {tasks} saved tasks
+                          {autoReadOnly > 0 ? ` · ${autoReadOnly} read-only auto-resume` : ''}
+                          {needsConfirmation > 0 ? ` · ${needsConfirmation} require confirmation` : ''}
+                        </span>
                       </span>
                       <span className="lobby-row-meta">Confirm</span>
                     </button>

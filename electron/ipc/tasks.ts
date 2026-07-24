@@ -5,6 +5,7 @@ import { redactSecrets } from '../format-error.js';
 import type { PersistedMeetingEvent, PersistedTaskEventEnvelope } from '../meeting-repository.js';
 import { taskMessageSchema, type TaskMessage } from '../task-collaboration.js';
 import { taskBudgetSchema } from '../task-budget.js';
+import { assessTaskRecovery } from '../task-recovery.js';
 import type { IpcContext } from './context.js';
 
 const ACTOR_ID_RE = /^[a-zA-Z0-9._-]{1,128}$/;
@@ -82,6 +83,12 @@ export interface RendererTaskSnapshot {
       totalDurationMs: number;
       stagnantAttempts: number;
       reason?: string;
+    };
+    recovery?: {
+      classification: string;
+      reasonCode: string;
+      allowedActions: string[];
+      autoResume: boolean;
     };
   };
   mailbox: TaskMessage[];
@@ -420,6 +427,11 @@ function safeTaskSnapshot(raw: Record<string, unknown>): RendererTaskSnapshot['t
   const workspace = objectValue(raw.workspace);
   const parsedBudget = taskBudgetSchema.safeParse(raw.budget);
   const budgetState = objectValue(raw.budgetState);
+  const recovery = (
+    raw.status === 'interrupted'
+    || raw.status === 'integration-conflict'
+    || raw.status === 'budget-paused'
+  ) ? assessTaskRecovery(raw) : undefined;
   return {
     id: String(raw.id ?? ''),
     title: safeText(raw.title, 1_000) ?? '',
@@ -487,6 +499,7 @@ function safeTaskSnapshot(raw: Record<string, unknown>): RendererTaskSnapshot['t
         ...(safeText(budgetState.reason, 200) ? { reason: safeText(budgetState.reason, 200) } : {}),
       },
     } : {}),
+    ...(recovery ? { recovery } : {}),
   };
 }
 

@@ -59,6 +59,16 @@ export interface PublishedMeetingIntegration {
   alreadyPublished: boolean;
 }
 
+export interface InterruptedIntegrationOperation {
+  schemaVersion: 1;
+  kind: 'cherry-pick';
+  workspace: string;
+  branch: string;
+  durableHead: string;
+  currentHead: string;
+  cherryPickHead: string;
+}
+
 export class IntegrationConflictError extends Error {
   readonly code = 'integration-conflict' as const;
   constructor(message: string) {
@@ -250,6 +260,52 @@ export class GitDeliveryIntegrator {
       throw new Error('refusing to abort an integration worktree that moved unexpectedly');
     }
     await git(staged.workspace, ['reset', '--hard', staged.priorIntegrationHead]);
+  }
+
+  /** Inspect only the queue-owned integration worktree. A CHERRY_PICK_HEAD in
+   * the user's base or a task worktree is deliberately outside this recovery
+   * authority. */
+  async inspectInterruptedOperation(
+    state: IntegrationState,
+  ): Promise<InterruptedIntegrationOperation | null> {
+    if (!await gitExitOk(state.workspace, ['rev-parse', '--verify', '-q', 'CHERRY_PICK_HEAD'])) {
+      return null;
+    }
+    return {
+      schemaVersion: 1,
+      kind: 'cherry-pick',
+      workspace: state.workspace,
+      branch: state.branch,
+      durableHead: state.durableHead,
+      currentHead: await git(state.workspace, ['rev-parse', 'HEAD']),
+      cherryPickHead: await git(state.workspace, ['rev-parse', 'CHERRY_PICK_HEAD']),
+    };
+  }
+
+  async abortInterruptedOperation(
+    state: IntegrationState,
+    operation: InterruptedIntegrationOperation,
+  ): Promise<void> {
+    if (
+      operation.workspace !== state.workspace
+      || operation.branch !== state.branch
+      || operation.durableHead !== state.durableHead
+    ) {
+      throw new Error('integration recovery evidence no longer matches the queue worktree');
+    }
+    const current = await this.inspectInterruptedOperation(state);
+    if (
+      !current
+      || current.cherryPickHead !== operation.cherryPickHead
+      || current.currentHead !== operation.currentHead
+    ) {
+      throw new Error('interrupted integration operation changed before recovery');
+    }
+    await git(state.workspace, ['cherry-pick', '--abort']);
+    const restored = await git(state.workspace, ['rev-parse', 'HEAD']);
+    if (restored !== state.durableHead) {
+      throw new Error('integration worktree did not return to its durable head');
+    }
   }
 
   /** The sole operation allowed to publish a complete Meeting result into the

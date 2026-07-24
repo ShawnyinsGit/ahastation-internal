@@ -83,6 +83,12 @@ export interface MeetingPlanNode {
     reason?: string;
   };
   workspaceDiagnostic?: WorkspaceBlockedDiagnostic;
+  recovery?: {
+    classification: string;
+    reasonCode: string;
+    allowedActions: string[];
+    autoResume: boolean;
+  };
 }
 
 export interface MeetingPlan {

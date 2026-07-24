@@ -10,6 +10,7 @@ import type {
   PersistedMeetingEvent,
   PersistedTaskEventEnvelope,
 } from './meeting-repository.js';
+import { normalizeLegacyTaskStatus } from './task-recovery.js';
 
 export interface TaskProjectionDiagnostic {
   eventId: string;
@@ -96,14 +97,22 @@ function isMailboxEvent(type: string): boolean {
  * Meeting recovery. */
 export function projectMeetingTasks(
   events: readonly PersistedMeetingEvent[],
-  seeds: readonly MeetingTaskRecord[] = [],
+  seeds: readonly unknown[] = [],
 ): TaskProjectionResult {
   const tasks = new Map<string, MeetingTaskRecord>();
   const diagnostics: TaskProjectionDiagnostic[] = [];
   const appliedEventIds = new Set<string>();
 
   for (const seed of seeds) {
-    const parsed = meetingTaskRecordSchema.safeParse(seed);
+    const candidate = seed && typeof seed === 'object' && !Array.isArray(seed)
+      ? {
+          ...(seed as Record<string, unknown>),
+          status: normalizeLegacyTaskStatus(
+            (seed as Record<string, unknown>).status,
+          ),
+        }
+      : seed;
+    const parsed = meetingTaskRecordSchema.safeParse(candidate);
     if (parsed.success) tasks.set(parsed.data.id, structuredClone(parsed.data));
   }
 

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -16,6 +16,27 @@ function fakeSessionFactory() {
     async start() {}, end() {}, sendUserText() {}, sendUserContent() {},
     resolvePermission() {}, async interrupt() {},
     snapshot() { return { protocol: 'codex-app-server', sessionId: 'thread-recovered' }; },
+  };
+}
+
+function explicitReadOnlyTask(overrides = {}) {
+  return {
+    id: 'read-only-task',
+    title: 'Read-only recovery',
+    prompt: 'inspect the repository',
+    status: 'running',
+    deps: [],
+    workspaceMode: 'read-only',
+    authorityRequest: {
+      writePaths: [],
+      toolKinds: ['read', 'search', 'git-read'],
+      workingDirectories: ['.'],
+      commands: [],
+      environmentKeys: [],
+      maxCommandTimeoutMs: 1_800_000,
+      networkHosts: [],
+    },
+    ...overrides,
   };
 }
 
@@ -93,8 +114,8 @@ test('the user can explicitly resolve or restart an interrupted task', async () 
   });
   try {
     await orchestrator.start();
-    assert.deepEqual(await orchestrator.resolveRecoveredTask('abandon-task', 'abandon'), { ok: true });
-    assert.deepEqual(await orchestrator.resolveRecoveredTask('retry-task', 'retry'), { ok: true });
+    assert.deepEqual(await orchestrator.resolveRecoveredTask('abandon-task', 'abandon-task'), { ok: true });
+    assert.deepEqual(await orchestrator.resolveRecoveredTask('retry-task', 'retry-attempt'), { ok: true });
     const deadline = Date.now() + 2_000;
     while (!events.some((event) => (
       event.event.kind === 'worker-spawned' && event.event.workerId === 'retry-task'
@@ -255,10 +276,161 @@ test('canonical WorkerEvent and delivery state are journaled before renderer emi
       && event.payload.event.kind === 'delivery-status'
       && event.payload.event.delivery.status === 'accepted'
     )), true);
+    await orchestrator.snapshotActiveMeeting();
+    const snapshot = JSON.parse(
+      readFileSync(`/tmp/meetings/${meetingId}/snapshot.json`, 'utf8'),
+    );
+    assert.equal(snapshot.schemaVersion, 3);
+    assert.equal(snapshot.state.coordinatorHostId, 'default');
+    assert.equal(snapshot.state.planVersion, 1);
+    assert.equal(snapshot.state.reviewSessions.length, 1);
+    assert.equal(snapshot.state.reviewSessions[0].coverage.complete, true);
+    assert.equal(
+      snapshot.state.reviewSessions[0].coverage.reviewedChunks,
+      snapshot.state.reviewSessions[0].coverage.totalChunks,
+    );
+    assert.equal(snapshot.state.taskMailboxes[0].taskId, 'journal-task');
+    assert.equal(snapshot.state.taskMailboxes[0].cursor, 0);
+    assert.equal(
+      snapshot.state.integrationQueue.durableHead,
+      snapshot.state.tasks[0].delivery.integration.resultRevision,
+    );
   } finally {
     await orchestrator.end();
     await rm(worktreeRoot, { recursive: true, force: true });
     await rm(cwd, { recursive: true, force: true });
+    await rm(`/tmp/meetings/${meetingId}`, { recursive: true, force: true });
+  }
+});
+
+test('recovery sequence advances past journal events written after the last snapshot', async () => {
+  const meetingId = `recovery-tail-${randomUUID()}`;
+  try {
+    const original = new MeetingRepository(meetingId);
+    await original.append('meeting-created', {});
+    await original.snapshot({ status: 'active', cwd: '/tmp', tasks: [] });
+    await original.append('event:plan-updated', { version: 2 });
+    const recovered = (await MeetingRepository.listRecoverable())
+      .find((entry) => entry.meetingId === meetingId);
+    assert.equal(recovered.seq, 2);
+    const resumed = new MeetingRepository(meetingId, recovered.seq);
+    await resumed.append('meeting-recovered', {});
+    assert.deepEqual(
+      (await MeetingRepository.replay(meetingId)).map((event) => event.seq),
+      [1, 2, 3],
+    );
+  } finally {
+    await rm(`/tmp/meetings/${meetingId}`, { recursive: true, force: true });
+  }
+});
+
+test('a durable accepted task never regresses because of a late plan event', async () => {
+  const meetingId = `recovery-monotonic-${randomUUID()}`;
+  try {
+    const repository = new MeetingRepository(meetingId);
+    await repository.snapshot({
+      status: 'active',
+      cwd: '/tmp',
+      tasks: [{ id: 'task-a', title: 'A', prompt: 'a', status: 'running', deps: [] }],
+    });
+    await repository.append('event:plan-updated', {
+      event: { kind: 'plan-updated', plan: { version: 2, nodes: [{ id: 'task-a', status: 'accepted' }] } },
+    });
+    await repository.append('event:plan-updated', {
+      event: { kind: 'plan-updated', plan: { version: 1, nodes: [{ id: 'task-a', status: 'running' }] } },
+    });
+    const recovered = (await MeetingRepository.listRecoverable())
+      .find((entry) => entry.meetingId === meetingId);
+    assert.equal(recovered.state.tasks[0].status, 'accepted');
+  } finally {
+    await rm(`/tmp/meetings/${meetingId}`, { recursive: true, force: true });
+  }
+});
+
+test('only explicit read-only running tasks auto-resume after durable authorization', async () => {
+  const sessions = [];
+  const events = [];
+  const meetingId = `recovery-read-only-${randomUUID()}`;
+  const orchestrator = new Orchestrator({
+    emit: (event) => events.push(event),
+    cwd: '/tmp',
+    meetingId,
+    sessionFactory(opts) {
+      sessions.push(opts);
+      return fakeSessionFactory();
+    },
+    recoveredTasks: [explicitReadOnlyTask()],
+  });
+  try {
+    await orchestrator.start();
+    const deadline = Date.now() + 2_000;
+    while (!events.some((event) => (
+      event.event.kind === 'worker-spawned'
+      && event.event.workerId === 'read-only-task'
+    ))) {
+      if (Date.now() > deadline) assert.fail('read-only task did not auto-resume');
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.equal(sessions.length, 2, 'one Host and one read-only Worker are created');
+    const journal = await MeetingRepository.replay(meetingId);
+    const authorization = journal.find(
+      (event) => event.type === 'recovered-task-resolution-authorized',
+    );
+    const spawned = journal.find((event) => (
+      event.type === 'event:worker-spawned'
+      && event.payload.event.workerId === 'read-only-task'
+    ));
+    assert.ok(authorization);
+    assert.equal(authorization.payload.action, 'continue-read-only');
+    assert.equal(authorization.payload.actor, 'system-auto-read-only');
+    assert.ok(spawned);
+    assert.ok(authorization.seq < spawned.seq);
+  } finally {
+    await orchestrator.end();
+    await rm(`/tmp/meetings/${meetingId}`, { recursive: true, force: true });
+  }
+});
+
+test('side-effecting recovered tasks send no Backend prompt before user confirmation', async () => {
+  const sessions = [];
+  const meetingId = `recovery-side-effect-${randomUUID()}`;
+  const orchestrator = new Orchestrator({
+    emit() {},
+    cwd: '/tmp',
+    meetingId,
+    sessionFactory(opts) {
+      sessions.push(opts);
+      return fakeSessionFactory();
+    },
+    recoveredTasks: [explicitReadOnlyTask({
+      id: 'write-task',
+      workspaceMode: 'git-worktree',
+      authorityRequest: {
+        writePaths: ['src'],
+        toolKinds: ['read', 'write', 'execute'],
+        workingDirectories: ['.'],
+        commands: [['npm', 'test']],
+        environmentKeys: [],
+        maxCommandTimeoutMs: 1_800_000,
+        networkHosts: [],
+      },
+    })],
+  });
+  try {
+    await orchestrator.start();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.equal(sessions.length, 1, 'only the Host session is created');
+    const journal = await MeetingRepository.replay(meetingId);
+    assert.equal(
+      journal.some((event) => event.type === 'recovered-task-resolution-authorized'),
+      false,
+    );
+    assert.equal(
+      journal.some((event) => event.type === 'event:worker-spawned'),
+      false,
+    );
+  } finally {
+    await orchestrator.end();
     await rm(`/tmp/meetings/${meetingId}`, { recursive: true, force: true });
   }
 });
