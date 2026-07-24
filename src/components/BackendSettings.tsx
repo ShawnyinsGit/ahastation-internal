@@ -642,7 +642,13 @@ function BackendCard({
                 value={editingApiKey}
                 onChange={(e) => onApiKeyChange(e.target.value)}
                 onKeyDown={onKeyDown}
-                placeholder={b.hasApiKey ? '已保存 (输入新值覆盖)' : '输入 API Key'}
+                placeholder={
+                  b.hasApiKey
+                    ? '已保存 (输入新值覆盖)'
+                    : b.id === 'codex'
+                      ? 'OpenAI 或第三方兼容 API Key'
+                      : '输入 API Key'
+                }
                 disabled={saving}
               />
               <button
@@ -667,10 +673,20 @@ function BackendCard({
                   onSaveBaseUrl(e.target.value);
                 }
               }}
-              placeholder="https://api.example.com/v1"
+              placeholder={
+                b.id === 'codex'
+                  ? '留空用 OpenAI 官方；第三方网关填 https://.../v1'
+                  : 'https://api.example.com/v1'
+              }
               disabled={saving}
             />
           </div>
+
+          {b.id === 'codex' && (
+            <p style={{ margin: '4px 0 0', fontSize: 12, opacity: 0.75 }}>
+              支持 OpenAI 官方 Key，或通过 Base URL 接入第三方 OpenAI 兼容网关；OAuth 登录与 API Key 二选一即可。
+            </p>
+          )}
 
           <div className="backend-field">
             <label className="backend-field-label">Model</label>
@@ -696,7 +712,11 @@ function BackendCard({
                     onSaveModel(e.target.value);
                   }
                 }}
-                placeholder={b.defaultModel ?? '默认模型'}
+                placeholder={
+                  b.id === 'codex'
+                    ? '留空则使用 Codex CLI 默认模型'
+                    : (b.defaultModel ?? '默认模型')
+                }
                 disabled={saving}
               />
             )}

@@ -267,11 +267,13 @@ export class Orchestrator implements OrchestratorBridge {
       }
       const env = backend.buildEnv(auth, backendBaseEnv);
       const requestedModel = typeof so.model === 'string' ? so.model : undefined;
-      const model = backendId === 'claude-code'
-        ? (auth.model ?? requestedModel ?? backend.capabilities.defaultModel)
-        : requestedModel?.startsWith('claude-')
-          ? (auth.model ?? backend.capabilities.defaultModel)
-          : (auth.model ?? requestedModel ?? backend.capabilities.defaultModel);
+      const model = backendId === 'codex'
+        ? (auth.model ?? requestedModel)
+        : backendId === 'claude-code'
+          ? (auth.model ?? requestedModel ?? backend.capabilities.defaultModel)
+          : requestedModel?.startsWith('claude-')
+            ? (auth.model ?? backend.capabilities.defaultModel)
+            : (auth.model ?? requestedModel ?? backend.capabilities.defaultModel);
       return backend.createSession(
         {
           cwd: opts.cwd,

@@ -46,6 +46,7 @@ import {
   type CodexAppServerTransportOptions,
 } from './codex-app-server-transport.js';
 import type { Input as CodexInput, Thread as CodexThread, ThreadEvent, ThreadItem } from '@openai/codex-sdk';
+import { getBackendAuth } from '../store.js';
 
 const CODEX_CAPABILITIES: BackendCapabilities = {
   coordinate: true,
@@ -60,11 +61,15 @@ const CODEX_CAPABILITIES: BackendCapabilities = {
   systemPrompt: true,
   skills: false,
   interrupt: true,
-  defaultModel: 'gpt-5.4',
-  models: ['gpt-5.4', 'gpt-5.4-mini', 'gpt-5.2'],
   npmPackage: '@openai/codex',
   installHint: 'npm install -g @openai/codex',
 };
+
+/** Only pass a model override when the user explicitly configured one. */
+function codexModelOverride(model: string | undefined): string | undefined {
+  const trimmed = model?.trim();
+  return trimmed ? trimmed : undefined;
+}
 
 /** OAuth entry point for the bundled Codex 0.144.x command contract. */
 export function codexLoginArgs(): string[] {
@@ -138,12 +143,13 @@ class CodexAppServerSession implements BackendSession {
       this.backendVersion = extractCodexRuntimeVersion(ready.userAgent) ?? undefined;
       const options: Record<string, unknown> = {
         cwd: this.config.cwd,
-        model: this.config.model,
         approvalPolicy: this.config.executionRole === 'worker' ? 'untrusted' : 'never',
         sandbox: this.config.executionRole === 'worker' ? 'workspace-write' : 'read-only',
         developerInstructions: this.config.systemPrompt,
         experimentalRawEvents: false,
       };
+      const model = codexModelOverride(this.config.model);
+      if (model) options.model = model;
       this.threadId = this.config.resumeSessionId
         ? await this.transport.resumeThread(this.config.resumeSessionId, options)
         : await this.transport.openThread(options);
@@ -392,9 +398,10 @@ class CodexSession implements BackendSession {
         baseUrl: this.baseUrl,
         env: Object.keys(envStrings).length > 0 ? envStrings : undefined,
       });
+      const model = codexModelOverride(this.config.model);
       const threadOptions = {
         workingDirectory: this.config.cwd,
-        model: this.config.model,
+        ...(model ? { model } : {}),
         approvalPolicy: this.config.executionRole === 'worker' ? 'untrusted' : 'never',
         sandboxMode: this.config.executionRole === 'worker' ? 'workspace-write' : 'read-only',
         skipGitRepoCheck: true,
@@ -885,13 +892,15 @@ export class CodexBackend implements CliBackend {
   }
 
   async validateAuth(config: BackendAuthConfig): Promise<{ ok: boolean; error?: string }> {
-    if (config.authMode === 'apikey' && !config.apiKey) {
-      return { ok: false, error: 'OPENAI_API_KEY is required' };
+    if (config.authMode === 'apikey' && !config.apiKey?.trim()) {
+      return { ok: false, error: 'API Key is required (OpenAI or compatible gateway)' };
     }
     return { ok: true };
   }
 
   async checkAuthStatus(): Promise<{ loggedIn: boolean }> {
+    const auth = getBackendAuth(this.id);
+    if (auth?.apiKey?.trim()) return { loggedIn: true };
     const binary = this.resolveBinary();
     if (!binary) return { loggedIn: false };
     try {

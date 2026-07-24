@@ -77,6 +77,30 @@ test('app-server starts, resumes and interrupts native threads', async () => {
   transport.close();
 });
 
+test('app-server accepts api key credentials when oauth account is absent', async () => {
+  const fake = fakeAppServer();
+  const originalWrite = fake.process.stdin._write.bind(fake.process.stdin);
+  fake.process.stdin._write = function (chunk, encoding, done) {
+    const message = JSON.parse(String(chunk));
+    if (message.method === 'account/read') {
+      queueMicrotask(() => fake.process.stdout.write(`${JSON.stringify({
+        id: message.id, result: { account: null, requiresOpenaiAuth: true },
+      })}\n`));
+      done();
+      return;
+    }
+    originalWrite(chunk, encoding, done);
+  };
+  const transport = new CodexAppServerTransport({
+    binaryPath: '/fake/codex',
+    env: { OPENAI_API_KEY: 'sk-third-party' },
+    spawnProcess: () => fake.process,
+  });
+  const ready = await transport.start();
+  assert.equal(ready.account.type, 'api_key');
+  transport.close();
+});
+
 test('app-server rejects readiness when the authoritative account is absent', async () => {
   const fake = fakeAppServer();
   const originalWrite = fake.process.stdin._write.bind(fake.process.stdin);

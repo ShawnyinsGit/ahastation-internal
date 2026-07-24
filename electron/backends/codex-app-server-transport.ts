@@ -16,6 +16,11 @@ export interface CodexAppServerReady {
 
 export const SUPPORTED_CODEX_APP_SERVER_VERSION = '0.144.1';
 
+/** True when the subprocess env carries an explicit OpenAI-compatible API key. */
+export function hasCodexApiKeyCredentials(env: NodeJS.ProcessEnv | undefined): boolean {
+  return Boolean(String(env?.OPENAI_API_KEY ?? '').trim());
+}
+
 interface AppServerProcess {
   stdin: { write(data: string): unknown; end?(): unknown };
   stdout: NodeJS.ReadableStream;
@@ -83,16 +88,19 @@ export class CodexAppServerTransport {
       'account/read',
       { refreshToken: false },
     );
-    if (accountResult.requiresOpenaiAuth && !accountResult.account) {
+    const apiKeyConfigured = hasCodexApiKeyCredentials(this.options.env);
+    if (accountResult.requiresOpenaiAuth && !accountResult.account && !apiKeyConfigured) {
       throw new Error('Codex authentication required');
     }
-    if (!accountResult.account) throw new Error('Codex account is unavailable');
+    if (!accountResult.account && !apiKeyConfigured) {
+      throw new Error('Codex account is unavailable');
+    }
     return {
       userAgent,
       codexHome: String(initialized.codexHome ?? ''),
       platformFamily: String(initialized.platformFamily ?? ''),
       platformOs: String(initialized.platformOs ?? ''),
-      account: accountResult.account,
+      account: accountResult.account ?? { type: 'api_key' },
     };
   }
 
