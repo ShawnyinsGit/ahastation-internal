@@ -23,6 +23,11 @@ import {
   compileKimiTaskProfile,
   type BackendRuntime,
 } from './task-profile.js';
+import {
+  normalizeBackendPermissionRequest,
+  type NativePermissionRequest,
+  type PermissionNormalizationResult,
+} from './canonical-execution.js';
 import type {
   BackendEffectiveProfile,
   TaskExecutionProfile,
@@ -549,6 +554,12 @@ export class KimiBackend extends SubprocessBackend {
       runtime,
       this.capabilities.defaultModel!,
     );
+  }
+
+  normalizePermissionRequest(
+    native: NativePermissionRequest,
+  ): PermissionNormalizationResult {
+    return normalizeBackendPermissionRequest(this.id, native);
   }
 
   resolveBinary(): string | null {

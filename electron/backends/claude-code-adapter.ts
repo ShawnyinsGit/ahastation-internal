@@ -34,6 +34,11 @@ import {
   compileClaudeTaskProfile,
   type BackendRuntime,
 } from './task-profile.js';
+import {
+  normalizeBackendPermissionRequest,
+  type NativePermissionRequest,
+  type PermissionNormalizationResult,
+} from './canonical-execution.js';
 import type {
   BackendEffectiveProfile,
   TaskExecutionProfile,
@@ -347,6 +352,12 @@ export class ClaudeCodeBackend implements CliBackend {
       this.capabilities.defaultModel!,
       this.capabilities.models ?? [],
     );
+  }
+
+  normalizePermissionRequest(
+    native: NativePermissionRequest,
+  ): PermissionNormalizationResult {
+    return normalizeBackendPermissionRequest(this.id, native);
   }
 
   createSession(

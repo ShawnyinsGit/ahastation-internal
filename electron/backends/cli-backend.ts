@@ -18,6 +18,10 @@ import type {
   TaskExecutionProfile,
 } from '../task-collaboration.js';
 import type { WorkerAdapterSignal } from '../worker-protocol.js';
+import type {
+  NativePermissionRequest,
+  PermissionNormalizationResult,
+} from './canonical-execution.js';
 import type { BackendRuntime } from './task-profile.js';
 
 // ── Input priority ────────────────────────────────────────────────────────────
@@ -249,6 +253,14 @@ export interface CliBackend {
     requested: TaskExecutionProfile,
     runtime: BackendRuntime,
   ): BackendEffectiveProfile;
+
+  /**
+   * Purely normalize a Backend-native permission payload into the canonical
+   * execution intent used by the meeting permission broker.
+   */
+  normalizePermissionRequest?(
+    native: NativePermissionRequest,
+  ): PermissionNormalizationResult;
 
   /**
    * Create a new session. The backend spawns a subprocess (or connects to an
