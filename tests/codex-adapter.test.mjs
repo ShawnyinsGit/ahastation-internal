@@ -685,3 +685,54 @@ test('Codex app-server interrupt shares the authoritative turn completion waiter
   assert.equal(turnNumber, 2, 'the queue advances after authoritative interrupted completion');
   session.end();
 });
+
+test('Codex app-server steering queues the next turn after interrupt acknowledgement', async () => {
+  let notify;
+  let turnNumber = 0;
+  let interruptedTurn;
+  const transport = {
+    async start() { return { userAgent: 'Codex/0.144.1', account: { type: 'chatgpt' } }; },
+    async openThread() { return 'thread-steer'; },
+    async resumeThread(id) { return id; },
+    async startTurn() {
+      turnNumber += 1;
+      return `turn-${turnNumber}`;
+    },
+    async interruptTurn(_threadId, turnId) {
+      interruptedTurn = turnId;
+    },
+    close() {},
+  };
+  const backend = new CodexBackend({
+    resolveBinary: () => '/fake/codex',
+    createAppServerTransport: (options) => {
+      notify = options.onNotification;
+      return transport;
+    },
+  });
+  const session = backend.createSession({
+    cwd: '/workspace',
+    executionRole: 'worker',
+    extra: { codexTransport: 'app-server' },
+  }, () => {});
+  await session.start();
+  session.sendUserText('long turn');
+  await new Promise((resolve) => setImmediate(resolve));
+
+  await session.interrupt('steer');
+  assert.equal(interruptedTurn, 'turn-1');
+  session.sendUserText('steering update');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(turnNumber, 1, 'steering must remain behind the interrupted native turn');
+
+  notify({
+    method: 'turn/completed',
+    params: {
+      threadId: 'thread-steer',
+      turn: { id: 'turn-1', status: 'interrupted', error: null },
+    },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(turnNumber, 2, 'queued steering starts after authoritative turn completion');
+  session.end();
+});

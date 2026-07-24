@@ -34,10 +34,19 @@ export interface CanonicalPermissionDecision {
   safeInput: Record<string, unknown>;
 }
 
+export interface PermissionDecisionIdentity {
+  backendId: string;
+  taskId: string;
+  attempt: number;
+  nativeRequestId: string;
+  toolName?: string;
+}
+
 export function decideTaskPermission(
   normalized: PermissionNormalizationResult,
   grant: TaskAuthorityGrant | undefined,
   now = Date.now(),
+  identity?: PermissionDecisionIdentity,
 ): CanonicalPermissionDecision {
   if (!normalized.ok) {
     return {
@@ -45,7 +54,17 @@ export function decideTaskPermission(
         kind: 'ask-user',
         reason: `native-request:${normalized.diagnostic}`,
       },
+      // Opaque / unsupported native payloads still escalate to the user, but the
+      // durable decision must retain Backend identity so release gates can prove
+      // that the bridge produced a Backend-scoped canonical journal entry.
       safeInput: {
+        ...(identity ? {
+          backendId: identity.backendId,
+          taskId: identity.taskId,
+          attempt: identity.attempt,
+          nativeRequestId: identity.nativeRequestId,
+          ...(identity.toolName ? { toolName: identity.toolName } : {}),
+        } : {}),
         normalizationDiagnostic: normalized.diagnostic,
         requiresUser: true,
       },

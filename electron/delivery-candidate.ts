@@ -41,6 +41,56 @@ export interface PrepareFrozenDeliveryCandidateInput {
   id?: () => string;
 }
 
+/**
+ * Re-open an unaccepted immutable candidate for a fresh rework attempt.
+ *
+ * Candidate commits are coordinator-owned snapshots, not Worker-authored
+ * history. Rework must therefore move the task branch back to the original
+ * base while preserving the candidate tree as unstaged workspace changes.
+ * The next candidate then remains one exact commit that IntegrationQueue can
+ * cherry-pick without depending on an earlier rejected candidate.
+ */
+export async function reopenFrozenDeliveryCandidateForRework(
+  candidate: FrozenDeliveryCandidate,
+): Promise<void> {
+  const workspace = resolve(candidate.workspace);
+  const head = await git(workspace, ['rev-parse', 'HEAD']);
+  if (head !== candidate.commit) {
+    throw new Error(
+      `cannot reopen candidate ${candidate.id}; task HEAD is ${head}, expected ${candidate.commit}`,
+    );
+  }
+  const remaining = await changedWorkspacePaths(workspace);
+  if (remaining.length > 0) {
+    throw new Error(
+      `cannot reopen candidate ${candidate.id}; worktree is not clean: ${remaining.join(', ')}`,
+    );
+  }
+  const parent = await git(workspace, ['rev-parse', `${candidate.commit}^`]);
+  if (parent !== candidate.baseRevision) {
+    throw new Error(
+      `cannot reopen candidate ${candidate.id}; parent ${parent} does not match ${candidate.baseRevision}`,
+    );
+  }
+
+  await git(workspace, ['reset', '--mixed', candidate.baseRevision]);
+  const reopenedHead = await git(workspace, ['rev-parse', 'HEAD']);
+  if (reopenedHead !== candidate.baseRevision) {
+    throw new Error(
+      `candidate ${candidate.id} reopened at ${reopenedHead}, expected ${candidate.baseRevision}`,
+    );
+  }
+  const reopenedPaths = await changedWorkspacePaths(workspace);
+  if (
+    reopenedPaths.length !== candidate.reportedPaths.length
+    || reopenedPaths.some((path, index) => path !== candidate.reportedPaths[index])
+  ) {
+    throw new Error(
+      `candidate ${candidate.id} reopened with unexpected paths: ${reopenedPaths.join(', ')}`,
+    );
+  }
+}
+
 export async function prepareFrozenDeliveryCandidate(
   input: PrepareFrozenDeliveryCandidateInput,
 ): Promise<FrozenDeliveryCandidate> {

@@ -7,6 +7,7 @@ import test from 'node:test';
 
 import {
   prepareFrozenDeliveryCandidate,
+  reopenFrozenDeliveryCandidateForRework,
 } from '../dist-electron/delivery-candidate.js';
 import {
   buildDeliveryDiffManifest,
@@ -96,6 +97,39 @@ test('candidate preparation freezes only reported paths and is idempotent', asyn
   });
   assert.equal(second.commit, first.commit);
   assert.equal(second.reportHash, first.reportHash);
+});
+
+test('rework reopens a rejected candidate as one base-relative workspace diff', async () => {
+  const { cwd, base } = makeRepository();
+  writeFileSync(join(cwd, 'src', 'app.ts'), 'export const value = 2;\n');
+
+  const first = await prepareFrozenDeliveryCandidate({
+    order: {
+      deliveryId: 'delivery-rework',
+      taskId: 'task-rework',
+      attempt: 1,
+      meetingId: 'meeting-rework',
+      goal: 'change value',
+      acceptanceCriteria: [],
+      workspace: cwd,
+      sourceRevision: base,
+    },
+    report: report([{ path: 'src/app.ts', action: 'modified' }]),
+    verification: verification(),
+  });
+
+  await reopenFrozenDeliveryCandidateForRework(first);
+
+  assert.equal(git(cwd, ['rev-parse', 'HEAD']), base);
+  assert.equal(git(cwd, ['status', '--porcelain']), 'M src/app.ts');
+  assert.equal(
+    readFileSync(join(cwd, 'src', 'app.ts'), 'utf8'),
+    'export const value = 2;\n',
+  );
+  await assert.rejects(
+    reopenFrozenDeliveryCandidateForRework(first),
+    /task HEAD is .* expected/,
+  );
 });
 
 test('candidate preparation refuses unreported or unchanged paths', async () => {

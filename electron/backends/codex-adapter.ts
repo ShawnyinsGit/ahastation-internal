@@ -22,8 +22,9 @@
 import { execFileSync, spawn } from 'node:child_process';
 import { accessSync, constants as fsConstants, existsSync, realpathSync } from 'node:fs';
 import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import type {
   BackendSession,
   BackendSessionConfig,
@@ -597,8 +598,17 @@ class CodexAppServerSession implements BackendSession {
     const turnId = this.currentTurnId;
     if (this.isWorker) this.suppressedWorkerTurns.add(turnId);
     await this.transport.interruptTurn(this.threadId, turnId);
+    if (reason === 'steer') {
+      // turn/interrupt acknowledgement is the safe handoff boundary for a
+      // steering message. sendUserText() appends the new instruction to this
+      // session's serialized turnQueue, so it cannot start until the native
+      // turn/completed notification releases the current turn. Waiting here
+      // would make slow command cancellation look like a failed delivery and
+      // discard an otherwise durable steering message.
+      return;
+    }
     await withCodexTimeout(this.waitForTurn(turnId), 10_000, 'Codex interrupt timed out');
-    if (this.isWorker && reason !== 'steer') {
+    if (this.isWorker) {
       this.emit({ kind: 'worker-signal', signal: { kind: 'ended', reason: 'interrupted' } });
     }
   }
@@ -1316,6 +1326,19 @@ export function resolveCodexRuntime(resourcesPath = process.resourcesPath): stri
       'bin',
       binaryName,
     ));
+  }
+  if (platformPackage && triple) {
+    try {
+      const require_ = createRequire(import.meta.url);
+      const packageJson = require_.resolve(`@openai/${platformPackage}/package.json`);
+      candidates.push(join(
+        dirname(packageJson),
+        'vendor',
+        triple,
+        'bin',
+        binaryName,
+      ));
+    } catch { /* the optional native package is unavailable */ }
   }
   const system = resolveBinaryFromPath('codex');
   if (system) candidates.push(system);

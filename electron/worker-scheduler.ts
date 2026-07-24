@@ -83,6 +83,7 @@ import {
   type BackendRuntime,
 } from './backends/task-profile.js';
 import type { DeliveryHarness, DeliveryView } from './delivery-harness.js';
+import { reopenFrozenDeliveryCandidateForRework } from './delivery-candidate.js';
 import {
   parseWorkerAdapterSignal,
   reworkRequestSchema,
@@ -264,6 +265,17 @@ const COMPUTER_USE_WORKER_PROMPT = `
 - 每步操作后 screenshot 验证，确保操作成功
 - 如果操作需要辅助功能权限（Accessibility），工具会返回错误提示
 - 不要在 screenshot 中暴露或朗读用户的敏感信息`;
+
+const WORK_REPORT_RECOVERY_MESSAGE = [
+  '[AhaStation protocol correction]',
+  'Your previous turn ended without a valid mandatory WorkReport.',
+  'Do not repeat the implementation or run more tools.',
+  'Now submit the authoritative report with meeting-worker submit_work_report,',
+  'or output exactly one fenced ```work-report JSON object matching the required schema.',
+  'Exact shape: {"status":"completed","summary":"short result","files":[{"path":"relative/path","action":"created"}],"tests":[{"command":"actual command","status":"passed","summary":"actual result"}],"unresolved":[]}.',
+  'tests.status must be passed, failed, or not-run. Every unresolved item must be {"message":"description","blocking":true} rather than a string.',
+  'This is the only automatic correction; another missing report will fail the task.',
+].join(' ');
 
 const MAX_CONCURRENT_WORKERS = 4;
 const QUEUED_UPDATE_FLUSH_MS = 1200;
@@ -1672,7 +1684,7 @@ export class WorkerScheduler {
         // already being verified is allowed to finish; an unreported running
         // Worker is failed closed by handleWorkerSignal.
         if (handle.status === 'running' || handle.report) {
-          void this.handleWorkerSignal(handle, { kind: 'ended', reason: 'completed' });
+          void this.handleWorkerSignal(handle, { kind: 'ended', reason: 'crashed' });
         } else {
           // Defensive re-dispose in case the session leaked back here after a
           // direct end() — disposeWorker is idempotent.
@@ -1721,7 +1733,18 @@ export class WorkerScheduler {
         requiresUser: true,
       };
     }
-    const canonical = decideTaskPermission(normalized, handle.authorityGrant);
+    const canonical = decideTaskPermission(
+      normalized,
+      handle.authorityGrant,
+      Date.now(),
+      {
+        backendId: handle.backendId,
+        taskId: handle.id,
+        attempt: handle.attempt,
+        nativeRequestId: event.id,
+        toolName: event.toolName,
+      },
+    );
     const persist = this.opts.persistPermissionDecision;
     if (!persist && this.opts.taskAuthorityCompilerRequired) {
       handle.session?.resolvePermission(event.id, 'deny', 'permission journal unavailable');
@@ -1783,8 +1806,46 @@ export class WorkerScheduler {
       return;
     }
     const signal = parsed.signal;
+    const reportProtocolFailure = signal.kind === 'failed'
+      && (signal.code === 'invalid-work-report' || signal.code === 'missing-work-report');
+    const canRequestReportCorrection = reportProtocolFailure
+      && handle.status === 'running'
+      && !this.hasWorkReportRecovery(handle);
+    if (canRequestReportCorrection) {
+      // Adapters emit the invalid-report failure and the provider's completed
+      // turn boundary back-to-back. Claim that one paired completion before
+      // awaiting journal I/O so it cannot race ahead and fail the task.
+      handle.suppressNextReportlessCompletion = true;
+    }
     const event = this.createWorkerEvent(handle, signal);
     this.opts.emit({ source: handle.id, event: { kind: 'worker-event', event } });
+    const duplicateReport = signal.kind === 'delivery' && handle.report !== null;
+    if (signal.kind === 'delivery' && !duplicateReport) {
+      // Claim the report synchronously before any mailbox or steering await.
+      // Providers commonly emit delivery and turn-ended back-to-back; without
+      // this ordering, the terminal signal can race ahead and trigger a false
+      // missing-report recovery.
+      handle.report = signal.report;
+      handle.summary = signal.report.summary;
+    }
+    if (signal.kind === 'progress' || signal.kind === 'tool' || signal.kind === 'delivery') {
+      // Provider-neutral activity is also the authoritative acknowledgement
+      // for message-less transports such as Codex app-server. A mailbox item
+      // was already durable before send; the first subsequent Worker signal
+      // proves that the new turn consumed it.
+      await this.acknowledgeMailboxDelivery(handle);
+    }
+    if (
+      handle.pendingDelegateAck
+      && (signal.kind === 'progress' || signal.kind === 'tool' || signal.kind === 'delivery')
+    ) {
+      // Some Worker transports (notably Codex app-server) expose only the
+      // canonical Worker signal stream and never emit a provider-native
+      // assistant message. The first valid progress boundary proves that the
+      // delegated prompt was consumed, so queued steering can be delivered.
+      handle.pendingDelegateAck = false;
+      await this.deliverQueuedSteer(handle);
+    }
 
     handle.live.lastUpdateTs = Date.now();
     handle.stallNotified = false;
@@ -1802,6 +1863,11 @@ export class WorkerScheduler {
       return;
     }
     if (signal.kind === 'failed') {
+      if (canRequestReportCorrection) {
+        const recoverySent = await this.requestMissingWorkReportRecovery(handle);
+        if (recoverySent) return;
+        handle.suppressNextReportlessCompletion = false;
+      }
       handle.summary = signal.message;
       if (handle.status !== 'failed' && handle.status !== 'accepted') {
         handle.status = 'failed';
@@ -1843,24 +1909,48 @@ export class WorkerScheduler {
       }
       handle.transportEnded = true;
       if (
-        signal.reason !== 'interrupted'
+        signal.reason === 'completed'
+        && !handle.report
+        && handle.status === 'running'
+        && handle.suppressNextReportlessCompletion
+      ) {
+        handle.suppressNextReportlessCompletion = false;
+        handle.transportEnded = false;
+        return;
+      }
+      if (
+        signal.reason === 'completed'
+        && !handle.report
+        && handle.status === 'running'
+      ) {
+        const recoverySent = await this.requestMissingWorkReportRecovery(handle);
+        if (!recoverySent) {
+          await this.handleWorkerSignal(handle, {
+            kind: 'failed',
+            code: 'missing-work-report',
+            message: 'Worker turn ended without a valid WorkReport after one protocol correction.',
+            retryable: true,
+          });
+        }
+      } else if (signal.reason === 'interrupted' && handle.status === 'running') {
+        handle.status = 'interrupted';
+        this.disposeWorker(handle, 'interrupted', 'Worker turn was interrupted.');
+        this.emitPlanUpdate();
+      } else if (
+        signal.reason === 'crashed'
         && !handle.report
         && handle.status === 'running'
       ) {
         await this.handleWorkerSignal(handle, {
           kind: 'failed',
-          code: 'missing-work-report',
-          message: 'Worker turn ended without a valid WorkReport.',
+          code: 'worker-transport-ended',
+          message: 'Worker transport ended before a valid WorkReport was delivered.',
           retryable: true,
         });
-      } else if (signal.reason === 'interrupted' && handle.status === 'running') {
-        handle.status = 'interrupted';
-        this.disposeWorker(handle, 'interrupted', 'Worker turn was interrupted.');
-        this.emitPlanUpdate();
       }
       return;
     }
-    if (handle.report) {
+    if (duplicateReport) {
       console.warn('[scheduler] duplicate WorkReport ignored', {
         workerId: handle.id,
         taskId: handle.currentTaskId,
@@ -1868,9 +1958,6 @@ export class WorkerScheduler {
       });
       return;
     }
-
-    handle.report = signal.report;
-    handle.summary = signal.report.summary;
     if (!handle.deliveryId || !this.opts.deliveryHarness) {
       handle.status = 'failed';
       this.opts.emit({
@@ -2061,6 +2148,7 @@ export class WorkerScheduler {
     });
     handle.report = null;
     handle.transportEnded = false;
+    handle.suppressNextReportlessCompletion = false;
     this.applyDeliveryView(handle, view);
     await this.scheduleAutomaticRework(handle, view, {
       findings: [feedback],
@@ -2130,6 +2218,7 @@ export class WorkerScheduler {
     if (!this.opts.deliveryHarness) throw new Error('DeliveryHarness is unavailable');
     const handle = Array.from(this.workers.values()).find((item) => item.deliveryId === deliveryId);
     if (!handle) throw new Error(`delivery worker not found: ${deliveryId}`);
+    await reopenFrozenDeliveryCandidateForRework(session.candidate);
     const view = await this.opts.deliveryHarness.requestCoordinatorRework(deliveryId, session);
     this.applyDeliveryView(handle, view);
     await this.scheduleAutomaticRework(handle, view, {
@@ -2278,6 +2367,7 @@ export class WorkerScheduler {
     handle.summary = '';
     handle.report = null;
     handle.transportEnded = false;
+    handle.suppressNextReportlessCompletion = false;
     handle.emittedCandidateId = undefined;
     handle.acceptedFinalized = false;
     handle.contextPackage = undefined;
@@ -2345,6 +2435,7 @@ export class WorkerScheduler {
     handle.summary = '';
     handle.report = null;
     handle.transportEnded = false;
+    handle.suppressNextReportlessCompletion = false;
     handle.deliveryId = null;
     handle.emittedCandidateId = undefined;
     handle.acceptedFinalized = false;
@@ -2452,6 +2543,44 @@ export class WorkerScheduler {
     }
   }
 
+  private async requestMissingWorkReportRecovery(handle: WorkerHandle): Promise<boolean> {
+    const mailbox = this.opts.taskMailbox;
+    const session = handle.session;
+    if (!mailbox || !session || handle.status !== 'running') return false;
+    if (this.hasWorkReportRecovery(handle)) return false;
+
+    const message = await mailbox.enqueue({
+      taskId: handle.id,
+      attempt: handle.attempt,
+      sender: 'coordinator',
+      kind: 'follow-up',
+      payload: { text: WORK_REPORT_RECOVERY_MESSAGE },
+    });
+    try {
+      session.sendUserText(`(follow-up) ${WORK_REPORT_RECOVERY_MESSAGE}`, 'high');
+      await mailbox.markDelivered(handle.id, message.id);
+      this.pendingMailboxAckByWorker.set(handle.id, message.id);
+      handle.transportEnded = false;
+      handle.live.busy = true;
+      return true;
+    } catch (error) {
+      await mailbox.markFailed(handle.id, message.id).catch(() => undefined);
+      console.warn('[scheduler] WorkReport recovery delivery failed', {
+        taskId: handle.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return false;
+    }
+  }
+
+  private hasWorkReportRecovery(handle: WorkerHandle): boolean {
+    return this.opts.taskMailbox?.list(handle.id).some((entry) => (
+      entry.attempt === handle.attempt
+      && entry.kind === 'follow-up'
+      && this.messageText(entry) === WORK_REPORT_RECOVERY_MESSAGE
+    )) ?? false;
+  }
+
   private queuedInitialMessage(handle: WorkerHandle): TaskMessage | undefined {
     return this.opts.taskMailbox?.list(handle.id)
       .find((entry) => (
@@ -2533,6 +2662,7 @@ export class WorkerScheduler {
       eventSeq: 0,
       report: null,
       transportEnded: false,
+      suppressNextReportlessCompletion: false,
       deliveryId: null,
       stallNotified: false,
       stallNudged: false,
@@ -2597,6 +2727,7 @@ export class WorkerScheduler {
     handle.approvalRecordedAt = undefined;
     handle.approvedPlanVersion = undefined;
     handle.transportEnded = false;
+    handle.suppressNextReportlessCompletion = false;
     handle.deliveryId = null;
     handle.emittedCandidateId = undefined;
     handle.acceptedFinalized = false;

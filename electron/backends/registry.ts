@@ -17,6 +17,11 @@ import type {
   TaskExecutionProfile,
 } from '../task-collaboration.js';
 import type { BackendRuntime } from './task-profile.js';
+import {
+  assessWorkerRelease,
+  type WorkerReleaseAssessment,
+  type WorkerStabilityEvidence,
+} from './worker-runtime-contract.js';
 
 export interface BackendStatus {
   backend: CliBackend;
@@ -63,6 +68,21 @@ export class BackendRegistry {
       throw new Error(`backend '${id}' does not compile task profiles`);
     }
     return backend.compileTaskProfile(requested, runtime);
+  }
+
+  assessWorkerRelease(
+    id: string,
+    expectedRuntimeVersion: string | null,
+    evidence: WorkerStabilityEvidence,
+  ): WorkerReleaseAssessment {
+    const backend = this.backends.get(id);
+    if (!backend) throw new Error(`backend '${id}' is not registered`);
+    return assessWorkerRelease({
+      backendId: id,
+      implementationEnabled: backend.capabilities.executeTasks,
+      expectedRuntimeVersion,
+      evidence,
+    });
   }
 
   list(): CliBackend[] {

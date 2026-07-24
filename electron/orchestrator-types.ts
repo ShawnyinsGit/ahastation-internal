@@ -242,6 +242,11 @@ export interface WorkerHandle {
   eventSeq: number;
   report: WorkReport | null;
   transportEnded: boolean;
+  /** One invalid-report signal is followed by the provider's reportless turn
+   * completion. Suppress only that paired boundary after the durable protocol
+   * correction has been queued; a second invalid or missing report still
+   * fails closed. */
+  suppressNextReportlessCompletion: boolean;
   deliveryId: string | null;
   emittedCandidateId?: string;
   acceptedFinalized?: boolean;

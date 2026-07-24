@@ -3,6 +3,10 @@ import test from 'node:test';
 
 import { Orchestrator } from '../dist-electron/orchestrator.js';
 import { getBackendRegistry } from '../dist-electron/backends/registry.js';
+import {
+  WORKER_STABILITY_GATES,
+  assessWorkerRelease,
+} from '../dist-electron/backends/worker-runtime-contract.js';
 
 async function waitFor(predicate, message, timeoutMs = 1_000) {
   const deadline = Date.now() + timeoutMs;
@@ -29,6 +33,83 @@ test('the four release backends expose the tested Worker implementation contract
     assert.equal(backend?.capabilities.interrupt, true, `${backendId} interrupt contract`);
   }
   assert.equal(registry.get('qoder')?.capabilities.executeTasks, false);
+});
+
+function completeStabilityEvidence(backendId, runtimeVersion, overrides = {}) {
+  return {
+    runtimeCompatible: true,
+    authReady: true,
+    profileCompilation: true,
+    workReport: true,
+    interrupt: true,
+    resume: true,
+    permissionBridge: true,
+    canonicalPermissionNormalization: true,
+    recovery: true,
+    realVerticalSmoke: {
+      schemaVersion: 1,
+      kind: 'real-backend-smoke',
+      backendId,
+      runtimeVersion,
+      runId: `real-${backendId}-2026-07-24`,
+      verifiedAt: '2026-07-24T08:00:00.000Z',
+      checks: [
+        'work-report',
+        'interrupt',
+        'resume',
+        'permission-bridge',
+        'canonical-permission-normalization',
+        'recovery',
+      ],
+    },
+    ...overrides,
+  };
+}
+
+test('stable Worker qualification requires every gate and exact real smoke evidence', () => {
+  const missingReal = completeStabilityEvidence('claude-code', '2.1.150');
+  delete missingReal.realVerticalSmoke;
+  const incomplete = assessWorkerRelease({
+    backendId: 'claude-code',
+    implementationEnabled: true,
+    expectedRuntimeVersion: '2.1.150',
+    evidence: missingReal,
+  });
+  assert.equal(incomplete.tier, 'experimental');
+  assert.deepEqual(incomplete.blockers, ['real-vertical-smoke']);
+
+  const mismatched = assessWorkerRelease({
+    backendId: 'codex',
+    implementationEnabled: true,
+    expectedRuntimeVersion: '0.144.1',
+    evidence: completeStabilityEvidence('codex', '0.144.6'),
+  });
+  assert.equal(mismatched.tier, 'experimental');
+  assert.equal(mismatched.gates['real-vertical-smoke'], false);
+
+  const stable = assessWorkerRelease({
+    backendId: 'codex',
+    implementationEnabled: true,
+    expectedRuntimeVersion: '0.144.1',
+    evidence: completeStabilityEvidence('codex', '0.144.1'),
+  });
+  assert.equal(stable.tier, 'stable');
+  assert.deepEqual(stable.blockers, []);
+  assert.deepEqual(Object.keys(stable.gates).sort(), [...WORKER_STABILITY_GATES].sort());
+});
+
+test('OpenCode and Kimi remain experimental even with complete mocked-looking gates', () => {
+  const registry = getBackendRegistry();
+  for (const [backendId, version] of [['opencode', '1.18.3'], ['kimi', '0.24.1']]) {
+    const assessment = registry.assessWorkerRelease(
+      backendId,
+      version,
+      completeStabilityEvidence(backendId, version),
+    );
+    assert.equal(assessment.tier, 'experimental');
+    assert.deepEqual(assessment.blockers, []);
+    assert.match(assessment.reason, /policy keeps this Worker experimental/i);
+  }
 });
 
 test('a backend without coordinator capability cannot become the default coordinator', () => {

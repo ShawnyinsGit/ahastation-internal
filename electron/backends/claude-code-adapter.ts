@@ -28,7 +28,10 @@ import type { AutoApproveScope } from '../auto-approve-policy.js';
 import type { ConfirmDestructive } from '../claude-session.js';
 import { runTerminalLogin } from './terminal-login.js';
 import { isolatedSubprocessEnv } from './backend-environment.js';
-import type { WorkerAdapterSignal } from '../worker-protocol.js';
+import {
+  extractWorkReportFrame,
+  type WorkerAdapterSignal,
+} from '../worker-protocol.js';
 import { dirname, join } from 'node:path';
 import {
   compileClaudeTaskProfile,
@@ -95,10 +98,12 @@ export function resolveClaudeBinary(): string | undefined {
 export function mapClaudeMessageToWorkerSignals(
   message: unknown,
   toolNames: Map<string, string> = new Map(),
+  options: { suppressExpectedSteerBoundary?: boolean } = {},
 ): WorkerAdapterSignal[] {
   const msg = (message ?? {}) as Record<string, unknown>;
   const type = typeof msg.type === 'string' ? msg.type : '';
   if (type === 'result') {
+    if (options.suppressExpectedSteerBoundary) return [];
     const failed = msg.is_error === true || msg.subtype === 'error';
     return failed
       ? [{
@@ -117,8 +122,24 @@ export function mapClaudeMessageToWorkerSignals(
   for (const rawBlock of content) {
     const block = (rawBlock ?? {}) as Record<string, unknown>;
     if (block.type === 'text' && typeof block.text === 'string') {
-      const visible = block.text.split(/```work-report/i, 1)[0].trim();
-      if (visible) signals.push({ kind: 'progress', message: visible });
+      if (
+        options.suppressExpectedSteerBoundary
+        && block.text.trim() === '[Request interrupted by user]'
+      ) continue;
+      const extracted = extractWorkReportFrame(block.text);
+      if (extracted.visibleText) {
+        signals.push({ kind: 'progress', message: extracted.visibleText });
+      }
+      if (extracted.error) {
+        signals.push({
+          kind: 'failed',
+          code: 'invalid-work-report',
+          message: `Claude Worker emitted an invalid WorkReport: ${extracted.error}`,
+          retryable: true,
+        });
+      } else if (extracted.report) {
+        signals.push({ kind: 'delivery', report: extracted.report });
+      }
     } else if (block.type === 'tool_use') {
       const name = typeof block.name === 'string' && block.name.trim()
         ? block.name.trim()
@@ -148,6 +169,7 @@ class ClaudeCodeSession implements BackendSession {
   private readonly isWorker: boolean;
   private readonly workerTools = new Map<string, string>();
   private workerTurnTerminal = false;
+  private pendingSteerInterrupts = 0;
   private closed = false;
   private readonly emit: (event: BackendSessionEvent) => void;
 
@@ -170,9 +192,19 @@ class ClaudeCodeSession implements BackendSession {
         }
         if (this.closed) return;
         if (event.kind === 'message') {
-          for (const signal of mapClaudeMessageToWorkerSignals(event.message, this.workerTools)) {
+          const message = (event.message ?? {}) as Record<string, unknown>;
+          const expectedSteerBoundary = this.pendingSteerInterrupts > 0;
+          const isTurnResult = message.type === 'result';
+          for (const signal of mapClaudeMessageToWorkerSignals(
+            event.message,
+            this.workerTools,
+            { suppressExpectedSteerBoundary: expectedSteerBoundary },
+          )) {
             if (signal.kind === 'ended') this.workerTurnTerminal = true;
             emit({ kind: 'worker-signal', signal });
+          }
+          if (expectedSteerBoundary && isTurnResult) {
+            this.pendingSteerInterrupts -= 1;
           }
         } else if (event.kind === 'auth-required') {
           emit({
@@ -243,6 +275,13 @@ class ClaudeCodeSession implements BackendSession {
   }
 
   async interrupt(reason: 'steer' | 'user' | 'shutdown' = 'user'): Promise<void> {
+    if (reason === 'steer' && this.isWorker && !this.closed) {
+      // Claude's SDK represents an intentional turn interruption as an error
+      // result. Keep that provider-native boundary out of the canonical Worker
+      // failure protocol: Scheduler immediately delivers the queued steering
+      // message and the same persistent session continues on its next turn.
+      this.pendingSteerInterrupts += 1;
+    }
     await this.inner.interrupt();
     if (reason !== 'steer' && this.isWorker && !this.workerTurnTerminal && !this.closed) {
       this.workerTurnTerminal = true;
@@ -337,6 +376,7 @@ export class ClaudeCodeBackend implements CliBackend {
     confirmDestructive?: ConfirmDestructive;
     resolveBinary?: () => string | null;
     execFile?: (binary: string, args: string[], options?: Record<string, unknown>) => string;
+    queryFactory?: typeof import('@anthropic-ai/claude-agent-sdk').query;
   } = {}) {
     this.confirmDestructive = opts?.confirmDestructive;
     this.deps = opts;

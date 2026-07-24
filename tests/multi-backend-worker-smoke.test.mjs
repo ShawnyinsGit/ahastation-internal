@@ -1,6 +1,7 @@
-// Smoke proof: one meeting, four independent tasks, four Worker backends in
-// parallel, canonical WorkerEvent v2 envelopes, and journal/renderer eventId
-// parity at the Orchestrator seam.
+// Structural smoke proof: one meeting, four independent tasks, four Worker
+// implementations in parallel, canonical WorkerEvent v2 envelopes, and
+// journal/renderer eventId parity at the Orchestrator seam. This fixture does
+// not qualify any provider runtime as stable because its sessions are mocked.
 //
 // Run after `npm run build:electron`:
 //   node --test --test-timeout=60000 --import "./tests/electron-stub.mjs" tests/multi-backend-worker-smoke.test.mjs
@@ -10,11 +11,18 @@ import { randomUUID } from 'node:crypto';
 import test from 'node:test';
 
 import { DeliveryHarness } from '../dist-electron/delivery-harness.js';
+import { getBackendRegistry } from '../dist-electron/backends/registry.js';
 import { MeetingRepository } from '../dist-electron/meeting-repository.js';
 import { Orchestrator } from '../dist-electron/orchestrator.js';
 import { WorkerScheduler } from '../dist-electron/worker-scheduler.js';
 
 const BACKENDS = ['claude-code', 'codex', 'kimi', 'opencode'];
+const EXACT_RUNTIME_VERSIONS = {
+  'claude-code': '2.1.150',
+  codex: '0.144.1',
+  kimi: '0.24.1',
+  opencode: '1.18.3',
+};
 
 const report = {
   status: 'completed',
@@ -180,6 +188,29 @@ test('one meeting spawns four backend workers in parallel', async () => {
   }
 
   scheduler.endAll();
+});
+
+test('mocked four-backend smoke never promotes a Worker release tier', () => {
+  const registry = getBackendRegistry();
+  for (const backendId of BACKENDS) {
+    const assessment = registry.assessWorkerRelease(
+      backendId,
+      EXACT_RUNTIME_VERSIONS[backendId],
+      {
+        runtimeCompatible: true,
+        authReady: true,
+        profileCompilation: true,
+        workReport: true,
+        interrupt: true,
+        resume: true,
+        permissionBridge: true,
+        canonicalPermissionNormalization: true,
+        recovery: true,
+      },
+    );
+    assert.equal(assessment.tier, 'experimental');
+    assert.deepEqual(assessment.blockers, ['real-vertical-smoke']);
+  }
 });
 
 test('orchestrator keeps renderer worker-eventId identical to events.jsonl', async () => {

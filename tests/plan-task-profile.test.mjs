@@ -16,6 +16,14 @@ const profile = {
   maxTokenBudget: 200_000,
 };
 
+const budget = {
+  schemaVersion: 1,
+  maxAttempts: 6,
+  maxTotalTokens: 600_000,
+  maxTotalDurationMs: 14_400_000,
+  maxStagnantAttempts: 3,
+};
+
 function currentTask(overrides = {}) {
   return {
     id: 'task-login',
@@ -33,6 +41,7 @@ function currentTask(overrides = {}) {
       attachmentIds: [],
     },
     workspaceMode: 'git-worktree',
+    budget,
     authorityRequest: {
       writePaths: ['src/auth'],
       toolKinds: ['read', 'write'],

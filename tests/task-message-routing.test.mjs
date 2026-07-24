@@ -148,6 +148,115 @@ test('follow-ups remain FIFO and wait for provider turn completion', async (t) =
   assert.equal(mailbox.get('task-a', first.id).status, 'acknowledged');
 });
 
+test('a missing WorkReport gets one durable protocol correction before fail-closed', async (t) => {
+  const { scheduler, sessions, mailbox } = await fixture(t);
+  install(scheduler);
+  await waitFor(() => sessions.length === 1, 'worker did not start');
+  const initialInputs = sessions[0].inputs.length;
+
+  sessions[0].opts.emit({
+    kind: 'worker-signal',
+    signal: { kind: 'ended', reason: 'completed' },
+  });
+  await waitFor(
+    () => (
+      sessions[0].inputs.length === initialInputs + 1
+      && mailbox.list('task-a').some((entry) => (
+        entry.kind === 'follow-up'
+        && entry.payload?.text?.includes('protocol correction')
+        && entry.status === 'delivered'
+      ))
+    ),
+    'missing WorkReport correction was not delivered',
+  );
+  assert.match(sessions[0].inputs.at(-1), /protocol correction/);
+  assert.match(sessions[0].inputs.at(-1), /tests\.status must be passed, failed, or not-run/);
+  assert.match(sessions[0].inputs.at(-1), /Every unresolved item must be/);
+  const corrections = mailbox.list('task-a').filter((entry) => (
+    entry.kind === 'follow-up'
+    && entry.payload?.text?.includes('protocol correction')
+  ));
+  assert.equal(corrections.length, 1);
+  assert.equal(corrections[0].status, 'delivered');
+  assert.equal(scheduler.snapshot()[0].status, 'running');
+
+  sessions[0].opts.emit({
+    kind: 'worker-signal',
+    signal: { kind: 'ended', reason: 'completed' },
+  });
+  await waitFor(
+    () => scheduler.snapshot()[0].status === 'failed',
+    'second missing WorkReport did not fail closed',
+  );
+  assert.equal(
+    mailbox.list('task-a').filter((entry) => (
+      entry.kind === 'follow-up'
+      && entry.payload?.text?.includes('protocol correction')
+    )).length,
+    1,
+  );
+});
+
+test('an invalid WorkReport gets the same single correction without racing its turn end', async (t) => {
+  const { scheduler, sessions, mailbox } = await fixture(t);
+  install(scheduler);
+  await waitFor(() => sessions.length === 1, 'worker did not start');
+  const initialInputs = sessions[0].inputs.length;
+
+  sessions[0].opts.emit({
+    kind: 'worker-signal',
+    signal: {
+      kind: 'failed',
+      code: 'invalid-work-report',
+      message: 'tests.0.status must be passed, failed, or not-run',
+      retryable: true,
+    },
+  });
+  sessions[0].opts.emit({
+    kind: 'worker-signal',
+    signal: { kind: 'ended', reason: 'completed' },
+  });
+
+  await waitFor(
+    () => sessions[0].inputs.length === initialInputs + 1,
+    'invalid WorkReport correction was not delivered',
+  );
+  assert.equal(scheduler.snapshot()[0].status, 'running');
+  assert.equal(
+    mailbox.list('task-a').filter((entry) => (
+      entry.kind === 'follow-up'
+      && entry.payload?.text?.includes('protocol correction')
+    )).length,
+    1,
+  );
+
+  sessions[0].opts.emit({
+    kind: 'worker-signal',
+    signal: {
+      kind: 'failed',
+      code: 'invalid-work-report',
+      message: 'second invalid report',
+      retryable: true,
+    },
+  });
+  sessions[0].opts.emit({
+    kind: 'worker-signal',
+    signal: { kind: 'ended', reason: 'completed' },
+  });
+
+  await waitFor(
+    () => scheduler.snapshot()[0].status === 'failed',
+    'second invalid WorkReport did not fail closed',
+  );
+  assert.equal(
+    mailbox.list('task-a').filter((entry) => (
+      entry.kind === 'follow-up'
+      && entry.payload?.text?.includes('protocol correction')
+    )).length,
+    1,
+  );
+});
+
 test('steering is durable before interrupt and never terminalizes the task turn', async (t) => {
   let meetingRoot;
   const setup = await fixture(t, {
@@ -175,6 +284,46 @@ test('steering is durable before interrupt and never terminalizes the task turn'
   assert.equal(setup.scheduler.snapshot()[0].status, 'running');
   assert.match(setup.sessions[0].inputs.at(-1), /change direction/);
   assert.equal(setup.sessions[0].interruptReasons[0], 'steer');
+});
+
+test('canonical Worker progress acknowledges delegation for message-less backends', async (t) => {
+  const setup = await fixture(t);
+  install(setup.scheduler);
+  await waitFor(() => setup.sessions.length === 1, 'worker did not start');
+
+  const queued = await setup.scheduler.steerTask('task-a', 'apply after canonical progress');
+  assert.deepEqual(queued, { ok: true, queued: true });
+  setup.sessions[0].opts.emit({
+    kind: 'worker-signal',
+    signal: { kind: 'progress', message: 'Codex consumed the delegated prompt.' },
+  });
+
+  await waitFor(
+    () => (
+      setup.sessions[0].interruptReasons.includes('steer')
+      && setup.mailbox.list('task-a').some((message) => (
+        message.kind === 'steer' && message.status === 'delivered'
+      ))
+    ),
+    'queued steering was not delivered after canonical progress',
+  );
+  assert.match(setup.sessions[0].inputs.at(-1), /apply after canonical progress/);
+  assert.equal(
+    setup.mailbox.list('task-a').some((message) => (
+      message.kind === 'steer' && message.status === 'delivered'
+    )),
+    true,
+  );
+  setup.sessions[0].opts.emit({
+    kind: 'worker-signal',
+    signal: { kind: 'progress', message: 'Codex consumed the steering update.' },
+  });
+  await waitFor(
+    () => setup.mailbox.list('task-a').some((message) => (
+      message.kind === 'steer' && message.status === 'acknowledged'
+    )),
+    'canonical progress did not acknowledge the delivered steering message',
+  );
 });
 
 test('explicit interrupt preserves workspace and resumable Backend checkpoint', async (t) => {

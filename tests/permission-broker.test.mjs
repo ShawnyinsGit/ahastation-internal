@@ -275,4 +275,26 @@ test('canonical decisions use only a valid bounded task grant', () => {
     }, grant, approvedAt + 1).decision.kind,
     'ask-user',
   );
+  assert.deepEqual(
+    decideTaskPermission({
+      ok: false,
+      diagnostic: 'opaque-shell-command',
+      requiresUser: true,
+    }, grant, approvedAt + 1, {
+      backendId: 'codex',
+      taskId: 'task-a',
+      attempt: 1,
+      nativeRequestId: 'native-opaque',
+      toolName: 'Bash',
+    }).safeInput,
+    {
+      backendId: 'codex',
+      taskId: 'task-a',
+      attempt: 1,
+      nativeRequestId: 'native-opaque',
+      toolName: 'Bash',
+      normalizationDiagnostic: 'opaque-shell-command',
+      requiresUser: true,
+    },
+  );
 });
