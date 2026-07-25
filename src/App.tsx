@@ -19,6 +19,8 @@ import { meetingStore, type MeetingState } from './lib/meeting-store';
 import { browserStore, requestHideBrowser } from './lib/browser-store';
 import { toast } from './lib/toast';
 import { Lobby } from './components/Lobby';
+import { Onboarding, ONBOARDED_STORAGE_KEY, type OnboardingMode } from './components/Onboarding';
+import { MinimizePrompt } from './components/MinimizePrompt';
 import { TabStrip } from './components/TabStrip';
 import { MeetingHeader, type MeetingView } from './components/MeetingHeader';
 import { AppTopBar } from './components/AppTopBar';
@@ -26,7 +28,6 @@ import { StatusBar } from './components/StatusBar';
 import { BroadcastStrip } from './components/BroadcastStrip';
 import { MeetingControls } from './components/MeetingControls';
 import { AgentDetailPanel } from './components/AgentDetailPanel';
-import { OnboardingModal } from './components/OnboardingModal';
 import { ExplorePage } from './components/ExplorePage';
 import { TasksView } from './components/TasksView';
 import { ParticipantTile } from './components/ParticipantTile';
@@ -93,11 +94,25 @@ export function App() {
   const [view, setView] = useState<MeetingView>('meeting');
   // P3 agent 详情面板（右侧滑出）：'user' 忽略，hostId/workerId 打开详情
   const [agentPanelId, setAgentPanelId] = useState<string | null>(null);
-  // P6 探索页 / P8 首次启动引导
+  // P6 探索页
   const [exploreOpen, setExploreOpen] = useState(false);
-  const [onboarded, setOnboarded] = useState(
-    () => window.localStorage.getItem('ahastudio.onboarded') === '1',
-  );
+  /** Zero-session entry: after onboarding (or the Lobby's 查看任务看板 button)
+   *  the main UI opens straight onto the task board without a session. Flips
+   *  back off as soon as a real session tab exists so closing all tabs lands
+   *  on the Lobby again. */
+  const [boardOnly, setBoardOnly] = useState(false);
+  /** First launch ever → full 4-step flow; later cold starts → scan-only
+   *  splash. Suppressed under the dev visual fixtures so screenshots of the
+   *  Lobby/meeting stay deterministic. */
+  const [onboardingMode, setOnboardingMode] = useState<OnboardingMode | null>(() => {
+    if (import.meta.env.DEV
+      && new URLSearchParams(window.location.search).has('ui-fixture')) return null;
+    try {
+      return window.localStorage.getItem(ONBOARDED_STORAGE_KEY) ? 'splash' : 'full';
+    } catch {
+      return 'full';
+    }
+  });
   /** Bumped every time the task board asks the meeting view to open a task, so
    *  re-clicking the same card after closing the inspector still reopens it. */
   const [taskFocus, setTaskFocus] = useState<{ taskId: string; seq: number } | null>(null);
@@ -121,12 +136,6 @@ export function App() {
       + crossProjectTasks.pendingPlans.length,
     [crossProjectTasks],
   );
-
-  const showOnboarding = !onboarded && !visualFixture;
-  const handleOnboardingFinish = useCallback(() => {
-    window.localStorage.setItem('ahastudio.onboarded', '1');
-    setOnboarded(true);
-  }, []);
 
   // P3 agent 详情面板数据解析：host tile → 该组 talker；worker tile → worker 本体
   const agentPanelData = useMemo(() => {
@@ -167,6 +176,28 @@ export function App() {
     void meetingStore.setActive(sessionId);
     setView('meeting');
   }, []);
+
+  const enterBoardOnly = useCallback(() => {
+    setBoardOnly(true);
+    setView('tasks');
+  }, []);
+
+  const handleOnboardingFinish = useCallback((mode: OnboardingMode) => {
+    setOnboardingMode(null);
+    if (mode !== 'full') return;
+    try {
+      window.localStorage.setItem(ONBOARDED_STORAGE_KEY, '1');
+    } catch { /* private mode etc. — the flow simply replays next launch */ }
+    // First-launch finish with no session lands on the task board (Feature:
+    // zero-project entry); with restored tabs the meeting view stays.
+    if (!hasTabs) enterBoardOnly();
+  }, [hasTabs, enterBoardOnly]);
+
+  // Once a real session exists the zero-session entry is over — closing all
+  // tabs then returns to the Lobby (the only place that opens folders).
+  useEffect(() => {
+    if (boardOnly && hasTabs) setBoardOnly(false);
+  }, [boardOnly, hasTabs]);
 
   // Load available backends for the participants tab
   useEffect(() => {
@@ -727,13 +758,18 @@ export function App() {
     />
   ) : undefined), [handheld, autoApproveScope, multiAgent, toggleMultiAgent]);
 
-  if (!hasTabs) {
+  if (!hasTabs && !boardOnly) {
     return (
       <>
-        <Lobby lastError={lastError} />
-        {showOnboarding && (
-          <OnboardingModal backends={backends} projectCount={0} onFinish={handleOnboardingFinish} />
+        <Lobby
+          lastError={lastError}
+          onEnterBoard={enterBoardOnly}
+          onReplayOnboarding={() => setOnboardingMode('full')}
+        />
+        {onboardingMode && (
+          <Onboarding mode={onboardingMode} onFinish={handleOnboardingFinish} />
         )}
+        <MinimizePrompt />
         <ToastViewport />
       </>
     );
@@ -971,8 +1007,8 @@ export function App() {
       />
 
       {exploreOpen && <ExplorePage onClose={() => setExploreOpen(false)} />}
-      {showOnboarding && (
-        <OnboardingModal backends={backends} projectCount={tabs.length} onFinish={handleOnboardingFinish} />
+      {onboardingMode && (
+        <Onboarding mode={onboardingMode} onFinish={handleOnboardingFinish} />
       )}
 
       {(lastError || micError || updateInfo) && (
@@ -1011,6 +1047,12 @@ export function App() {
           )}
         </div>
       )}
+
+      {onboardingMode && (
+        <Onboarding mode={onboardingMode} onFinish={handleOnboardingFinish} />
+      )}
+
+      <MinimizePrompt />
     </div>
   );
 }

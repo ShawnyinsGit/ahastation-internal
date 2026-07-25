@@ -4,23 +4,26 @@
 
 This shell does not always inherit a usable `PATH`, so `node` / `npm` / `npx`
 can come back as "command not found" even when they are installed. Use the
-absolute paths below, or prepend `/usr/local/bin` to `PATH` once at the start
-of a session.
+absolute paths below, or prepend the right bin dir to `PATH` once at the start
+of a session. On this machine (Apple Silicon, Homebrew) node lives in
+`/opt/homebrew/bin` — `/usr/local/bin` is the Intel/Homebrew-alt location and
+does **not** exist here; check `which node` once and pick accordingly.
 
-| Tool | Absolute path |
-|------|---------------|
-| node | `/usr/local/bin/node` |
-| npm  | `/usr/local/bin/npm` |
-| npx  | `/usr/local/bin/npx` |
+| Tool | Absolute path (this machine) | Fallback (Intel mac) |
+|------|------------------------------|----------------------|
+| node | `/opt/homebrew/bin/node` | `/usr/local/bin/node` |
+| npm  | `/opt/homebrew/bin/npm`  | `/usr/local/bin/npm` |
+| npx  | `/opt/homebrew/bin/npx`  | `/usr/local/bin/npx` |
 
 Quick fix at the top of a Bash invocation:
 
 ```bash
-export PATH=/usr/local/bin:$PATH
+export PATH=/opt/homebrew/bin:$PATH   # this machine
+# export PATH=/usr/local/bin:$PATH    # Intel / Homebrew-alt
 ```
 
 If `which node` returns nothing, fall back to the absolute path — for example
-`/usr/local/bin/node node_modules/typescript/bin/tsc ...`.
+`/opt/homebrew/bin/node node_modules/typescript/bin/tsc ...`.
 
 ## Typecheck
 

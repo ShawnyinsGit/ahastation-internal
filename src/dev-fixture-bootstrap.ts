@@ -70,6 +70,69 @@ function installFixture(fixture: string): void {
   const ok = async () => ({ ok: true });
   const noopSubscription = () => () => {};
 
+  // Observed-session fixture (S0): the bridge below replaces window.vibeMeet
+  // wholesale, so without this namespace the board's observed cards could
+  // never be eyeballed in dev. Three sessions: one waiting/claude sharing the
+  // orchestrated demo project, one active/codex in an observed-only project
+  // (proves the project filter chip), one noise (folds into 噪声).
+  const observedFixtureSnapshot = {
+    sessions: [
+      {
+        id: 'fixture-obs-claude-waiting',
+        clientKind: 'claude-code',
+        nativeSessionId: 'fixture-native-claude',
+        projectId: 'fixture-project-demo',
+        projectName: 'ahastation-demo',
+        cwd: '/workspace/ahastation-demo',
+        title: '重构登录页表单校验，补充边界用例',
+        state: 'waiting',
+        activity: 'waiting',
+        inferred: true as const,
+        model: 'claude-sonnet-4-5',
+        lastActiveAt: now - 90_000,
+        pid: 4242,
+        titleSource: 'first-prompt',
+        isNoise: false,
+        evidence: ['fixture'],
+      },
+      {
+        id: 'fixture-obs-codex-active',
+        clientKind: 'codex',
+        nativeSessionId: 'fixture-native-codex',
+        projectId: 'fixture-project-mobile',
+        projectName: 'aha-mobile',
+        cwd: '/workspace/aha-mobile',
+        title: '修复推送通知点击后的路由跳转',
+        state: 'active',
+        activity: 'executing',
+        inferred: true as const,
+        model: 'gpt-5-codex',
+        lastActiveAt: now - 20_000,
+        pid: 4243,
+        titleSource: 'session-index',
+        isNoise: false,
+        evidence: ['fixture'],
+      },
+      {
+        id: 'fixture-obs-noise',
+        clientKind: 'claude-code',
+        nativeSessionId: 'fixture-native-noise',
+        projectId: 'fixture-project-noise',
+        projectName: 'scratch',
+        cwd: '/tmp/scratch',
+        title: 'scratch · 一次性试探',
+        state: 'idle',
+        activity: 'unknown',
+        inferred: true as const,
+        lastActiveAt: now - 600_000,
+        titleSource: 'project-fallback',
+        isNoise: true,
+        evidence: ['fixture'],
+      },
+    ],
+    scannedAt: now,
+  };
+
   const emit = (event: Record<string, unknown>) => {
     fixtureState.emitted += 1;
     document.documentElement.dataset.fixtureEmitted = String(fixtureState.emitted);
@@ -549,6 +612,14 @@ function installFixture(fixture: string): void {
     },
     onUpdateAvailable: noopSubscription,
     onDisplayChanged: noopSubscription,
+    observe: {
+      getSnapshot: async () => observedFixtureSnapshot,
+      onEvent: (listener: (snapshot: typeof observedFixtureSnapshot) => void) => {
+        // Push once on subscribe so the board populates without a scan tick.
+        window.setTimeout(() => listener(observedFixtureSnapshot), 300);
+        return noopSubscription();
+      },
+    },
     deviceDiagnostics: async () => ({
       ok: true,
       diagnostics: {

@@ -1,0 +1,4 @@
+{corrupt line without json
+{"parentUuid":null,"isSidechain":false,"type":"user","message":{"role":"user","content":"h"},"uuid":"u-1","timestamp":"2026-07-24T08:00:00.000Z","userType":"external","cwd":"/private/var/folders/zz/zyxvpxvq6csfxvn_n00000gn/T/e2e-run","sessionId":"c1a0de00-0000-4000-8000-000000000003","version":"2.1.150"}
+{"truncated": "json that never ends
+{"parentUuid":"u-1","isSidechain":false,"type":"assistant","uuid":"a-1","timestamp":"2026-07-24T08:00:01.000Z","message":{"role":"assistant","model":"claude-fake-5","content":[{"type":"text","text":"Hi!"}]},"userType":"external","cwd":"/private/var/folders/zz/zyxvpxvq6csfxvn_n00000gn/T/e2e-run","sessionId":"c1a0de00-0000-4000-8000-000000000003"}

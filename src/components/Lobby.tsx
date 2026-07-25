@@ -7,6 +7,10 @@ import { usePickCwd } from './DirPickerModal';
 
 interface LobbyProps {
   lastError?: string | null;
+  /** Zero-session entry into the main UI, landing on the task board. */
+  onEnterBoard?: () => void;
+  /** Replay the full first-launch onboarding flow. */
+  onReplayOnboarding?: () => void;
 }
 
 interface RecoverableMeeting {
@@ -67,7 +71,7 @@ function microphoneLabel(status: DeviceSnapshot['audio']['microphone']): string 
   }
 }
 
-export function Lobby({ lastError }: LobbyProps) {
+export function Lobby({ lastError, onEnterBoard, onReplayOnboarding }: LobbyProps) {
   const lobby = useSyncExternalStore(meetingStore.subscribeTabs, meetingStore.getLobbyData);
 
   const [backends, setBackends] = useState<BackendInfo[]>([]);
@@ -706,6 +710,21 @@ export function Lobby({ lastError }: LobbyProps) {
           <span className="join-hint-sep">·</span>
           <span className="join-hint-item">⌥ Interrupt anytime</span>
         </div>
+
+        {(onEnterBoard || onReplayOnboarding) && (
+          <div className="lobby-footer-actions">
+            {onEnterBoard && (
+              <button type="button" className="lobby-footer-btn" onClick={onEnterBoard}>
+                查看任务看板
+              </button>
+            )}
+            {onReplayOnboarding && (
+              <button type="button" className="lobby-footer-btn" onClick={onReplayOnboarding}>
+                重播首次启动
+              </button>
+            )}
+          </div>
+        )}
       </div>
       {pickerModal}
     </div>

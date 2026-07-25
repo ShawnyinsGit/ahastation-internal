@@ -1,0 +1,4 @@
+{"timestamp":"2026-07-24T10:00:00.000Z","type":"session_meta","payload":{"id":"d0de0000-0000-7000-8000-0000000000a1","timestamp":"2026-07-24T10:00:00.000Z","cwd":"/Users/test/work/project-gamma","originator":"codex_cli_rs","source":"cli","cli_version":"0.999.0","model_provider":"openai"}}
+{"timestamp":"2026-07-24T10:00:01.000Z","type":"event_msg","payload":{"type":"task_started","turn_id":"t-1"}}
+{"timestamp":"2026-07-24T10:00:02.000Z","type":"event_msg","payload":{"type":"user_message","message":"investigate the flaky tests and report","images":[]}}
+{"timestamp":"2026-07-24T10:00:05.000Z","type":"response_item","payload":{"type":"function_call","id":"fc_fake1","name":"exec_command","arguments":"{\"cmd\":\"npm test\"}","call_id":"call_FAKEPENDING1"}}

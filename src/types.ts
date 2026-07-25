@@ -1291,6 +1291,11 @@ export interface VibeMeetApi {
   onDisplayChanged: (cb: (info: { displayCount: number; added: boolean }) => void) => () => void;
   appVersion: () => Promise<string>;
   onUpdateAvailable: (cb: (info: { latest: string; url: string }) => void) => () => void;
+  app: {
+    /** Fired when main intercepts a minimize/close to ask about AhaBar. */
+    onMinimizePrompt: (cb: (payload: { kind: 'minimize' | 'close' }) => void) => () => void;
+    minimizeChoice: (choice: { action: 'ahabar' | 'hide'; never: boolean }) => Promise<{ ok: boolean; error?: string }>;
+  };
   companion: CompanionApi;
   /** Floating AhaBar window bridge (preload-companion.cjs only). */
   ahabar?: AhaBarApi;
@@ -1329,6 +1334,9 @@ export interface VibeMeetApi {
     workerId: string,
   ) => Promise<{ ok: true } | { ok: false; error: string }>;
   onEvent: (cb: (e: RendererEvent) => void) => () => void;
+  /** Observation layer (S0). Optional: a renderer running against an older
+   *  preload without this namespace must degrade to "nothing observed". */
+  observe?: import('./lib/observed-store').ObserveApi;
 }
 
 // ── Companion screen (Phase 8) ─────────────────────────────────────────────
