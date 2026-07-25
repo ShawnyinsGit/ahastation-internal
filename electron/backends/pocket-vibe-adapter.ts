@@ -218,6 +218,9 @@ class PocketVibeSession implements BackendSession {
   private readonly healthTimeoutMs: number;
 
   async start(): Promise<void> {
+    // 1. Hub reachability. Host mode fails FAST with a legible reason —
+    //    otherwise HostGroup only sees the session go dark and reports the
+    //    cryptic "ended before readiness".
     try {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), this.healthTimeoutMs);
@@ -232,42 +235,48 @@ class PocketVibeSession implements BackendSession {
       if (!res.ok) {
         throw new Error(`hub /health HTTP ${res.status}`);
       }
-      // Token sanity check: /v1/agents requires auth — a 401/403 here means
-      // the configured tool token is wrong, which is an auth problem, not a
-      // transient failure.
-      if (this.token) {
-        const agents = await this.fetchImpl(`${this.hubUrl}/v1/agents`, {
-          headers: this.authHeaders(),
-        }).catch(() => null);
-        if (agents && (agents.status === 401 || agents.status === 403)) {
-          if (this.isWorker) {
-            this.emit({
-              kind: 'worker-signal',
-              signal: {
-                kind: 'failed',
-                code: 'pocket-vibe-auth',
-                message: 'Pocket Vibe tool token 被 hub 拒绝（401/403）',
-                retryable: false,
-              },
-            });
-          } else {
-            this.emit({
-              kind: 'auth-required',
-              error: 'Pocket Vibe tool token 被 hub 拒绝，请在设置中检查 token。',
-            });
-          }
-          return;
-        }
-      }
-      this.ready = true;
-      this.emitInformational(`Pocket Vibe 已连接 hub ${this.hubUrl}`);
     } catch (err) {
-      this.emitFailure(
-        'pocket-vibe-hub-unreachable',
-        `Pocket Vibe hub 不可达（${this.hubUrl}）：${String(err)}`,
-        true,
-      );
+      const message = `Pocket Vibe hub 不可达（${this.hubUrl}）：${String(err)}`;
+      if (this.isWorker) {
+        this.emitFailure('pocket-vibe-hub-unreachable', message, true);
+        return;
+      }
+      this.emit({ kind: 'error', error: message });
+      throw new Error(message);
     }
+
+    // 2. Token must exist and be accepted. A missing token would 401 every
+    //    /v1/* call later, so fail at startup instead of turn-by-turn.
+    if (!this.token) {
+      const message = 'Pocket Vibe 未配置 tool token：请在 设置 → Pocket Vibe (远程) 的 API Key 栏填入 hub 的 tool token 并保存（回车或点保存按钮）。';
+      if (this.isWorker) {
+        this.emit({
+          kind: 'worker-signal',
+          signal: { kind: 'failed', code: 'pocket-vibe-auth', message, retryable: false },
+        });
+        return;
+      }
+      this.emit({ kind: 'auth-required', error: message });
+      throw new Error(message);
+    }
+    const agents = await this.fetchImpl(`${this.hubUrl}/v1/agents`, {
+      headers: this.authHeaders(),
+    }).catch(() => null);
+    if (agents && (agents.status === 401 || agents.status === 403)) {
+      const message = 'Pocket Vibe tool token 被 hub 拒绝（401/403），请在设置中检查 token。';
+      if (this.isWorker) {
+        this.emit({
+          kind: 'worker-signal',
+          signal: { kind: 'failed', code: 'pocket-vibe-auth', message, retryable: false },
+        });
+        return;
+      }
+      this.emit({ kind: 'auth-required', error: message });
+      throw new Error(message);
+    }
+
+    this.ready = true;
+    this.emitInformational(`Pocket Vibe 已连接 hub ${this.hubUrl}`);
   }
 
   // ── Turn pipeline ─────────────────────────────────────────────────────────

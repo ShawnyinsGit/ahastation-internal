@@ -218,11 +218,41 @@ test('Pocket Vibe start emits auth-required when the hub rejects the token', asy
   };
   const events = [];
   const session = makeSession(makeBackend(hub), events, { executionRole: 'host' });
-  await session.start();
+  // Host mode fails FAST with a legible reason — otherwise HostGroup only
+  // reports the cryptic "ended before readiness".
+  await assert.rejects(
+    () => session.start(),
+    /tool token 被 hub 拒绝/,
+  );
   assert.deepEqual(events, [{
     kind: 'auth-required',
-    error: 'Pocket Vibe tool token 被 hub 拒绝，请在设置中检查 token。',
+    error: 'Pocket Vibe tool token 被 hub 拒绝（401/403），请在设置中检查 token。',
   }]);
+  session.end();
+});
+
+test('Pocket Vibe host start fails fast when no token is configured', async () => {
+  const hub = fakeHub({ statuses: [] });
+  const events = [];
+  const session = makeSession(makeBackend(hub), events, {
+    executionRole: 'host',
+    env: { POCKET_VIBE_HUB_URL: 'http://hub.test', POCKET_VIBE_TOOL_TOKEN: '' },
+  });
+  await assert.rejects(() => session.start(), /未配置 tool token/);
+  const authEvent = events.find((e) => e.kind === 'auth-required');
+  assert.ok(authEvent, 'expected an auth-required event');
+  session.end();
+});
+
+test('Pocket Vibe host start throws a legible error when the hub is unreachable', async () => {
+  const events = [];
+  const session = makeSession(
+    makeBackend({ fetchImpl: async () => { throw new Error('ECONNREFUSED'); } }),
+    events,
+    { executionRole: 'host' },
+  );
+  await assert.rejects(() => session.start(), /hub 不可达/);
+  assert.ok(events.some((e) => e.kind === 'error' && /hub 不可达/.test(e.error)));
   session.end();
 });
 
