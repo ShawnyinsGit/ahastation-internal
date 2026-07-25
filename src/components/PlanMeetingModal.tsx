@@ -182,7 +182,7 @@ export function PlanMeetingModal({
                       <option value="" disabled>请选择 Backend</option>
                       {backends.filter((backend) => backend.id !== 'qoder').map((backend) => (
                         <option key={backend.id} value={backend.id} disabled={!isWorkerBackendReady(backend)}>
-                          {backend.displayName} · {isWorkerBackendReady(backend) ? '可用' : !backend.available ? '需安装' : !backend.supportsWorkers ? '契约未通过' : '需登录'}
+                          {backend.displayName}{backend.workerReleaseTier === 'experimental' ? '（实验）' : ''} · {isWorkerBackendReady(backend) ? '可用' : !backend.available ? '需安装' : !backend.supportsWorkers ? '契约未通过' : '需登录'}
                         </option>
                       ))}
                     </select>

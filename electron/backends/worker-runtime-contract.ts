@@ -78,7 +78,10 @@ export interface WorkerReleaseAssessment {
   evidenceRunId?: string;
 }
 
-const FIRST_RELEASE_STABLE_WORKERS = new Set(['claude-code', 'codex']);
+/** Backends cleared as stable Workers in the first managed-collaboration
+ *  release. Every other executeTasks backend ships as experimental by policy,
+ *  even when its structural gates are green, so the UI must label them. */
+export const FIRST_RELEASE_STABLE_WORKERS = new Set(['claude-code', 'codex']);
 const REQUIRED_REAL_CHECKS = new Set<RealWorkerVerticalEvidence['checks'][number]>([
   'work-report',
   'interrupt',

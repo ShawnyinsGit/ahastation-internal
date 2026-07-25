@@ -525,6 +525,9 @@ export function Lobby({ lastError }: LobbyProps) {
                       <div className={`backend-readiness-row is-${backend.workerRuntimeState}`} key={backend.id}>
                         <div>
                           <strong>{backend.displayName}</strong>
+                          {backend.workerReleaseTier === 'experimental' && (
+                            <span className="backend-readiness-experimental" title="实验性 Worker：未通过首发稳定门禁，可能不稳定">实验</span>
+                          )}
                           <span>
                             {backend.workerRuntimeState === 'available'
                               ? '可用'

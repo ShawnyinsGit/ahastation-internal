@@ -120,7 +120,7 @@ export function TaskInspector({
   taskId: string;
   worker?: WorkerState;
   onClose: () => void;
-  onResolvePermission: (id: string, decision: 'allow' | 'deny') => void;
+  onResolvePermission: (id: string, decision: 'allow' | 'deny') => Promise<{ ok: true } | { ok: false; error: string }> | void;
 }) {
   const [activeTab, setActiveTab] = useState<InspectorTab>('overview');
   const [loadError, setLoadError] = useState('');
@@ -503,7 +503,12 @@ export function TaskInspector({
         {snapshot && activeTab === 'permissions' && (
           <div className="task-permission-stack">
             {pendingPermission && (
-              <PermissionCard pending={pendingPermission} onDecide={onResolvePermission} />
+              <PermissionCard
+                pending={pendingPermission}
+                onDecide={onResolvePermission}
+                resolving={worker?.resolvingPermissionId === pendingPermission.id}
+                error={worker?.permissionError ?? null}
+              />
             )}
             {stalledReview && (
               <section className="task-review-evidence-confirmation">

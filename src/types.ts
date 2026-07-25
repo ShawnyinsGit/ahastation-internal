@@ -870,6 +870,9 @@ export interface BackendInfo {
   expectedVersion: string | null;
   /** Custom avatar image as base64 data URL. */
   customAvatar: string | null;
+  /** Release tier for the Worker contract. 'experimental' backends must be
+   *  labeled as such in the UI even when their structural gates pass. */
+  workerReleaseTier: 'stable' | 'experimental' | 'blocked';
 }
 
 export interface BackendAuthApi {

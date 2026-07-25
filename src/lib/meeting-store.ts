@@ -122,6 +122,11 @@ export interface WorkerState {
   transcript: TranscriptEntry[];
   activity: ActivityEntry[];
   pendingPermission: PendingPermission | null;
+  /** Permission id currently awaiting an IPC decision reply. Buttons must stay
+   *  disabled while set so a slow or failed reply cannot be double-submitted. */
+  resolvingPermissionId: string | null;
+  /** Last permission IPC error surfaced to the user; cleared on the next attempt. */
+  permissionError: string | null;
   currentTool: string | null;
   currentToolInput: string | null;
   lastText: string;
@@ -316,6 +321,8 @@ function createTalkerState(): WorkerState {
     transcript: [],
     activity: [],
     pendingPermission: null,
+    resolvingPermissionId: null,
+    permissionError: null,
     currentTool: null,
     currentToolInput: null,
     lastText: '',
@@ -1203,6 +1210,8 @@ class MeetingStore {
               currentTool: null,
               currentToolInput: null,
               pendingPermission: null,
+              resolvingPermissionId: null,
+              permissionError: null,
               lastText: '',
               activity: isReassign ? [] : existing.activity,
               transcript: isReassign ? [] : existing.transcript,
@@ -1218,6 +1227,8 @@ class MeetingStore {
               transcript: [],
               activity: [],
               pendingPermission: null,
+              resolvingPermissionId: null,
+              permissionError: null,
               currentTool: null,
               currentToolInput: null,
               lastText: '',
@@ -1495,6 +1506,10 @@ class MeetingStore {
       this.updateWorker(slot, source, (w) => ({
         ...w,
         pendingPermission: { id: e.id, toolName: e.toolName, input: e.input, toolUseID: e.toolUseID },
+        // A fresh request means any prior reply landed elsewhere; reset the
+        // in-flight resolver state so the new card is interactive again.
+        resolvingPermissionId: null,
+        permissionError: null,
         activity: appendCapped(
           w.activity,
           [{
@@ -1525,7 +1540,9 @@ class MeetingStore {
       // permission.replied from any end, broker fail-closed timeout, or
       // session teardown (PermissionBroker auto-reject).
       this.updateWorker(slot, source, (w) => (
-        w.pendingPermission?.id === e.id ? { ...w, pendingPermission: null } : w
+        w.pendingPermission?.id === e.id
+          ? { ...w, pendingPermission: null, resolvingPermissionId: null, permissionError: null }
+          : w
       ), e.hostId);
       return;
     }
@@ -1665,6 +1682,8 @@ class MeetingStore {
       transcript: [],
       activity: [],
       pendingPermission: null,
+      resolvingPermissionId: null,
+      permissionError: null,
       currentTool: null,
       currentToolInput: null,
       lastText: '',
@@ -2232,25 +2251,58 @@ class MeetingStore {
     return () => { this.droppedFileListeners.delete(cb); };
   }
 
-  async resolvePermission(id: string, decision: 'allow' | 'deny') {
+  async resolvePermission(id: string, decision: 'allow' | 'deny'): Promise<{ ok: true } | { ok: false; error: string }> {
     const sessionId = this.effectiveSessionId();
-    if (!sessionId) return;
+    if (!sessionId) return { ok: false, error: 'No active session' };
     const slot = this.slots.get(sessionId);
-    if (!slot) return;
-    try {
-      await window.vibeMeet.resolvePermission(sessionId, id, decision);
-    } catch (err) {
-      console.error('[meeting-store] resolvePermission IPC failed:', err);
-    }
+    if (!slot) return { ok: false, error: 'No active session' };
+
+    // Mark the permission as resolving so every permission card (WorkerCard
+    // inline, PermissionCard in drawer/modal/inspector) disables its buttons
+    // for the same id atomically. Clear any stale error from a prior attempt.
     this.mutateSlot(slot.id, (s) => {
       const workers = new Map(s.workers);
       for (const [key, w] of workers) {
         if (w.pendingPermission?.id === id) {
-          workers.set(key, { ...w, pendingPermission: null });
+          workers.set(key, { ...w, resolvingPermissionId: id, permissionError: null });
         }
       }
       return { ...s, workers };
     });
+
+    try {
+      await window.vibeMeet.resolvePermission(sessionId, id, decision);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('[meeting-store] resolvePermission IPC failed:', err);
+      // Do NOT clear pendingPermission: the worker is still blocked waiting
+      // for a reply, and no permission-cancelled event will arrive. Surface
+      // the error so the user can retry instead of seeing the card vanish.
+      this.mutateSlot(slot.id, (s) => {
+        const workers = new Map(s.workers);
+        for (const [key, w] of workers) {
+          if (w.pendingPermission?.id === id) {
+            workers.set(key, { ...w, resolvingPermissionId: null, permissionError: `权限答复发送失败：${msg}` });
+          }
+        }
+        return { ...s, workers };
+      });
+      return { ok: false, error: msg };
+    }
+
+    // Success: clear the resolver flag. The pending card itself is cleared by
+    // the permission-cancelled event from the main process; clearing it here
+    // too gives snappy feedback and is idempotent when the event arrives.
+    this.mutateSlot(slot.id, (s) => {
+      const workers = new Map(s.workers);
+      for (const [key, w] of workers) {
+        if (w.pendingPermission?.id === id) {
+          workers.set(key, { ...w, pendingPermission: null, resolvingPermissionId: null, permissionError: null });
+        }
+      }
+      return { ...s, workers };
+    });
+    return { ok: true };
   }
 
   async interrupt() {

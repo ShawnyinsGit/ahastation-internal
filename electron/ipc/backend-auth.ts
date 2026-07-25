@@ -22,6 +22,7 @@ import {
 import {
   assessWorkerRuntime,
   probeWorkerRuntimeVersion,
+  FIRST_RELEASE_STABLE_WORKERS,
 } from '../backends/worker-runtime-contract.js';
 import { getBackendRegistry, registerCustomBackends } from '../backends/registry.js';
 import { augmentedPath } from '../backends/subprocess-backend.js';
@@ -129,6 +130,9 @@ export function registerBackendAuthIpc(): void {
         version: runtime.version,
         expectedVersion: runtime.expectedVersion,
         customAvatar: auth?.customAvatar ?? null,
+        workerReleaseTier: backend.capabilities.executeTasks
+          ? (FIRST_RELEASE_STABLE_WORKERS.has(backend.id) ? 'stable' : 'experimental')
+          : 'blocked',
       };
     }));
 

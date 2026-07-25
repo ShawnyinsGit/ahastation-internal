@@ -59,6 +59,7 @@ function installFixture(fixture: string): void {
     version,
     expectedVersion: version,
     customAvatar: null,
+    workerReleaseTier: id === 'claude-code' || id === 'codex' ? 'stable' as const : 'experimental' as const,
   });
   const backends = [
     backend('claude-code', 'Claude Code', 'claude', '2.1.150', true),

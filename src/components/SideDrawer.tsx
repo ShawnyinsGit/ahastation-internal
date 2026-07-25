@@ -18,7 +18,13 @@ interface SideDrawerProps {
   transcript: TranscriptEntry[];
   activity: ActivityEntry[];
   pending: PendingPermission | null;
-  onResolve: (id: string, decision: 'allow' | 'deny') => void;
+  /** Resolving flag for the legacy single permission card, sourced from the
+   *  worker that owns `pending.id`. Keeps the drawer card in lock-step with
+   *  WorkerCard and TaskInspector. */
+  pendingResolving?: boolean;
+  /** Permission IPC error for the legacy single permission card. */
+  pendingError?: string | null;
+  onResolve: (id: string, decision: 'allow' | 'deny') => Promise<{ ok: true } | { ok: false; error: string }> | void;
   onSend: (text: string) => void;
   onSendAttachments?: (
     staged: StagedAttachment[],
@@ -146,6 +152,8 @@ export function SideDrawer({
   transcript,
   activity,
   pending,
+  pendingResolving,
+  pendingError,
   onResolve,
   onSend,
   onSendAttachments,
@@ -596,7 +604,7 @@ export function SideDrawer({
                 </div>
               );
             })}
-            {pending && <PermissionCard pending={pending} onDecide={onResolve} />}
+            {pending && <PermissionCard pending={pending} onDecide={onResolve} resolving={pendingResolving} error={pendingError} />}
             <div ref={endRef} />
           </div>
           <div className="drawer-composer">

@@ -61,7 +61,7 @@ interface ScreenStageProps {
   onCloseWindow: (id: string) => void;
   onCreateWindow: (type: StageWindowType, opts?: { workerId?: string; title?: string }) => void;
   onPopOutWindow?: (id: string) => void;
-  onResolvePermission: (id: string, decision: 'allow' | 'deny') => void;
+  onResolvePermission: (id: string, decision: 'allow' | 'deny') => Promise<{ ok: true } | { ok: false; error: string }> | void;
   browserTabs?: BrowserTabInfo[];
   browserActiveTabId?: string | null;
   browserViewportRef?: RefObject<HTMLDivElement>;

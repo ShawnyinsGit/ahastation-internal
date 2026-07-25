@@ -65,6 +65,7 @@ function statusLabel(worker: WorkerState, speaking: boolean): string {
     case 'integrating': return '集成中';
     case 'integration-conflict': return '集成冲突';
     case 'reworking': return '需要返工';
+    case 'budget-paused': return '预算暂停';
     case 'accepted': return '已接受';
     case 'pending': return '等待调度';
     case 'interrupted': return '已中断';
@@ -180,11 +181,16 @@ export function WorkerCard({
             <div className="worker-card-perm-text">
               是否允许 <span className="worker-card-perm-tool">{worker.pendingPermission.toolName}</span>？
             </div>
+            {worker.permissionError && (
+              <div className="worker-card-perm-error" role="alert">{worker.permissionError}</div>
+            )}
             <div className="worker-card-perm-actions">
               <button type="button" className="worker-card-perm-allow"
+                disabled={worker.resolvingPermissionId === worker.pendingPermission.id}
                 onClick={(e) => { e.stopPropagation(); if (worker.pendingPermission) onResolvePermission(worker.pendingPermission.id, 'allow'); }}
               >允许</button>
               <button type="button" className="worker-card-perm-deny"
+                disabled={worker.resolvingPermissionId === worker.pendingPermission.id}
                 onClick={(e) => { e.stopPropagation(); if (worker.pendingPermission) onResolvePermission(worker.pendingPermission.id, 'deny'); }}
               >拒绝</button>
             </div>
@@ -227,11 +233,16 @@ export function WorkerCard({
           <div className="worker-card-perm-text">
             是否允许 <span className="worker-card-perm-tool">{worker.pendingPermission.toolName}</span>？
           </div>
+          {worker.permissionError && (
+            <div className="worker-card-perm-error" role="alert">{worker.permissionError}</div>
+          )}
           <div className="worker-card-perm-actions">
             <button type="button" className="worker-card-perm-allow"
+              disabled={worker.resolvingPermissionId === worker.pendingPermission.id}
               onClick={(e) => { e.stopPropagation(); if (worker.pendingPermission) onResolvePermission(worker.pendingPermission.id, 'allow'); }}
             >允许</button>
             <button type="button" className="worker-card-perm-deny"
+              disabled={worker.resolvingPermissionId === worker.pendingPermission.id}
               onClick={(e) => { e.stopPropagation(); if (worker.pendingPermission) onResolvePermission(worker.pendingPermission.id, 'deny'); }}
             >拒绝</button>
           </div>

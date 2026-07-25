@@ -2618,6 +2618,18 @@ html.popout-view #root {
 .perm-deny:hover { background: var(--bg-tile); }
 .perm-allow { background: var(--accent); color: white; }
 .perm-allow:hover { background: #4583ff; }
+.perm-btn:disabled { opacity: .55; cursor: not-allowed; }
+.perm-btn:disabled:hover { background: inherit; }
+.perm-allow:disabled:hover { background: var(--accent); }
+.perm-error {
+  margin: 6px 0 0;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: rgba(255, 87, 87, 0.12);
+  border: 1px solid rgba(255, 87, 87, 0.4);
+  color: #ff8a8a;
+  font-size: 12px;
+}
 
 /* ----- Source picker ----- */
 
@@ -4278,6 +4290,20 @@ html.popout-view #root {
   border-color: rgba(255, 122, 122, 0.35);
 }
 .worker-card-perm-deny:hover { background: rgba(255, 122, 122, 0.25); }
+.worker-card-perm-allow:disabled,
+.worker-card-perm-deny:disabled { opacity: .5; cursor: not-allowed; }
+.worker-card-perm-allow:disabled:hover,
+.worker-card-perm-deny:disabled:hover { background: inherit; }
+.worker-card-perm-error {
+  margin: 4px 0 2px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: rgba(255, 87, 87, 0.12);
+  border: 1px solid rgba(255, 87, 87, 0.35);
+  color: #ff8a8a;
+  font-size: 10px;
+  line-height: 1.4;
+}
 
 .worker-card-summary {
   font-size: 11px; color: var(--text-muted);
@@ -5403,6 +5429,18 @@ html.popout-view #root {
 }
 .backend-readiness-row.is-available {
   border-color: rgba(76, 211, 145, .35);
+}
+.backend-readiness-experimental {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(255, 189, 102, 0.16);
+  border: 1px solid rgba(255, 189, 102, 0.4);
+  color: #ffbd66;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
 }
 .backend-readiness-row.is-version-incompatible,
 .backend-readiness-row.is-diagnostic-failed {

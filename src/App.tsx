@@ -106,6 +106,20 @@ export function App() {
     return map;
   }, [backends]);
 
+  // SideDrawer renders a single legacy PermissionCard for the first pending
+  // permission across all workers (state.pendingPermission). Thread the
+  // matching worker's resolving/error flags so that card stays in lock-step
+  // with WorkerCard and TaskInspector for the same permission id.
+  const drawerPermissionState = useMemo(() => {
+    const pending = state.pendingPermission;
+    if (!pending) return { resolving: false, error: null as string | null };
+    const owner = workers.workerList.find((w) => w.pendingPermission?.id === pending.id);
+    return {
+      resolving: owner?.resolvingPermissionId === pending.id,
+      error: owner?.permissionError ?? null,
+    };
+  }, [state.pendingPermission, workers.workerList]);
+
   const speakingRef = useRef(false);
   const sendWithModeRef = useRef<(text: string) => void>(sendText);
 
@@ -609,6 +623,8 @@ ${trimmed}`
           transcript={state.transcript}
           activity={state.activity}
           pending={state.pendingPermission}
+          pendingResolving={drawerPermissionState.resolving}
+          pendingError={drawerPermissionState.error}
           onResolve={resolvePermission}
           onSend={sendWithMode}
           onSendAttachments={sendAttachmentsWithMode}
@@ -664,9 +680,10 @@ ${trimmed}`
           <div className="perm-modal" onClick={(e) => e.stopPropagation()}>
             <PermissionCard
               pending={state.pendingPermission}
-              onDecide={(id, decision) => {
-                resolvePermission(id, decision);
-                setPermModalOpen(false);
+              onDecide={async (id, decision) => {
+                const res = await resolvePermission(id, decision);
+                if (res && res.ok) setPermModalOpen(false);
+                return res;
               }}
             />
           </div>

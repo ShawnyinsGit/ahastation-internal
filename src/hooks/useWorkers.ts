@@ -32,7 +32,7 @@ export interface UseWorkersResult {
   sendAttachments: (staged: StagedAttachment[], text: string) => Promise<{ ok: boolean; error?: string }>;
   publishDroppedFiles: (files: File[]) => void;
   onDroppedFiles: (cb: (files: File[]) => void) => () => void;
-  resolvePermission: (id: string, decision: 'allow' | 'deny') => Promise<void>;
+  resolvePermission: (id: string, decision: 'allow' | 'deny') => Promise<{ ok: true } | { ok: false; error: string }>;
   interrupt: () => Promise<void>;
   endSession: () => Promise<void>;
   setSpeakCallback: (cb: SpeakHandle | null) => void;
