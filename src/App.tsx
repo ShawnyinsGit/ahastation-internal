@@ -33,6 +33,13 @@ import { ParticipantPanel } from './components/ParticipantPanel';
 import { PermissionCard } from './components/PermissionCard';
 import { EditorOverlay } from './components/EditorOverlay';
 import { PlanMeetingModal } from './components/PlanMeetingModal';
+import {
+  buildDirectAttachmentDirective,
+  buildDirectDirective,
+  buildPlanAttachmentDirective,
+  buildPlanDirective,
+  type DispatchMode,
+} from './lib/dispatch-mode';
 import type { AutoApproveScope, BackendInfo, DesktopSource, SkillInfo } from './types';
 
 export function App() {
@@ -54,6 +61,7 @@ export function App() {
   const [muted, setMuted] = useState(false);
   const [autoApproveScope, setAutoApproveScope] = useState<AutoApproveScope>('off');
   const [multiAgent, setMultiAgent] = useState(false);
+  const [dispatchMode, setDispatchMode] = useState<DispatchMode>('direct');
   const [view, setView] = useState<MeetingView>('meeting');
   /** Bumped every time the task board asks the meeting view to open a task, so
    *  re-clicking the same card after closing the inspector still reopens it. */
@@ -522,22 +530,12 @@ export function App() {
       await sendText(trimmed);
       return;
     }
-    const directive = `请把下面这段需求当作"多 Agent 并行 / Plan Mode"处理：先写出一份宿主能审阅的**详细计划**，再拆成可并行（或按依赖排序）的 worker 任务，**立即调用 plan_meeting**（不要先问我确认）。
-
-计划必须包含：
-1. goal — 成功标准（一段话）
-2. approach — 做法、取舍、为何这样拆
-3. steps — 有序步骤（每步 title + detail；能对应任务时填 taskId）
-4. risks / openQuestions — 风险与未决问题（没有就空数组）
-5. tasks — 每个 task：kebab-case id、短标题、给 worker 的完整 brief（目标/上下文/步骤/触及范围/验收），deps 标注依赖
-
-不要只交一张空任务清单。任务 prompt 禁止一句话敷衍。
-
-需求：
-${trimmed}`;
+    const directive = dispatchMode === 'plan'
+      ? buildPlanDirective(trimmed)
+      : buildDirectDirective(trimmed);
     // Chat shows only the user's words; the model still gets the full directive.
     await sendText(directive, { displayText: trimmed });
-  }, [multiAgent, sendText]);
+  }, [dispatchMode, multiAgent, sendText]);
 
   sendWithModeRef.current = sendWithMode;
 
@@ -547,17 +545,14 @@ ${trimmed}`;
       if (!multiAgent) {
         return sendAttachments(staged, trimmed);
       }
-      const directive = trimmed.length > 0
-        ? `请阅读附带文档，并按"多 Agent 并行 / Plan Mode"写出详细计划（goal、approach、steps、risks、openQuestions）再拆 tasks，**调用 plan_meeting**。
-
-需求：
-${trimmed}`
-        : '请阅读附带文档，按"多 Agent 并行 / Plan Mode"写出详细计划（goal、approach、steps、risks）并调用 plan_meeting。';
+      const directive = dispatchMode === 'plan'
+        ? buildPlanAttachmentDirective(trimmed)
+        : buildDirectAttachmentDirective(trimmed);
       return sendAttachments(staged, directive, {
         displayText: trimmed.length > 0 ? trimmed : undefined,
       });
     },
-    [multiAgent, sendAttachments],
+    [dispatchMode, multiAgent, sendAttachments],
   );
 
   if (!hasTabs) {
@@ -682,6 +677,8 @@ ${trimmed}`
           onSendAttachments={sendAttachmentsWithMode}
           onSubscribeDroppedFiles={onDroppedFiles}
           multiAgent={multiAgent}
+          dispatchMode={dispatchMode}
+          onChangeDispatchMode={setDispatchMode}
           disabled={!state.running}
           sessionId={activeTab?.id ?? null}
           onViewFile={(path) => {

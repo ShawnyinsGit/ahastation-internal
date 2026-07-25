@@ -2434,6 +2434,40 @@ html.popout-view #root {
   background: rgba(0,0,0,0.25);
 }
 
+.dispatch-mode-switch {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 8px;
+  padding: 2px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-stage);
+  border: 1px solid var(--border-soft);
+}
+
+.dispatch-mode-option {
+  flex: 1;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.2;
+  padding: 6px 8px;
+  border-radius: calc(var(--radius-sm) - 2px);
+  cursor: pointer;
+  transition: background var(--transition), color var(--transition);
+}
+
+.dispatch-mode-option:hover {
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.dispatch-mode-option.is-active {
+  color: var(--text-primary);
+  background: var(--bg-elevated);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
+}
+
 .drawer-input-wrap {
   position: relative;
   display: flex;
