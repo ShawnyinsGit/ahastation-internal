@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ChevronDown, ChevronRight, Terminal } from 'lucide-react';
+import { ChevronDown, ChevronRight, FileText, Terminal } from 'lucide-react';
 import type {
   ActivityEntry,
   CoordinatorBriefing,
@@ -11,6 +11,7 @@ import type {
   WorkReport,
 } from '../types';
 import type { DeliverySnapshot } from '../lib/meeting-store';
+import { stageWindowStore } from '../lib/stage-window-store';
 import { BackendAvatar } from './BackendAvatar';
 
 type CurrentTaskStatus = 'idle' | WorkerStatus | 'speaking';
@@ -151,6 +152,7 @@ interface FeedRow {
   detail?: string;
   pill?: { label: string; tone: 'done' | 'failed' | 'running' | 'pending' };
   activityId?: string;
+  actionPath?: string;
 }
 
 export const ClaudeWorkspace = memo(function ClaudeWorkspace({
@@ -290,6 +292,7 @@ export const ClaudeWorkspace = memo(function ClaudeWorkspace({
         title: a.title,
         detail: a.detail,
         activityId: a.id,
+        actionPath: a.actionPath,
       });
     }
     return rows.slice(0, 12);
@@ -732,6 +735,19 @@ export const ClaudeWorkspace = memo(function ClaudeWorkspace({
                           title="Open in terminal tab"
                         >
                           <Terminal size={12} />
+                        </button>
+                      )}
+                      {row.kind === 'document' && row.actionPath && (
+                        <button
+                          type="button"
+                          className="workspace-feed-terminal-btn"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void stageWindowStore.openFile(row.actionPath!);
+                          }}
+                          title="在标签页中打开预览"
+                        >
+                          <FileText size={12} />
                         </button>
                       )}
                       {clickable && (

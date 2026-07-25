@@ -300,14 +300,19 @@ export function App() {
   }, [workers.currentDelivery, stageWindows, cwd]);
 
   // Auto-open saved documents (from save_document MCP tool) as file tabs
-  const lastSavedDocCount = useRef(0);
+  const lastSavedDocsRef = useRef<string[] | null>(null);
   useEffect(() => {
     const docs = workers.savedDocuments;
-    if (docs.length <= lastSavedDocCount.current) return;
-    // Only open new documents (the ones added since last check)
-    const newDocs = docs.slice(lastSavedDocCount.current);
-    lastSavedDocCount.current = docs.length;
-    for (const path of newDocs) {
+    const prev = lastSavedDocsRef.current;
+    lastSavedDocsRef.current = docs;
+    // savedDocuments is per-session-slot: switching meeting tabs swaps the
+    // whole array. A length counter would desync there (a fresh slot's first
+    // doc never opens) — so only auto-open when the SAME array grew by
+    // appending, and never retro-open another slot's history.
+    if (!prev || docs.length <= prev.length) return;
+    const isAppend = prev.every((path, i) => docs[i] === path);
+    if (!isAppend) return;
+    for (const path of docs.slice(prev.length)) {
       stageWindows.openFile(path);
     }
   }, [workers.savedDocuments, stageWindows]);
