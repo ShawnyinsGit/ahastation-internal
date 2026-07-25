@@ -19,6 +19,21 @@ test('coordinator can propose a bounded validated plan', () => {
   }, { hostId: 'default', role: 'coordinator' });
   assert.equal(result.ok, true);
   assert.equal(result.command.tasks[0].executorBackendId, 'codex');
+  assert.equal(result.command.tasks[0].executionProfile.backendId, 'codex');
+  assert.deepEqual(result.command.tasks[0].authorityRequest.commands, []);
+});
+
+test('meeting command normalization uses the current Meeting default without adding authority', () => {
+  const result = authorizeMeetingCommand({
+    kind: 'propose-plan',
+    tasks: [{ id: 'a', title: 'A', prompt: 'Inspect A', deps: [] }],
+  }, { hostId: 'default', role: 'coordinator' }, { defaultBackendId: 'opencode' });
+  assert.equal(result.ok, true);
+  assert.equal(result.command.tasks[0].executionProfile.backendId, 'opencode');
+  assert.equal(result.command.tasks[0].workspaceMode, 'read-only');
+  assert.deepEqual(result.command.tasks[0].authorityRequest.toolKinds, ['read']);
+  assert.deepEqual(result.command.tasks[0].authorityRequest.commands, []);
+  assert.deepEqual(result.command.tasks[0].authorityRequest.networkHosts, []);
 });
 
 test('rejects malformed actor and oversized command input', () => {
@@ -35,4 +50,96 @@ test('rejects empty speak commands', () => {
   });
   assert.equal(result.ok, false);
   assert.equal(result.code, 'invalid-command');
+});
+
+test('coordinator command protocol includes plan revision, decisions and memory', () => {
+  const actor = { hostId: 'default', role: 'coordinator' };
+  const revised = authorizeMeetingCommand({
+    kind: 'revise-plan',
+    expectedPlanVersion: 1,
+    reason: 'verification failed',
+    operations: [{
+      kind: 'add-task',
+      task: { id: 'fix', title: 'Fix', prompt: 'repair the failure' },
+    }],
+  }, actor);
+  assert.equal(revised.ok, true);
+
+  const decision = authorizeMeetingCommand({
+    kind: 'request-decision',
+    question: 'Choose a rollout mode',
+    options: [
+      { title: 'A', summary: 'A', pros: [], cons: [], recommendationScore: 9 },
+      { title: 'B', summary: 'B', pros: [], cons: [], recommendationScore: 5 },
+    ],
+    deadlineMs: Date.now() + 60_000,
+  }, actor);
+  assert.equal(decision.ok, true);
+
+  const memory = authorizeMeetingCommand({
+    kind: 'save-memory',
+    category: 'decision',
+    content: 'Use WorkerEvent v2',
+    tags: ['protocol'],
+  }, actor);
+  assert.equal(memory.ok, true);
+
+  for (const command of [
+    { kind: 'send-task-message', taskId: 'task-a', message: 'inspect this' },
+    { kind: 'follow-up-task', taskId: 'task-a', message: 'then document it' },
+    { kind: 'steer-task', taskId: 'task-a', message: 'avoid changing the API' },
+    { kind: 'interrupt-task', taskId: 'task-a', reason: 'pause safely' },
+    {
+      kind: 'forward-task-message',
+      fromTaskId: 'task-a',
+      toTaskId: 'task-b',
+      messageId: 'message-1',
+    },
+  ]) {
+    assert.equal(authorizeMeetingCommand(command, actor).ok, true);
+  }
+});
+
+test('experts cannot revise plans, route task messages, request decisions or save memory', () => {
+  const actor = { hostId: 'expert', role: 'expert' };
+  for (const command of [
+    {
+      kind: 'revise-plan',
+      expectedPlanVersion: 1,
+      reason: 'change',
+      operations: [{
+        kind: 'add-task',
+        task: { id: 'fix', title: 'Fix', prompt: 'repair' },
+      }],
+    },
+    {
+      kind: 'request-decision',
+      question: 'Choose',
+      options: [
+        { title: 'A', summary: 'A', pros: [], cons: [], recommendationScore: 9 },
+        { title: 'B', summary: 'B', pros: [], cons: [], recommendationScore: 5 },
+      ],
+      deadlineMs: Date.now() + 60_000,
+    },
+    {
+      kind: 'save-memory',
+      category: 'fact',
+      content: 'x',
+      tags: [],
+    },
+    { kind: 'send-task-message', taskId: 'task-a', message: 'bypass coordinator' },
+    { kind: 'follow-up-task', taskId: 'task-a', message: 'bypass coordinator' },
+    { kind: 'steer-task', taskId: 'task-a', message: 'bypass coordinator' },
+    { kind: 'interrupt-task', taskId: 'task-a' },
+    {
+      kind: 'forward-task-message',
+      fromTaskId: 'task-a',
+      toTaskId: 'task-b',
+      messageId: 'message-1',
+    },
+  ]) {
+    const result = authorizeMeetingCommand(command, actor);
+    assert.equal(result.ok, false);
+    assert.equal(result.code, 'forbidden');
+  }
 });

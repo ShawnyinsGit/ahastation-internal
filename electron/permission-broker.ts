@@ -21,6 +21,66 @@
 
 import { classifyToolRisk, type AutoApproveScope, type ToolRisk } from './auto-approve-policy.js';
 import type { BackendSessionEvent } from './backends/cli-backend.js';
+import type { PermissionNormalizationResult } from './backends/canonical-execution.js';
+import type { TaskAuthorityGrant } from './task-collaboration.js';
+import {
+  evaluateTaskAuthority,
+  summarizeCanonicalRequest,
+  type AuthorityDecision,
+} from './task-authority.js';
+
+export interface CanonicalPermissionDecision {
+  decision: AuthorityDecision;
+  safeInput: Record<string, unknown>;
+}
+
+export interface PermissionDecisionIdentity {
+  backendId: string;
+  taskId: string;
+  attempt: number;
+  nativeRequestId: string;
+  toolName?: string;
+}
+
+export function decideTaskPermission(
+  normalized: PermissionNormalizationResult,
+  grant: TaskAuthorityGrant | undefined,
+  now = Date.now(),
+  identity?: PermissionDecisionIdentity,
+): CanonicalPermissionDecision {
+  if (!normalized.ok) {
+    return {
+      decision: {
+        kind: 'ask-user',
+        reason: `native-request:${normalized.diagnostic}`,
+      },
+      // Opaque / unsupported native payloads still escalate to the user, but the
+      // durable decision must retain Backend identity so release gates can prove
+      // that the bridge produced a Backend-scoped canonical journal entry.
+      safeInput: {
+        ...(identity ? {
+          backendId: identity.backendId,
+          taskId: identity.taskId,
+          attempt: identity.attempt,
+          nativeRequestId: identity.nativeRequestId,
+          ...(identity.toolName ? { toolName: identity.toolName } : {}),
+        } : {}),
+        normalizationDiagnostic: normalized.diagnostic,
+        requiresUser: true,
+      },
+    };
+  }
+  if (!grant) {
+    return {
+      decision: { kind: 'deny', reason: 'task-authority-missing' },
+      safeInput: summarizeCanonicalRequest(normalized.request),
+    };
+  }
+  return {
+    decision: evaluateTaskAuthority(grant, normalized.request, now),
+    safeInput: summarizeCanonicalRequest(normalized.request),
+  };
+}
 
 // ── OpenCode tool-name → risk mapping ───────────────────────────────────────
 // OpenCode built-in tools are lowercase; map them onto the Claude-style

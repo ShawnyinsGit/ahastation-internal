@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react';
-import { ChevronDown, Clock, DownloadCloud, FolderOpen, KeyRound, LogIn, Mic, MonitorUp } from 'lucide-react';
+import { Activity, ChevronDown, Clock, DownloadCloud, FolderOpen, KeyRound, LogIn, Mic, MonitorUp } from 'lucide-react';
 import { meetingStore } from '../lib/meeting-store';
 import type { BackendInfo } from '../types';
 import { usePickCwd } from './DirPickerModal';
@@ -12,6 +12,23 @@ interface RecoverableMeeting {
   meetingId: string;
   seq: number;
   state: Record<string, unknown>;
+}
+
+interface DeviceSnapshot {
+  platform: string;
+  arch: string;
+  kernel: string;
+  totalMemoryBytes: number;
+  electronVersion: string;
+  sessionType: string;
+  gpu: { available: boolean; status: Record<string, string> };
+  audio: {
+    microphone: 'granted' | 'denied' | 'available' | 'unavailable' | 'unknown';
+    speaker: 'available' | 'unknown';
+    whisper: boolean;
+  };
+  workspace: { git: boolean; worktree: boolean; version: string | null };
+  capacity: { hosts: number; workers: number };
 }
 
 function formatRelative(ts: number): string {
@@ -39,12 +56,25 @@ function backendAuthLabel(b: BackendInfo): string {
   return '';
 }
 
+function microphoneLabel(status: DeviceSnapshot['audio']['microphone']): string {
+  switch (status) {
+    case 'granted': return '已授权';
+    case 'denied': return '被拒绝';
+    case 'available': return '可用';
+    case 'unavailable': return '未检测到';
+    default: return '进入会议后测试';
+  }
+}
+
 export function Lobby({ lastError }: LobbyProps) {
   const lobby = useSyncExternalStore(meetingStore.subscribeTabs, meetingStore.getLobbyData);
 
   const [backends, setBackends] = useState<BackendInfo[]>([]);
   const [selectedBackend, setSelectedBackend] = useState('codex');
   const [authOpen, setAuthOpen] = useState(false);
+  const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
+  const [diagnostics, setDiagnostics] = useState<DeviceSnapshot | null>(null);
+  const [diagnosticsError, setDiagnosticsError] = useState<string | null>(null);
 
   // Per-backend auth editing state
   const [apiKeyInputs, setApiKeyInputs] = useState<Record<string, string>>({});
@@ -230,6 +260,17 @@ export function Lobby({ lastError }: LobbyProps) {
     }
   }, [installing, reloadBackends]);
 
+  const openDiagnostics = useCallback(async () => {
+    const next = !diagnosticsOpen;
+    setDiagnosticsOpen(next);
+    if (!next) return;
+    setDiagnosticsError(null);
+    await reloadBackends();
+    const result = await window.vibeMeet.deviceDiagnostics();
+    if (result.ok) setDiagnostics(result.diagnostics);
+    else setDiagnosticsError(result.error);
+  }, [diagnosticsOpen, reloadBackends]);
+
   // Build the toggle label
   const toggleLabel = currentBackend
     ? `${currentBackend.displayName} ${backendAuthLabel(currentBackend)}`
@@ -329,7 +370,7 @@ export function Lobby({ lastError }: LobbyProps) {
                       autoComplete="off"
                       spellCheck={false}
                     />
-                    {currentBackend.models && currentBackend.models.length > 0 ? (
+                    {currentBackend.id !== 'codex' && currentBackend.models && currentBackend.models.length > 0 ? (
                       <select
                         className="join-auth-input join-auth-input-full lobby-backend-select"
                         value={modelInput || ''}
@@ -344,20 +385,32 @@ export function Lobby({ lastError }: LobbyProps) {
                         ))}
                       </select>
                     ) : (
-                      <input
-                        type="text"
-                        className="join-auth-input join-auth-input-full"
-                        placeholder={`Model (optional)${currentBackend.defaultModel ? ` — ${currentBackend.defaultModel}` : ''}`}
-                        value={modelInput}
-                        onChange={(e) => setModelInput(e.target.value)}
-                        onBlur={(e) => {
-                          if (e.target.value !== (currentBackend.model ?? '')) {
-                            void saveModel(e.target.value);
-                          }
-                        }}
-                        autoComplete="off"
-                        spellCheck={false}
-                      />
+                      <>
+                        <input
+                          type="text"
+                          className="join-auth-input join-auth-input-full"
+                          list={currentBackend.models && currentBackend.models.length > 0
+                            ? `${currentBackend.id}-lobby-model-suggestions`
+                            : undefined}
+                          placeholder={`Model (optional)${currentBackend.defaultModel ? ` — ${currentBackend.defaultModel}` : ''}`}
+                          value={modelInput}
+                          onChange={(e) => setModelInput(e.target.value)}
+                          onBlur={(e) => {
+                            if (e.target.value !== (currentBackend.model ?? '')) {
+                              void saveModel(e.target.value);
+                            }
+                          }}
+                          autoComplete="off"
+                          spellCheck={false}
+                        />
+                        {currentBackend.models && currentBackend.models.length > 0 && (
+                          <datalist id={`${currentBackend.id}-lobby-model-suggestions`}>
+                            {currentBackend.models.map((m) => (
+                              <option key={m} value={m} />
+                            ))}
+                          </datalist>
+                        )}
+                      </>
                     )}
                     {apiKeyStatus === 'error' && (
                       <div className="join-auth-error">Failed to save settings.</div>
@@ -436,6 +489,104 @@ export function Lobby({ lastError }: LobbyProps) {
           )}
         </div>
 
+        <section className="lobby-readiness">
+          <button
+            type="button"
+            className="join-auth-toggle"
+            onClick={() => { void openDiagnostics(); }}
+          >
+            <Activity size={14} aria-hidden="true" />
+            <span>设备就绪</span>
+            <span className="lobby-readiness-summary">
+              {backends.filter((backend) => backend.supportsWorkers).length}/4 Worker
+            </span>
+            <ChevronDown size={14} className={diagnosticsOpen ? 'join-auth-chevron open' : 'join-auth-chevron'} />
+          </button>
+
+          {diagnosticsOpen && (
+            <div className="device-readiness-panel">
+              {diagnostics ? (
+                <>
+                  <div className="device-readiness-grid">
+                    <div>
+                      <span>系统</span>
+                      <strong>{diagnostics.platform} · {diagnostics.arch}</strong>
+                      <small>kernel {diagnostics.kernel} · {diagnostics.sessionType}</small>
+                    </div>
+                    <div>
+                      <span>Electron / GPU</span>
+                      <strong>{diagnostics.gpu.available ? '可用' : '诊断失败'}</strong>
+                      <small>Electron {diagnostics.electronVersion}</small>
+                    </div>
+                    <div>
+                      <span>音频 / Whisper</span>
+                      <strong>{diagnostics.audio.whisper ? 'Whisper 可用' : 'Whisper 需安装'}</strong>
+                      <small>
+                        麦克风 {microphoneLabel(diagnostics.audio.microphone)}
+                        {' · '}
+                        扬声器 {diagnostics.audio.speaker === 'available' ? '可用' : '待测试'}
+                      </small>
+                    </div>
+                    <div>
+                      <span>Git / 容量</span>
+                      <strong>{diagnostics.workspace.worktree ? 'worktree 可用' : '需安装 Git'}</strong>
+                      <small>{diagnostics.capacity.hosts} Host · {diagnostics.capacity.workers} Worker</small>
+                    </div>
+                  </div>
+
+                  <div className="backend-readiness-list">
+                    {backends.filter((backend) => ['claude-code', 'opencode', 'codex', 'kimi'].includes(backend.id)).map((backend) => (
+                      <div className={`backend-readiness-row is-${backend.workerRuntimeState}`} key={backend.id}>
+                        <div>
+                          <strong>{backend.displayName}</strong>
+                          {backend.workerReleaseTier === 'experimental' && (
+                            <span className="backend-readiness-experimental" title="实验性 Worker：未通过首发稳定门禁，可能不稳定">实验</span>
+                          )}
+                          <span>
+                            {backend.workerRuntimeState === 'available'
+                              ? '可用'
+                              : backend.workerRuntimeState === 'needs-login'
+                                ? '需登录'
+                                : backend.workerRuntimeState === 'needs-install'
+                                  ? '需安装'
+                                  : backend.workerRuntimeState === 'version-incompatible'
+                                    ? '版本不兼容'
+                                    : '诊断失败'}
+                          </span>
+                        </div>
+                        <p>{backend.workerRuntimeReason}</p>
+                        <small>
+                          {backend.version ?? '版本未知'}
+                          {backend.expectedVersion ? ` / 验证版本 ${backend.expectedVersion}` : ''}
+                        </small>
+                        {backend.workerRuntimeState !== 'available' && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSelectedBackend(backend.id);
+                              setAuthOpen(true);
+                            }}
+                          >
+                            {backend.workerRuntimeState === 'needs-install'
+                              ? '前往安装'
+                              : backend.workerRuntimeState === 'needs-login'
+                                ? '前往登录'
+                                : '查看处理方式'}
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </>
+              ) : (
+                <div className="device-readiness-loading" aria-live="polite">
+                  {diagnosticsError ?? '正在检查设备、音频、Git 和 Worker 契约…'}
+                </div>
+              )}
+            </div>
+          )}
+        </section>
+
         {recoverable.length > 0 && (
           <section className="lobby-section">
             <div className="lobby-section-title">
@@ -447,6 +598,27 @@ export function Lobby({ lastError }: LobbyProps) {
                 const cwd = typeof meeting.state.cwd === 'string' ? meeting.state.cwd : '';
                 const { label, parent } = shortPath(cwd);
                 const tasks = Array.isArray(meeting.state.tasks) ? meeting.state.tasks.length : 0;
+                const savedTasks = Array.isArray(meeting.state.tasks)
+                  ? meeting.state.tasks.filter(
+                      (task): task is Record<string, unknown> => Boolean(task && typeof task === 'object'),
+                    )
+                  : [];
+                const autoReadOnly = savedTasks.filter((task) => {
+                  const recovery = task.recovery;
+                  return Boolean(
+                    recovery
+                    && typeof recovery === 'object'
+                    && (recovery as Record<string, unknown>).autoResume === true,
+                  );
+                }).length;
+                const needsConfirmation = savedTasks.filter((task) => {
+                  const recovery = task.recovery;
+                  return Boolean(
+                    recovery
+                    && typeof recovery === 'object'
+                    && (recovery as Record<string, unknown>).classification === 'requires-user',
+                  );
+                }).length;
                 return (
                   <li key={meeting.meetingId}>
                     <button
@@ -454,12 +626,16 @@ export function Lobby({ lastError }: LobbyProps) {
                       className="lobby-row"
                       onClick={() => { void recoverMeeting(meeting); }}
                       disabled={opening || !cwd}
-                      title="Resume Host context; running tasks stay interrupted"
+                      title="Restore durable Meeting state; only explicit read-only tasks may resume automatically"
                     >
                       <span className="lobby-row-icon" aria-hidden="true"><Clock size={16} /></span>
                       <span className="lobby-row-main">
                         <span className="lobby-row-name">Resume {label}</span>
-                        <span className="lobby-row-path">{parent} · {tasks} saved tasks</span>
+                        <span className="lobby-row-path">
+                          {parent} · {tasks} saved tasks
+                          {autoReadOnly > 0 ? ` · ${autoReadOnly} read-only auto-resume` : ''}
+                          {needsConfirmation > 0 ? ` · ${needsConfirmation} require confirmation` : ''}
+                        </span>
                       </span>
                       <span className="lobby-row-meta">Confirm</span>
                     </button>

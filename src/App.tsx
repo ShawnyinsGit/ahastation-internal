@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useClaude } from './hooks/useClaude';
 import { useWorkers } from './hooks/useWorkers';
 import { useTabs } from './hooks/useTabs';
+import { useCrossProjectTasks } from './hooks/useCrossProjectTasks';
 import { useScreenShare } from './hooks/useScreenShare';
 import { useBrowser } from './hooks/useBrowser';
 import { useStageWindows } from './hooks/useStageWindows';
@@ -16,9 +17,11 @@ import { useDragAndDrop } from './hooks/useDragAndDrop';
 import { useHandheldMode } from './lib/handheld-mode';
 import { planDisplayMigration } from './lib/display-migration';
 import { meetingStore } from './lib/meeting-store';
+import { browserStore } from './lib/browser-store';
 import { Lobby } from './components/Lobby';
 import { TabStrip } from './components/TabStrip';
-import { MeetingHeader } from './components/MeetingHeader';
+import { MeetingHeader, type MeetingView } from './components/MeetingHeader';
+import { TasksView } from './components/TasksView';
 import { ParticipantTile } from './components/ParticipantTile';
 import { ScreenStage } from './components/ScreenStage';
 import { SourcePicker } from './components/SourcePicker';
@@ -29,12 +32,14 @@ import { VoiceGuideModal } from './components/VoiceGuideModal';
 import { ParticipantPanel } from './components/ParticipantPanel';
 import { PermissionCard } from './components/PermissionCard';
 import { EditorOverlay } from './components/EditorOverlay';
+import { PlanMeetingModal } from './components/PlanMeetingModal';
 import type { AutoApproveScope, BackendInfo, DesktopSource, SkillInfo } from './types';
 
 export function App() {
   const { state, restartSession, sendText, sendImage, sendAttachments, publishDroppedFiles, onDroppedFiles, resolvePermission, interrupt, setSpeakCallback } = useClaude();
   const workers = useWorkers();
   const tabs = useTabs();
+  const crossProjectTasks = useCrossProjectTasks();
   const { state: share, start: startShare, startSystemPicker, stop: stopShare, captureFrame, videoRef } = useScreenShare();
   const browser = useBrowser();
   const stageWindows = useStageWindows();
@@ -49,6 +54,10 @@ export function App() {
   const [muted, setMuted] = useState(false);
   const [autoApproveScope, setAutoApproveScope] = useState<AutoApproveScope>('off');
   const [multiAgent, setMultiAgent] = useState(false);
+  const [view, setView] = useState<MeetingView>('meeting');
+  /** Bumped every time the task board asks the meeting view to open a task, so
+   *  re-clicking the same card after closing the inspector still reopens it. */
+  const [taskFocus, setTaskFocus] = useState<{ taskId: string; seq: number } | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [aiSpeaking, setAiSpeaking] = useState(false);
   const [viewingFile, setViewingFile] = useState<{ relativePath: string } | null>(null);
@@ -57,11 +66,44 @@ export function App() {
   const [mutedHostIds, setMutedHostIds] = useState<Set<string>>(new Set());
   const [skills, setSkills] = useState<SkillInfo[]>([]);
   const elapsed = useElapsedSeconds(activeOpenedAt);
+  const visualFixture = import.meta.env.DEV
+    && new URLSearchParams(window.location.search).has('ui-fixture');
 
   useEffect(() => {
     if (!activeTab || activeTab.placeholder) return;
     void window.vibeMeet.setOrchestrationMode(activeTab.id, multiAgent);
   }, [activeTab?.id, activeTab?.placeholder, multiAgent]);
+
+  const attentionCount = useMemo(
+    () => crossProjectTasks.tasks.filter((t) => t.column === 'attention').length
+      + crossProjectTasks.pendingPlans.length,
+    [crossProjectTasks],
+  );
+
+  // The embedded browser is a native WebContentsView painted above the
+  // renderer, so no amount of CSS can tuck it behind the task board. Drop it
+  // while the board is up and put it back the way we found it on return.
+  const browserWasVisible = useRef(false);
+  useEffect(() => {
+    if (view === 'tasks') {
+      browserWasVisible.current = browserStore.getSnapshot().visible;
+      if (browserWasVisible.current) void browserStore.setVisible(false);
+    } else if (browserWasVisible.current) {
+      browserWasVisible.current = false;
+      void browserStore.setVisible(true);
+    }
+  }, [view]);
+
+  const handleOpenTaskFromBoard = useCallback((sessionId: string, taskId: string) => {
+    void meetingStore.setActive(sessionId);
+    setTaskFocus((prev) => ({ taskId, seq: (prev?.seq ?? 0) + 1 }));
+    setView('meeting');
+  }, []);
+
+  const handleOpenPlanFromBoard = useCallback((sessionId: string) => {
+    void meetingStore.setActive(sessionId);
+    setView('meeting');
+  }, []);
 
   // Load available backends for the participants tab
   useEffect(() => {
@@ -102,6 +144,20 @@ export function App() {
     }
     return map;
   }, [backends]);
+
+  // SideDrawer renders a single legacy PermissionCard for the first pending
+  // permission across all workers (state.pendingPermission). Thread the
+  // matching worker's resolving/error flags so that card stays in lock-step
+  // with WorkerCard and TaskInspector for the same permission id.
+  const drawerPermissionState = useMemo(() => {
+    const pending = state.pendingPermission;
+    if (!pending) return { resolving: false, error: null as string | null };
+    const owner = workers.workerList.find((w) => w.pendingPermission?.id === pending.id);
+    return {
+      resolving: owner?.resolvingPermissionId === pending.id,
+      error: owner?.permissionError ?? null,
+    };
+  }, [state.pendingPermission, workers.workerList]);
 
   const speakingRef = useRef(false);
   const sendWithModeRef = useRef<(text: string) => void>(sendText);
@@ -152,9 +208,8 @@ export function App() {
     // are always read from the project directory, not external locations.
     const cwd = state.cwd;
     for (const f of delivery.files) {
-      const filePath = f.snapshotRelativePath && cwd
-        ? `${cwd}/${f.snapshotRelativePath}`
-        : f.path;
+      const filePath = f.snapshotPath
+        ?? (f.snapshotRelativePath && cwd ? `${cwd}/${f.snapshotRelativePath}` : f.path);
       stageWindows.openFile(filePath);
     }
   }, [workers.currentDelivery, stageWindows, state.cwd]);
@@ -172,7 +227,7 @@ export function App() {
     }
   }, [workers.savedDocuments, stageWindows]);
 
-  const micEnabled = hasLiveTab || voiceLock.enrollmentActive;
+  const micEnabled = !visualFixture && (hasLiveTab || voiceLock.enrollmentActive);
 
   const onVoiceFinal = useCallback(async (text: string) => {
     const id = meetingStore.getActiveId();
@@ -386,6 +441,12 @@ export function App() {
   // the editor form factor (overlay in handheld, independent window else).
   const { mode: uiMode, override: uiModeOverride } = useHandheldMode();
   const handheld = uiMode === 'handheld';
+  const handheldInitialDrawerApplied = useRef(false);
+  useEffect(() => {
+    if (!handheld || handheldInitialDrawerApplied.current) return;
+    handheldInitialDrawerApplied.current = true;
+    setDrawerOpen(false);
+  }, [handheld]);
   const [permModalOpen, setPermModalOpen] = useState(false);
   const permissionCount = workers.workerList.filter((w) => w.pendingPermission).length;
   // Pragmatic update notice (Phase 6b): shown only when the probe actually
@@ -496,7 +557,7 @@ ${trimmed}`
 
   return (
     <div
-      className={`mtg${dragDrop.dropActive ? ' mtg-dropping' : ''}`}
+      className={`mtg${dragDrop.dropActive ? ' mtg-dropping' : ''}${view === 'tasks' ? ' is-tasks-view' : ''}`}
       onDragEnter={dragDrop.onDragEnter}
       onDragOver={dragDrop.onDragOver}
       onDragLeave={dragDrop.onDragLeave}
@@ -510,6 +571,9 @@ ${trimmed}`
         onChangeAutoApproveScope={setAutoApproveScope}
         multiAgent={multiAgent}
         onToggleMultiAgent={() => setMultiAgent((v) => !v)}
+        view={view}
+        onChangeView={setView}
+        attentionCount={attentionCount}
         settingsSlot={
           <SettingsMenu badge={voiceLock.enrollmentActive} />
         }
@@ -525,6 +589,7 @@ ${trimmed}`
             workers={workers.workerList}
             hostGroups={workers.hostGroups}
             plan={workers.plan}
+            coordinatorBriefings={workers.coordinatorBriefings}
             running={state.running}
             aiSpeaking={aiSpeaking}
             galleryContent={
@@ -560,9 +625,14 @@ ${trimmed}`
               />
             }
             delivery={workers.currentDelivery}
+            finalMeetingDelivery={workers.finalMeetingDelivery}
+            finalMeetingDecision={workers.finalMeetingDecision}
             sessionId={activeTab?.id ?? null}
-            onAcceptDelivery={() => { setViewingFile(null); workers.acceptDelivery(); }}
-            onReviseDelivery={(fb: string) => { setViewingFile(null); return workers.reviseDelivery(fb); }}
+            focusTask={taskFocus}
+            onAcceptDelivery={() => workers.acceptDelivery()}
+            onReviseDelivery={(fb: string) => workers.reviseDelivery(fb)}
+            onAcceptFinalMeetingDelivery={() => workers.acceptFinalMeetingDelivery()}
+            onRequestFinalMeetingRework={(reason: string) => workers.requestFinalMeetingRework(reason)}
             viewingFile={viewingFile}
             onCloseFileView={() => setViewingFile(null)}
             stageWindows={stageWindows.windows}
@@ -596,6 +666,8 @@ ${trimmed}`
           transcript={state.transcript}
           activity={state.activity}
           pending={state.pendingPermission}
+          pendingResolving={drawerPermissionState.resolving}
+          pendingError={drawerPermissionState.error}
           onResolve={resolvePermission}
           onSend={sendWithMode}
           onSendAttachments={sendAttachmentsWithMode}
@@ -619,6 +691,17 @@ ${trimmed}`
           forceParticipantsTab={openParticipantsTab}
         />
       </main>
+
+      {/* The board is a sibling rather than a replacement: unmounting
+          .mtg-main would tear down the stage's browser viewport ref and the
+          inspector's local state every time the user glances at their tasks. */}
+      {view === 'tasks' && (
+        <TasksView
+          data={crossProjectTasks}
+          onOpenTask={handleOpenTaskFromBoard}
+          onOpenPlan={handleOpenPlanFromBoard}
+        />
+      )}
 
       <BottomToolbar
         muted={muted}
@@ -651,9 +734,10 @@ ${trimmed}`
           <div className="perm-modal" onClick={(e) => e.stopPropagation()}>
             <PermissionCard
               pending={state.pendingPermission}
-              onDecide={(id, decision) => {
-                resolvePermission(id, decision);
-                setPermModalOpen(false);
+              onDecide={async (id, decision) => {
+                const res = await resolvePermission(id, decision);
+                if (res && res.ok) setPermModalOpen(false);
+                return res;
               }}
             />
           </div>
@@ -685,6 +769,14 @@ ${trimmed}`
         open={voicePrefs.guideOpen}
         onClose={voicePrefs.handleGuideClose}
         onDismissForever={voicePrefs.handleDismissForever}
+      />
+
+      <PlanMeetingModal
+        open={Boolean(workers.pendingPlan)}
+        tasks={workers.pendingPlan ?? []}
+        backends={backends}
+        onReject={() => workers.decidePendingPlan(false)}
+        onSubmit={(tasks) => workers.decidePendingPlan(true, tasks)}
       />
 
       {(state.lastError || micError) && (

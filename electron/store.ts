@@ -19,6 +19,7 @@ import { app, dialog, safeStorage } from 'electron';
 import { existsSync, readFileSync, renameSync } from 'node:fs';
 import { promises as fsp } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { normalizeBackendBaseUrl } from './normalize-base-url.js';
 
 export interface VoicePrint {
   // Float32 embedding flattened into a regular number[] for JSON.
@@ -475,6 +476,9 @@ export function setBackendAuth(
 
     const base: BackendAuthEntry = idx >= 0 ? { ...entries[idx] } : { backendId, authMode: 'none' };
     const updated: BackendAuthEntry = { ...base, ...patch };
+    if ('baseUrl' in patch) {
+      updated.baseUrl = normalizeBackendBaseUrl(updated.baseUrl);
+    }
 
     // Encrypt API key for at-rest storage.
     if (updated.apiKey && safeStorageAvailable()) {

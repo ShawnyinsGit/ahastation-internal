@@ -39,7 +39,30 @@ const api = {
     ipcRenderer.invoke('session:set-permission-mode', { sessionId, mode }),
   setAutoApprove: (scope) => ipcRenderer.invoke('session:set-auto-approve', { scope }),
   setOrchestrationMode: (sessionId, enabled) => ipcRenderer.invoke('session:set-orchestration-mode', { sessionId, enabled }),
-  approvePlan: (sessionId, approved) => ipcRenderer.invoke('session:approve-plan', { sessionId, approved }),
+  approvePlan: (sessionId, approved, tasks) =>
+    ipcRenderer.invoke('session:approve-plan', { sessionId, approved, ...(tasks ? { tasks } : {}) }),
+  acceptDelivery: (sessionId, deliveryId, candidateId) =>
+    ipcRenderer.invoke('session:accept-delivery', { sessionId, deliveryId, candidateId }),
+  returnDelivery: (sessionId, deliveryId, candidateId, feedback) =>
+    ipcRenderer.invoke('session:return-delivery', {
+      sessionId,
+      deliveryId,
+      candidateId,
+      feedback,
+    }),
+  meetingDelivery: {
+    get: (sessionId) =>
+      ipcRenderer.invoke('meeting-delivery:get', { sessionId }),
+    accept: (sessionId, deliveryId, contentHash) =>
+      ipcRenderer.invoke('meeting-delivery:accept', { sessionId, deliveryId, contentHash }),
+    requestRework: (sessionId, deliveryId, contentHash, reason) =>
+      ipcRenderer.invoke('meeting-delivery:request-rework', {
+        sessionId,
+        deliveryId,
+        contentHash,
+        reason,
+      }),
+  },
   endSession: (sessionId) => ipcRenderer.invoke('session:end', { sessionId }),
   pickCwd: () => ipcRenderer.invoke('dialog:pick-cwd'),
   listDir: (path, showHidden) => ipcRenderer.invoke('dialog:list-dir', { path, showHidden }),
@@ -57,6 +80,7 @@ const api = {
   requestMicPermission: () => ipcRenderer.invoke('mic:request-permission'),
   relaunchApp: () => ipcRenderer.invoke('app:relaunch'),
   asrAvailable: () => ipcRenderer.invoke('asr:available'),
+  deviceDiagnostics: () => ipcRenderer.invoke('device:diagnostics'),
   transcribePcm: (pcmBuffer, lang) => ipcRenderer.invoke('asr:transcribe', pcmBuffer, lang),
   polishAsrText: (text) => ipcRenderer.invoke('asr:polish-text', text),
   auth: {
@@ -105,6 +129,65 @@ const api = {
     read: (sessionId, path) => ipcRenderer.invoke('documents:read', { sessionId, path }),
     list: (sessionId, dirPath) => ipcRenderer.invoke('documents:list', { sessionId, dirPath }),
     openExternal: (sessionId, path) => ipcRenderer.invoke('documents:open-external', { sessionId, path }),
+  },
+  tasks: {
+    getSnapshot: (sessionId, taskId) =>
+      ipcRenderer.invoke('tasks:get-snapshot', { sessionId, taskId }),
+    getEvents: (sessionId, taskId, afterSeq, limit) =>
+      ipcRenderer.invoke('tasks:get-events', { sessionId, taskId, afterSeq, limit }),
+    onEvent: (sessionId, taskId, afterSeq, cb) => {
+      const subscriptionId = `task-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const listener = (_event, payload) => {
+        if (payload?.subscriptionId !== subscriptionId || !payload.event) return;
+        cb(payload.event);
+      };
+      ipcRenderer.on('tasks:event', listener);
+      const subscribePromise = ipcRenderer.invoke('tasks:subscribe', {
+        sessionId,
+        taskId,
+        afterSeq,
+        subscriptionId,
+      }).then((result) => {
+        if (!result?.ok) console.warn('[tasks] subscription failed:', result?.error);
+      }).catch((error) => {
+        console.warn('[tasks] subscription failed:', String(error));
+      });
+      let disposed = false;
+      return () => {
+        if (disposed) return;
+        disposed = true;
+        ipcRenderer.removeListener('tasks:event', listener);
+        // Ordering matters: an immediate close can race the async main-process
+        // subscribe handler. Send the cancellation only after that handler
+        // settles so a late subscription cannot leak.
+        void subscribePromise.finally(() => {
+          ipcRenderer.send('tasks:unsubscribe', { subscriptionId });
+        });
+      };
+    },
+    followUp: (sessionId, taskId, text) =>
+      ipcRenderer.invoke('tasks:follow-up', { sessionId, taskId, text }),
+    steer: (sessionId, taskId, text) =>
+      ipcRenderer.invoke('tasks:steer', { sessionId, taskId, text }),
+    interrupt: (sessionId, taskId, reason) =>
+      ipcRenderer.invoke('tasks:interrupt', { sessionId, taskId, reason }),
+    extendBudget: (sessionId, taskId, expectedPlanVersion, budget) =>
+      ipcRenderer.invoke('tasks:extend-budget', {
+        sessionId,
+        taskId,
+        expectedPlanVersion,
+        budget,
+      }),
+    confirmReviewEvidence: (sessionId, taskId, reviewId, chunkId, chunkHash) =>
+      ipcRenderer.invoke('tasks:confirm-review-evidence', {
+        sessionId,
+        taskId,
+        reviewId,
+        chunkId,
+        chunkHash,
+      }),
+    resumeReview: (sessionId, taskId, reviewId) =>
+      ipcRenderer.invoke('tasks:resume-review', { sessionId, taskId, reviewId }),
   },
   transcripts: {
     load: (cwd) => ipcRenderer.invoke('transcripts:load', { cwd }),
@@ -187,7 +270,8 @@ const api = {
     // Main-window side: toggle the floating companion window + relay the
     // TTS-active flag (sound ducking). The companion window itself uses the
     // narrow preload-companion.cjs bridge instead.
-    toggle: () => ipcRenderer.invoke('companion:toggle'),
+    // Phase 1 defaults to AhaBar; pass { view: 'companion' } for the Phaser office.
+    toggle: (opts) => ipcRenderer.invoke('companion:toggle', opts ?? {}),
     ttsState: (active) => ipcRenderer.send('companion:tts-state', { active }),
   },
   // Secure editor file browsing. No cwd is ever sent — the main process
@@ -218,6 +302,8 @@ const api = {
   },
   steerWorker: (sessionId, workerId, addendum) =>
     ipcRenderer.invoke('session:steer-worker', { sessionId, workerId, addendum }),
+  interruptWorker: (sessionId, workerId) =>
+    ipcRenderer.invoke('session:interrupt-worker', { sessionId, workerId }),
   onEvent: (cb) => {
     const listener = (_, e) => cb(e);
     ipcRenderer.on('session:event', listener);

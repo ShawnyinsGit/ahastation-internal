@@ -642,7 +642,13 @@ function BackendCard({
                 value={editingApiKey}
                 onChange={(e) => onApiKeyChange(e.target.value)}
                 onKeyDown={onKeyDown}
-                placeholder={b.hasApiKey ? '已保存 (输入新值覆盖)' : '输入 API Key'}
+                placeholder={
+                  b.hasApiKey
+                    ? '已保存 (输入新值覆盖)'
+                    : b.id === 'codex'
+                      ? 'OpenAI 或第三方兼容 API Key'
+                      : '输入 API Key'
+                }
                 disabled={saving}
               />
               <button
@@ -667,14 +673,25 @@ function BackendCard({
                   onSaveBaseUrl(e.target.value);
                 }
               }}
-              placeholder="https://api.example.com/v1"
+              placeholder={
+                b.id === 'codex'
+                  ? '留空用 OpenAI 官方；第三方网关填 https://.../v1'
+                  : 'https://api.example.com/v1'
+              }
               disabled={saving}
             />
           </div>
 
+          {b.id === 'codex' && (
+            <p style={{ margin: '4px 0 0', fontSize: 12, opacity: 0.75 }}>
+              支持 OpenAI 官方 Key，或通过 Base URL 接入第三方 OpenAI 兼容网关；OAuth 登录与 API Key 二选一即可。
+            </p>
+          )}
+
           <div className="backend-field">
             <label className="backend-field-label">Model</label>
-            {b.models && b.models.length > 0 ? (
+            {/* Codex keeps free-text so third-party model IDs work; models are suggestions. */}
+            {b.id !== 'codex' && b.models && b.models.length > 0 ? (
               <select
                 className="backend-field-select"
                 defaultValue={b.model ?? b.defaultModel ?? ''}
@@ -687,18 +704,32 @@ function BackendCard({
                 ))}
               </select>
             ) : (
-              <input
-                className="backend-field-input"
-                type="text"
-                defaultValue={b.model ?? ''}
-                onBlur={(e) => {
-                  if (e.target.value !== (b.model ?? '')) {
-                    onSaveModel(e.target.value);
+              <>
+                <input
+                  className="backend-field-input"
+                  type="text"
+                  list={b.models && b.models.length > 0 ? `${b.id}-model-suggestions` : undefined}
+                  defaultValue={b.model ?? ''}
+                  onBlur={(e) => {
+                    if (e.target.value !== (b.model ?? '')) {
+                      onSaveModel(e.target.value);
+                    }
+                  }}
+                  placeholder={
+                    b.id === 'codex'
+                      ? '留空则使用 Codex CLI 默认模型；可填 gpt-5.4 / glm-5.2 等'
+                      : (b.defaultModel ?? '默认模型')
                   }
-                }}
-                placeholder={b.defaultModel ?? '默认模型'}
-                disabled={saving}
-              />
+                  disabled={saving}
+                />
+                {b.models && b.models.length > 0 && (
+                  <datalist id={`${b.id}-model-suggestions`}>
+                    {b.models.map((m) => (
+                      <option key={m} value={m} />
+                    ))}
+                  </datalist>
+                )}
+              </>
             )}
           </div>
 

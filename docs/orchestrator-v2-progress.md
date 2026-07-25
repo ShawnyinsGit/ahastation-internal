@@ -1,6 +1,6 @@
 # Orchestrator V2 implementation progress
 
-Updated: 2026-07-17
+Updated: 2026-07-25
 
 ## Status
 
@@ -11,90 +11,71 @@ Updated: 2026-07-17
 - [x] E. Multi-host collaboration and failover UI
 - [x] F. IPC/browser/ASR/security hardening
 - [x] G. Unsigned experience DMG build and automated verification
+- [x] I. Meeting-owned visible task collaboration (Tasks 1–17)
 - [ ] H. Formal release gate: full installed-app manual matrix, 2-hour soak, signing and notarization
 
 ## Current slice
 
-Release candidate hardening: Codex app-server and Kimi ACP native handshakes,
-Claude SDK checkpoints, explicit interrupted-Meeting recovery, packaged ASR
-cross-origin isolation, and final DMG verification.
+Meeting task collaboration is implemented on `codex/collaboration-workspace-plan`:
+Coordinator-only planning, Backend-compiled execution intents, durable mailboxes,
+complete diff review, serial integration outside the user base, final Meeting
+publication, bounded rework, crash-safe recovery, and Worker stability gates.
+
+Claude Code `2.1.150` and Codex `0.144.1` may qualify as stable Workers only with
+exact-version real vertical smoke evidence. OpenCode and Kimi remain experimental
+by first-release policy.
+
+### Coordinator review is now actually driven
+
+The review briefing used to be fire-and-forget: `onCoordinatorTurnEnded` existed
+but nothing in production ever called it, `resume` was never reachable, and a
+Coordinator that read two chunks and moved on left the delivery — and every task
+depending on it — stalled in `coordinator-reviewing` forever. The loop is now
+closed end to end:
+
+- Coordinator turn boundaries drive the review; a turn that adds no coverage
+  charges the stall budget and re-briefs with the uncovered chunk ids.
+- Covering a chunk resets that budget, so unrelated user turns cannot pause a
+  review that is genuinely progressing.
+- A silent Coordinator is caught by a stall watchdog rather than waiting forever.
+- While a review is active every non-review meeting tool is refused with the
+  pending reviewId and the chunks still owed a verdict.
+- Disconnect pauses resume when the Coordinator returns or a new host takes over;
+  budget-exhausted pauses escalate to the user with a resume action and are never
+  treated as a pass.
+
+Verdicts themselves are unchanged: hash-bound, complete-coverage-gated, and
+withheld evidence still requires explicit user confirmation.
 
 ## Verification log
 
 - Renderer TypeScript: pass
 - Electron TypeScript: pass
-- Production build: pass
-- Node tests: 109/109 pass
-- Packaged Codex runtime resolver regression: pass
-- MeetingCommand authorization regression: pass
-- Workspace isolation tests: Git worktree + non-Git path lock pass
-- Production dependency audit: 0 vulnerabilities
-- Codex app-server 0.144.1 OAuth/account handshake: pass
-- Kimi ACP 0.24.1 initialize/auth/session handshake: pass
-- Claude CLI auth preflight: correctly gated (`loggedIn=false` on this machine)
-- Final packaged app startup smoke: pass
-- DMG checksum verification: pass
-- Packaged app 10-second startup smoke: pass
-- Final mounted-app renderer/ASR smoke: `app://bundle`, cross-origin isolated,
-  `SharedArrayBuffer` available, bundled Whisper ready, Mandarin transcription pass
-- DMG: `release/AhaMeet-0.16.3-arm64.dmg`
-- SHA-256: `d708c3ce08e3ad5d7b658bdc94a818ab6320412c4e279bb4ed082dcc17985f45`
-
-## Implemented
-
-- Packaged Codex resolves and passes a real `app.asar.unpacked` executable.
-- Codex OAuth status follows the CLI exit-code contract, including 0.144.x
-  releases that write successful login status to stderr instead of stdout.
-- Chat `@backend` mentions now route to the matching ready Expert Talker;
-  Expert replies remain visible and are also forwarded to the Coordinator.
-- Host startup and reconnect perform readiness handshakes without paid greeting
-  turns, preventing delayed, out-of-context welcome messages from blocking real input.
-- Coordinator and Expert Talkers receive explicit, distinct role prompts; only
-  the Coordinator owns meeting scheduling while Experts answer direct requests.
-- Codex command-only turns receive a visible acknowledgement instead of being
-  silently swallowed after the internal protocol frame is removed.
-- Synthetic narration is now a terminal UI event and is never fed back into
-  the same Host as a new user turn, eliminating runaway speak/narrate loops
-  that also kept TTS suppression active and made microphone input appear dead.
-- Backend-specific environment/auth construction; non-Claude CLIs keep real HOME.
-- Backend-specific model selection.
-- Codex real async startup handshake and abortable turns.
-- Single `coordinatorHostId`, transfer IPC/UI, expert role enforcement.
-- Added-host failure no longer ends the whole renderer Meeting.
-- One authoritative Meeting Scheduler with per-task executor Backend selection.
-- Internal expert request/reply tools.
-- Adapter-independent expert response forwarding for Kimi/Qoder-style backends without MCP command support.
-- Append-only Meeting event journal and terminal snapshot.
-- ASR payload limits and embedded browser permission/navigation/bounds hardening.
-- Coordinator failover prompt, Host reconnect, interrupted-task recovery snapshots.
-- Git worktree isolation and non-Git declared path locks.
-- Non-Git overlapping path locks now serialize pending tasks instead of failing them.
-- Codex `meeting-command` frames are consumed at the Adapter boundary; `speak` no longer duplicates or leaks JSON into chat.
-- First-window macOS microphone consent and denied-state native recovery dialog are covered by regression tests.
-- Packaged renderer is served from a privileged, path-confined `app://bundle`
-  protocol; real Electron inspection reports `crossOriginIsolated=true` and
-  `SharedArrayBuffer` available for ONNX/VAD.
-- Codex Coordinator uses app-server `initialize/account/read/thread/*/turn/*`
-  instead of a paid `Ready` prompt; real OAuth handshake returns a native
-  `codex-app-server` thread checkpoint.
-- Kimi Expert uses ACP initialize/auth/session/resume/prompt/cancel in enforced
-  plan mode; the canonical `~/.kimi-code/bin/kimi` runtime wins over PATH
-  wrappers. Compatibility stream-json remains test-only/fallback.
-- Claude Agent SDK is exactly pinned at `0.3.150`; native session IDs are
-  snapshotted and `resume` is wired through the unified Backend adapter.
-- Lobby exposes explicit recovery confirmation. Restored running tasks are
-  projected as `interrupted` and never auto-replayed. Per-task actions let the
-  user explicitly continue, retry, complete, or abandon; side-effecting restarts
-  require confirmation. Journal sequence numbers continue across recovery.
-- Codex and Kimi native transports reject runtime versions that do not match
-  their locked protocol contract and persist protocol/backend versions in Host
-  checkpoints. Kimi auth status includes a real ACP session handshake.
-- Kimi ACP workspace reads resolve symlinks before enforcing the workspace
-  boundary, and first-turn system instructions also apply to multimodal input.
-- Packaged Whisper points `GGML_BACKEND_PATH` at its bundled baseline Apple
-  Silicon CPU plugin and refreshes the complete native dependency closure on every macOS build;
-  a synthesized Mandarin clip transcribed as “你好，今天我们测试语音识别。”.
-- Removed vulnerable XLSX/PPTX in-process preview dependencies; system-open fallback remains.
+- Production build: pass (existing large-chunk warning only)
+- Node tests: focused collaboration / authority / vertical-slice suites pass;
+  full suite re-run recorded with Task 17
+- Deterministic multi-backend vertical slice: pass
+- Real Claude Worker vertical smoke journal
+  `real-worker-claude-code-eae8d1f9-5112-4049-ab9f-92326cc286d1`: WorkReport,
+  Steering ACK, high-risk ask-user with Backend-scoped safeInput, review,
+  integration, final publication
+- Real Codex Worker vertical smoke journal
+  `real-worker-codex-54a5b159-ba2a-49cf-a4ec-cf79942df4fe`: WorkReport, Steering
+  ACK, high-risk ask-user, Backend-scoped canonical decisions, review,
+  integration, final publication
+- Missing / schema-invalid WorkReport: one durable protocol correction, then
+  fail-closed
+- Opaque native permission failures now journal Backend identity on ask-user
+  safeInput so release gates do not require a nonexistent auto-allow
+- Coordinator review loop: an unfinished Coordinator turn re-briefs the review
+  instead of stalling the delivery (`tests/coordinator-review-loop.test.mjs`)
+- The real Worker smoke no longer submits verdicts for the meeting. It asserts
+  the Coordinator called `submit_delivery_chunk_review` and
+  `complete_delivery_review` itself and reached complete coverage; a stalled
+  review fails the gate. Prior smoke journals predate this and were recorded
+  with harness-driven review.
+- `tests/collaboration-vertical-slice.test.mjs` is explicitly an injected-review
+  orchestration test, not evidence of model-driven review
 
 ## Formal release checks still open
 

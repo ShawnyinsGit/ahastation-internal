@@ -333,6 +333,7 @@ async function registerAllIpc(ctx: IpcContext): Promise<void> {
     { registerDialogIpc },
     { registerAttachmentsIpc },
     { registerDocumentsIpc },
+    { registerTasksIpc },
     { registerTranscriptsIpc },
     { registerAccessibilityIpc },
     { registerSkillsIpc },
@@ -343,6 +344,8 @@ async function registerAllIpc(ctx: IpcContext): Promise<void> {
     { registerIdeFilesIpc },
     { registerIdeRegistryIpc },
     { registerIdePtyIpc },
+    { registerDeviceDiagnosticsIpc },
+    { registerMeetingDeliveryIpc },
     { registerCompanionIpc },
   ] = await Promise.all([
     import('./ipc/session.js'),
@@ -357,6 +360,7 @@ async function registerAllIpc(ctx: IpcContext): Promise<void> {
     import('./ipc/dialog.js'),
     import('./ipc/attachments.js'),
     import('./ipc/documents.js'),
+    import('./ipc/tasks.js'),
     import('./ipc/transcripts.js'),
     import('./ipc/accessibility.js'),
     import('./ipc/skills.js'),
@@ -367,6 +371,8 @@ async function registerAllIpc(ctx: IpcContext): Promise<void> {
     import('./ipc/ide-files.js'),
     import('./ipc/ide-registry.js'),
     import('./ipc/ide-pty.js'),
+    import('./ipc/device-diagnostics.js'),
+    import('./ipc/meeting-delivery.js'),
     import('./companion/companion-feed.js'),
   ]);
   _flushOpenTabsNow = flushOpenTabsNow;
@@ -382,6 +388,7 @@ async function registerAllIpc(ctx: IpcContext): Promise<void> {
   registerDialogIpc(ctx);
   registerAttachmentsIpc(ctx);
   registerDocumentsIpc(ctx);
+  registerTasksIpc(ctx);
   registerTranscriptsIpc(ctx);
   registerAccessibilityIpc();
   registerSkillsIpc();
@@ -392,6 +399,8 @@ async function registerAllIpc(ctx: IpcContext): Promise<void> {
   registerIdeFilesIpc();
   registerIdeRegistryIpc(ctx);
   registerIdePtyIpc(ctx);
+  registerDeviceDiagnosticsIpc();
+  registerMeetingDeliveryIpc(ctx);
   registerCompanionIpc(ctx);
   // Register custom backends from settings so they appear in the backend list
   registerCustomBackends();

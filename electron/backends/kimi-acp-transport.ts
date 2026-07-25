@@ -20,6 +20,7 @@ export interface KimiAcpTransportOptions {
   onRequest?: (request: KimiAcpRequest) => Promise<unknown> | unknown;
   onExit?: (error: Error) => void;
   spawnProcess?: () => AcpProcess;
+  allowWriteTextFile?: boolean;
 }
 
 interface Pending {
@@ -50,7 +51,12 @@ export class KimiAcpTransport {
     });
     return this.request('initialize', {
       protocolVersion: 1,
-      clientCapabilities: { fs: { readTextFile: true, writeTextFile: false } },
+      clientCapabilities: {
+        fs: {
+          readTextFile: true,
+          writeTextFile: this.options.allowWriteTextFile === true,
+        },
+      },
       clientInfo: { name: 'ahastation', version: '0.16.3' },
     });
   }

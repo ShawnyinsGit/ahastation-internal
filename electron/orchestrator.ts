@@ -24,7 +24,11 @@ import { ClaudeSession, type SessionEvent } from './claude-session.js';
 import type { BackendSession, BackendSessionSnapshot } from './backends/cli-backend.js';
 import { getBackendRegistry } from './backends/registry.js';
 import type { AutoApproveScope } from './auto-approve-policy.js';
-import type { PlanMeetingTask } from './meeting-tools.js';
+import {
+  normalizePlanMeetingTasks,
+  type PlanMeetingTask,
+  type PlanMeetingTaskInput,
+} from './meeting-tools.js';
 import {
   DecisionWatcher,
   createDecisionDoc,
@@ -43,6 +47,7 @@ import {
   extractText,
 } from './orchestrator-helpers.js';
 import {
+  type ActiveReviewGate,
   type DecisionCreationResult,
   type OrchestratorBridge,
   type SaveMemoryResult,
@@ -52,14 +57,56 @@ import { BrowserTabManager } from './browser-tab-manager.js';
 import { startRecap, type RecapHandle } from './recap.js';
 import { type SessionFactory, type WorkerScheduler } from './worker-scheduler.js';
 import { ensureDir, maybeAppendGitignore } from './attachments/workspace.js';
+import { listAuthorizedAssetReferences } from './attachments/assets.js';
 import { promises as fsp } from 'node:fs';
 import path from 'node:path';
 import { HostGroup } from './host-group.js';
 import { CrossHostBus } from './cross-host-bus.js';
-import { MeetingRepository } from './meeting-repository.js';
+import {
+  MeetingRepository,
+  type PersistedMeetingEvent,
+} from './meeting-repository.js';
+import { TaskMailbox } from './task-mailbox.js';
+import {
+  projectMeetingTasks,
+  type TaskProjectionResult,
+} from './task-projection.js';
+import { DeliveryHarness } from './delivery-harness.js';
+import { CommandDeliveryVerifier } from './delivery-verifier.js';
+import { DeterministicDeliveryReviewer } from './delivery-reviewer.js';
+import { GitDeliveryIntegrator } from './delivery-integrator.js';
+import { IntegrationQueue } from './integration-queue.js';
+import {
+  buildMeetingDelivery,
+  MeetingDeliveryNotReadyError,
+  parseMeetingDelivery,
+  publishedMeetingDelivery,
+  type FinalMeetingDecision,
+  type MeetingDelivery,
+} from './meeting-delivery.js';
+import { prepareFrozenDeliveryCandidate } from './delivery-candidate.js';
+import {
+  CoordinatorReviewDriver,
+  type CoordinatorReviewBriefing,
+} from './coordinator-review-driver.js';
+import {
+  listUncoveredCoordinatorReviewChunkIds,
+  safeCoordinatorReviewProjection,
+  type CoordinatorReviewFinding,
+  type CoordinatorReviewSession,
+} from './coordinator-review.js';
 import { authorizeMeetingCommand, type MeetingCommandResult } from './meeting-command.js';
 import { TaskWorkspaceManager } from './task-workspace.js';
 import { DiagnosticLogger } from './diagnostic-logger.js';
+import { PORTABLE_MEETING_COMMAND_PROMPT } from './orchestrator-prompts.js';
+import {
+  assessWorkerRuntime,
+  probeWorkerRuntimeVersion,
+} from './backends/worker-runtime-contract.js';
+import {
+  backendRuntimeSchema,
+  type BackendRuntime,
+} from './backends/task-profile.js';
 import type {
   MeetingPlan,
   MeetingPlanNode,
@@ -69,6 +116,30 @@ import type {
   WorkerStatusKind,
 } from './orchestrator-types.js';
 import type { SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
+import type {
+  AuthorizedMeetingContextSource,
+  ContextSelection,
+} from './task-context.js';
+import {
+  backendEffectiveProfileSchema,
+  type BackendEffectiveProfile,
+  type ContextPackage,
+  type TaskAuthorityGrant,
+  type TaskExecutionProfile,
+  type TaskMessage,
+} from './task-collaboration.js';
+import {
+  compileTaskAuthority,
+  hashTaskAuthorityRequest,
+} from './task-authority.js';
+import { taskBudgetSchema, type TaskBudget } from './task-budget.js';
+import {
+  assertRecoveryActionAllowed,
+  assessTaskRecovery,
+  type TaskRecoveryAction,
+} from './task-recovery.js';
+
+export const MAX_HOSTS = 3;
 
 export type {
   OrchestratorEvent,
@@ -110,6 +181,15 @@ interface OrchestratorOpts {
   recoverySeq?: number;
   resumeBackendSessions?: Record<string, BackendSessionSnapshot>;
   recoveredTasks?: Array<Record<string, unknown>>;
+  recoveredPlanVersion?: number;
+  recoveredReviewSessions?: CoordinatorReviewSession[];
+  /** How long an active review may sit without Coordinator progress before the
+   * stall budget is charged. Set to 0 to disable the watchdog in tests. */
+  reviewStallTimeoutMs?: number;
+  /** Optional workspace allocator override. Production uses the Meeting-owned
+   * manager created below; tests with stub sessions may inject one to exercise
+   * the real managed-worktree delivery path without spawning a backend CLI. */
+  workspaceManager?: TaskWorkspaceManager;
 }
 
 export class Orchestrator implements OrchestratorBridge {
@@ -130,13 +210,34 @@ export class Orchestrator implements OrchestratorBridge {
   private projectId: string;
   private meetingId: string;
   private repository: MeetingRepository;
+  private repositoryReady: Promise<void>;
+  private taskMailbox: TaskMailbox;
+  private taskProjection: TaskProjectionResult = { tasks: [], diagnostics: [] };
+  private deliveryHarness: DeliveryHarness;
+  private coordinatorReviewDriver: CoordinatorReviewDriver;
+  private integrationQueue: IntegrationQueue;
+  private deliveryVerifier: CommandDeliveryVerifier;
+  private expectedUserBaseRevision: string;
+  private finalMeetingDelivery: MeetingDelivery | null = null;
+  private finalMeetingDecision: FinalMeetingDecision | null = null;
+  private finalDeliveryBuild?: Promise<MeetingDelivery | null>;
   private workspaceManager: TaskWorkspaceManager;
+  private customWorkspaceManager: boolean;
   private diagnostics: DiagnosticLogger;
   private resumeBackendSessions: Record<string, BackendSessionSnapshot>;
   private recoveredTasks: Array<Record<string, unknown>>;
+  private recoveredPlanVersion: number;
   private saveMemoryCallsThisSession = 0;
   private autoOrchestration = false;
   private pendingPlan: PlanMeetingTask[] | null = null;
+  /** True while the Coordinator host is mid-turn. A briefing queued during a live
+   *  turn is only read by the *next* turn, so the turn already in flight must not
+   *  be charged against the review stall budget. */
+  private coordinatorTurnActive = false;
+  /** Reviews whose briefing landed mid-turn; they skip exactly one turn boundary. */
+  private reviewsAwaitingFirstTurn = new Set<string>();
+  private reviewStallTimer: ReturnType<typeof setInterval> | null = null;
+  private readonly reviewStallTimeoutMs: number;
   // Active end-of-meeting recap, if any. Tracked so `interrupt()` can reach
   // into a closed orchestrator and abort the recap pass (B4) — otherwise
   // the user pressing the interrupt button after `end()` was a no-op while
@@ -148,6 +249,7 @@ export class Orchestrator implements OrchestratorBridge {
   // in end().
   private decisions: DecisionWatcher = new DecisionWatcher();
   private decisionMeta: Map<string, { question: string; path: string }> = new Map();
+  private resolvedDecisionContext = new Map<string, { id: string; summary: string }>();
 
   // Cross-host messaging bus. Each HostGroup subscribes on creation; the
   // orchestrator publishes when cross-host events occur (file writes, decision
@@ -195,10 +297,98 @@ export class Orchestrator implements OrchestratorBridge {
     this.meetingId = opts.meetingId ?? randomUUID();
     this.resumeBackendSessions = opts.resumeBackendSessions ?? {};
     this.recoveredTasks = opts.recoveredTasks ?? [];
+    this.recoveredPlanVersion = Number.isSafeInteger(opts.recoveredPlanVersion)
+      && (opts.recoveredPlanVersion ?? 0) >= 0
+      ? opts.recoveredPlanVersion!
+      : 0;
     this.repository = new MeetingRepository(this.meetingId, opts.recoverySeq);
-    this.workspaceManager = new TaskWorkspaceManager(this.meetingId, this.cwd);
+    this.taskMailbox = new TaskMailbox(this.repository);
+    this.customWorkspaceManager = opts.workspaceManager !== undefined;
+    this.workspaceManager = opts.workspaceManager
+      ?? new TaskWorkspaceManager(this.meetingId, this.cwd);
+    const baseline = this.workspaceManager.inspectBaseline();
+    const deliveryVerifier = new CommandDeliveryVerifier();
+    this.deliveryVerifier = deliveryVerifier;
+    this.expectedUserBaseRevision = baseline.revision;
+    this.integrationQueue = new IntegrationQueue({
+      meetingId: this.meetingId,
+      expectedUserBaseRevision: baseline.revision,
+      integrator: new GitDeliveryIntegrator(
+        this.cwd,
+        this.meetingId,
+        path.join(homedir(), '.ahastation', 'integration-worktrees'),
+      ),
+      verify: (view, candidate, workspace) => deliveryVerifier.verify({
+        deliveryId: view.id,
+        ...(view.spec.taskId ? { taskId: view.spec.taskId } : {}),
+        attempt: candidate.attempt,
+        meetingId: view.meetingId,
+        goal: view.spec.objective,
+        acceptanceCriteria: structuredClone(view.spec.acceptanceCriteria),
+        workspace,
+        sourceRevision: view.sourceRevision,
+      }, candidate.report),
+      append: async (type, payload) => {
+        const record = payload as {
+          taskId?: string;
+          attempt?: number;
+        };
+        await this.repository.appendTaskEvent(type, {
+          schemaVersion: 1,
+          taskId: record.taskId ?? 'unknown-integration-task',
+          ...(record.attempt ? { attempt: record.attempt } : {}),
+          data: payload,
+        });
+      },
+      flush: () => this.repository.flush(),
+    });
+    this.reviewStallTimeoutMs = opts.reviewStallTimeoutMs ?? 180_000;
+    this.coordinatorReviewDriver = new CoordinatorReviewDriver({
+      append: async (type, payload) => {
+        const projection = (payload as {
+          session?: { taskId?: string; deliveryId?: string; attempt?: number };
+        }).session;
+        await this.repository.appendTaskEvent(type, {
+          schemaVersion: 1,
+          taskId: projection?.taskId ?? projection?.deliveryId ?? 'unknown-delivery',
+          ...(projection?.attempt ? { attempt: projection.attempt } : {}),
+          data: payload,
+        });
+      },
+      flush: () => this.repository.flush(),
+      notifyCoordinator: (briefing) => this.notifyCoordinatorReview(briefing),
+      onCompleted: async (session) => {
+        await this.deliveryHarness.completeCoordinatorReview(session.deliveryId, session);
+      },
+      onReworkRequested: async (session) => {
+        await this.meetingScheduler.requestCoordinatorRework(session.deliveryId, session);
+      },
+      onPaused: (session) => this.escalateStalledReview(session),
+    });
+    for (const session of opts.recoveredReviewSessions ?? []) {
+      try {
+        this.coordinatorReviewDriver.restore(session);
+      } catch {
+        // A malformed review projection is never made authoritative.
+      }
+    }
+    this.deliveryHarness = new DeliveryHarness({
+      executionMode: 'external',
+      verifier: deliveryVerifier,
+      reviewer: new DeterministicDeliveryReviewer(),
+      candidatePreparer: {
+        prepare: (order, report, verification) =>
+          prepareFrozenDeliveryCandidate({ order, report, verification }),
+      },
+      reviewDriver: this.coordinatorReviewDriver,
+      integrator: {
+        integrate: (view, candidate) => this.integrationQueue.enqueue(view, candidate),
+      },
+    });
     this.diagnostics = new DiagnosticLogger(this.meetingId);
-    void this.repository.append(opts.meetingId ? 'meeting-recovered' : 'meeting-created', { cwd: this.cwd });
+    this.repositoryReady = this.repository
+      .append(opts.meetingId ? 'meeting-recovered' : 'meeting-created', { cwd: this.cwd })
+      .then(() => undefined, () => undefined);
     this.sessionFactory = opts.sessionFactory ?? Orchestrator.defaultClaudeFactory;
 
     // Create the default HostGroup. Use the user's preferred backend if specified.
@@ -209,6 +399,9 @@ export class Orchestrator implements OrchestratorBridge {
       throw new Error(`backend '${defaultBackend}' cannot coordinate`);
     }
     this.createHostGroup(DEFAULT_HOST_ID, defaultBackend);
+    if (this.recoveredTasks.length > 0) {
+      this.meetingScheduler.restoreTasks(this.recoveredTasks);
+    }
 
     Orchestrator.liveInstances.add(this);
     Orchestrator.ensureShutdownHook();
@@ -235,7 +428,7 @@ export class Orchestrator implements OrchestratorBridge {
     // Wrap the adapter's createSession to accept ClaudeSession-shaped opts,
     // translating the fields that differ between the two interfaces.
     return (opts) => {
-      const so = opts.sessionOptions ?? {};
+      const so = (opts.sessionOptions ?? {}) as Record<string, unknown>;
       let systemPrompt: string | undefined;
       if (typeof so.systemPrompt === 'string') {
         systemPrompt = so.systemPrompt;
@@ -243,10 +436,7 @@ export class Orchestrator implements OrchestratorBridge {
         systemPrompt = (so.systemPrompt as { append?: string }).append;
       }
       if (backendId === 'codex') {
-        systemPrompt = `${systemPrompt ?? ''}\n\n## AhaStation command protocol\n`
-          + 'When you need to coordinate, emit exactly one fenced JSON block using ```meeting-command. '
-          + 'Supported kinds are propose-plan, ask-host, broadcast-hosts, steer-worker, and speak. '
-          + 'Do not claim a command succeeded until the application returns its result.';
+        systemPrompt = `${systemPrompt ?? ''}${PORTABLE_MEETING_COMMAND_PROMPT}`;
       }
       const authEntry = getBackendAuth(backendId);
       const auth = authEntry
@@ -266,17 +456,30 @@ export class Orchestrator implements OrchestratorBridge {
         backendBaseEnv.USERPROFILE = homedir();
       }
       const env = backend.buildEnv(auth, backendBaseEnv);
-      const requestedModel = typeof so.model === 'string' ? so.model : undefined;
-      const model = backendId === 'claude-code'
-        ? (auth.model ?? requestedModel ?? backend.capabilities.defaultModel)
-        : requestedModel?.startsWith('claude-')
-          ? (auth.model ?? backend.capabilities.defaultModel)
-          : (auth.model ?? requestedModel ?? backend.capabilities.defaultModel);
+      const parsedTaskProfile = backendEffectiveProfileSchema.safeParse(so.taskProfile);
+      const taskProfile = parsedTaskProfile.success ? parsedTaskProfile.data : undefined;
+      const {
+        taskProfile: _taskProfile,
+        resumeSessionId,
+        ...backendExtra
+      } = so;
+      const requestedModel = taskProfile?.model
+        ?? (typeof so.model === 'string' ? so.model : undefined);
+      const model = taskProfile
+        ? taskProfile.model
+        : backendId === 'codex'
+          ? (auth.model ?? requestedModel)
+          : backendId === 'claude-code'
+            ? (auth.model ?? requestedModel ?? backend.capabilities.defaultModel)
+            : requestedModel?.startsWith('claude-')
+              ? (auth.model ?? backend.capabilities.defaultModel)
+              : (auth.model ?? requestedModel ?? backend.capabilities.defaultModel);
       return backend.createSession(
         {
           cwd: opts.cwd,
           systemPrompt,
           model,
+          taskProfile,
           env,
           mcpServers: so.mcpServers as Record<string, unknown> | undefined,
           skills: Array.isArray(so.skills) ? so.skills : undefined,
@@ -286,10 +489,12 @@ export class Orchestrator implements OrchestratorBridge {
           meetingId: this.meetingId,
           resumeSessionId: purpose === 'host'
             ? this.resumeBackendSessions[actorHostId]?.sessionId
-            : undefined,
+            : typeof resumeSessionId === 'string'
+              ? resumeSessionId
+              : undefined,
           executionRole: purpose,
           extra: {
-            ...so,
+            ...backendExtra,
             ...(backendId === 'codex' ? { codexTransport: 'app-server' } : {}),
             // Kimi: ACP mode only understands device-code OAuth — it ignores
             // API keys entirely. When an apiKey is configured, fall back to
@@ -332,9 +537,58 @@ export class Orchestrator implements OrchestratorBridge {
       isClosed: () => this.closed,
       getSpeechFilterMode: () => (getSettings().speechFilterMode === 'off' ? 'off' : 'strict'),
       isCoordinator: () => this.coordinatorHostId === id,
-      workspaceManager: id === DEFAULT_HOST_ID && this.sessionFactory === Orchestrator.defaultClaudeFactory
+      workspaceManager: id === DEFAULT_HOST_ID && (
+        this.sessionFactory === Orchestrator.defaultClaudeFactory
+        || this.customWorkspaceManager
+      )
         ? this.workspaceManager
         : undefined,
+      meetingId: this.meetingId,
+      deliveryHarness: this.deliveryHarness,
+      deliveryArtifactRoot: this.repository.deliveryArtifactRoot(),
+      flushEvents: () => this.repository.flush(),
+      getIntegrationHead: () => this.integrationQueue.currentHead(),
+      initialPlanVersion: id === DEFAULT_HOST_ID ? this.recoveredPlanVersion : 0,
+      getAuthorizedTaskContextSource: (taskId, selection) =>
+        this.getAuthorizedTaskContextSource(taskId, selection),
+      persistContextPackage: (contextPackage) =>
+        this.persistContextPackage(contextPackage),
+      compileTaskProfile: this.sessionFactory === Orchestrator.defaultClaudeFactory
+        ? (requestedProfile) => this.compileTaskProfile(requestedProfile)
+        : undefined,
+      persistTaskProfile: this.sessionFactory === Orchestrator.defaultClaudeFactory
+        ? (input) => this.persistTaskProfile(input)
+        : undefined,
+      taskProfileCompilerRequired: this.sessionFactory === Orchestrator.defaultClaudeFactory,
+      compileTaskAuthority: this.sessionFactory === Orchestrator.defaultClaudeFactory
+        ? (input) => compileTaskAuthority(
+            input.taskId,
+            input.attempt,
+            input.planVersion,
+            input.approvalDecisionId,
+            input.workspaceRoot,
+            input.authorityRequest,
+            input.approvedAt,
+          )
+        : undefined,
+      persistTaskAuthority: this.sessionFactory === Orchestrator.defaultClaudeFactory
+        ? (input) => this.persistTaskAuthority(input)
+        : undefined,
+      normalizePermissionRequest: this.sessionFactory === Orchestrator.defaultClaudeFactory
+        ? (backendId, native) => {
+            const backend = getBackendRegistry().get(backendId);
+            return backend?.normalizePermissionRequest?.(native) ?? {
+              ok: false as const,
+              diagnostic: 'unsupported-native-tool' as const,
+              requiresUser: true as const,
+            };
+          }
+        : undefined,
+      persistPermissionDecision: this.sessionFactory === Orchestrator.defaultClaudeFactory
+        ? (input) => this.persistPermissionDecision(input)
+        : undefined,
+      taskAuthorityCompilerRequired: this.sessionFactory === Orchestrator.defaultClaudeFactory,
+      taskMailbox: this.taskMailbox,
     });
     this.hostGroups.set(id, hg);
     if (id === DEFAULT_HOST_ID) {
@@ -358,6 +612,9 @@ export class Orchestrator implements OrchestratorBridge {
    *  a "Connecting…" placeholder until the session-ready event arrives. */
   addHost(backendId: string, hostId?: string): { ok: true; hostId: string } | { ok: false; error: string } {
     if (this.closed) return { ok: false, error: 'orchestrator is closed' };
+    if (this.hostGroups.size >= MAX_HOSTS) {
+      return { ok: false, error: `host capacity reached (${MAX_HOSTS}/${MAX_HOSTS})` };
+    }
     if (hostId && !/^[a-zA-Z0-9._-]{1,64}$/.test(hostId)) {
       return { ok: false, error: 'hostId must be alphanumeric with dots/hyphens/underscores, max 64 chars' };
     }
@@ -469,6 +726,9 @@ export class Orchestrator implements OrchestratorBridge {
       + 'Do not schedule or speak for the meeting; answer only direct mentions or coordinator requests.',
       'high',
     );
+    // The incoming Coordinator inherits any review the previous one abandoned.
+    this.coordinatorTurnActive = false;
+    this.resumeDisconnectedReviews();
     return { ok: true, coordinatorHostId: hostId };
   }
 
@@ -491,7 +751,7 @@ export class Orchestrator implements OrchestratorBridge {
     const authorized = authorizeMeetingCommand(raw, {
       hostId,
       role: hostId === this.coordinatorHostId ? 'coordinator' : 'expert',
-    });
+    }, { defaultBackendId: this.defaultHost().backendId });
     if (!authorized.ok) return authorized;
     const command = authorized.command;
     try {
@@ -500,6 +760,32 @@ export class Orchestrator implements OrchestratorBridge {
           const result = await this.proposePlan(command.tasks);
           return result.ok
             ? { ok: true, value: { tasks: command.tasks.length } }
+            : { ok: false, code: 'execution-failed', error: result.error };
+        }
+        case 'revise-plan': {
+          const addedTasks = command.operations.flatMap((operation) =>
+            operation.kind === 'add-task' ? [operation.task] : [],
+          );
+          const backendError = await this.validateExecutionBackends(addedTasks);
+          if (backendError) {
+            return { ok: false, code: 'execution-failed', error: backendError };
+          }
+          const result = await this.meetingScheduler.revisePlan(
+            command.expectedPlanVersion,
+            command.operations,
+          );
+          if (result.ok) {
+            await this.repository.append('plan-revised-by-coordinator', {
+              reason: command.reason,
+              expectedPlanVersion: command.expectedPlanVersion,
+              planVersion: result.planVersion,
+              operations: command.operations,
+            });
+            await this.repository.flush();
+            await this.snapshotActiveMeeting();
+          }
+          return result.ok
+            ? { ok: true, value: { planVersion: result.planVersion } }
             : { ok: false, code: 'execution-failed', error: result.error };
         }
         case 'ask-host': {
@@ -513,8 +799,55 @@ export class Orchestrator implements OrchestratorBridge {
           return { ok: true };
         }
         case 'steer-worker': {
-          const result = this.steerWorker(command.workerId, command.addendum);
+          const result = await this.steerWorker(command.workerId, command.addendum);
           return result.ok ? { ok: true, value: result } : { ok: false, code: 'execution-failed', error: result.reason };
+        }
+        case 'send-task-message': {
+          const message = await this.meetingScheduler.sendTaskMessage(command.taskId, command.message);
+          return { ok: true, value: { messageId: message.id, status: message.status } };
+        }
+        case 'follow-up-task': {
+          const message = await this.meetingScheduler.queueFollowUp(command.taskId, command.message);
+          return { ok: true, value: { messageId: message.id, status: message.status } };
+        }
+        case 'steer-task': {
+          const result = await this.meetingScheduler.steerTask(command.taskId, command.message);
+          return result.ok
+            ? { ok: true, value: result }
+            : { ok: false, code: 'execution-failed', error: result.reason };
+        }
+        case 'interrupt-task': {
+          const result = await this.meetingScheduler.interruptTask(command.taskId, command.reason);
+          return result.ok
+            ? { ok: true, value: { messageId: result.message.id } }
+            : { ok: false, code: 'execution-failed', error: result.error };
+        }
+        case 'forward-task-message': {
+          const message = await this.meetingScheduler.forwardTaskMessage(
+            command.fromTaskId,
+            command.toTaskId,
+            command.messageId,
+          );
+          return { ok: true, value: { messageId: message.id, status: message.status } };
+        }
+        case 'request-decision': {
+          const result = await this.createDecision({
+            question: command.question,
+            context: command.context,
+            options: command.options,
+            deadline: command.deadlineMs,
+          });
+          return { ok: true, value: result };
+        }
+        case 'save-memory': {
+          const result = await this.saveMemory({
+            category: command.category,
+            content: command.content,
+            tags: command.tags,
+          });
+          return result.ok
+            ? { ok: true, value: result }
+            : { ok: false, code: 'execution-failed', error: result.error ?? 'memory save failed' };
         }
         case 'speak':
           this.narrateAssistantLine(command.text);
@@ -553,6 +886,19 @@ export class Orchestrator implements OrchestratorBridge {
     if (
       hostId === this.coordinatorHostId
       && e.source === 'talker'
+      && e.event.kind === 'message'
+    ) {
+      const messageType = (e.event.message as { type?: unknown } | undefined)?.type;
+      if (messageType === 'result') {
+        this.coordinatorTurnActive = false;
+        void this.driveCoordinatorReviews();
+      } else if (messageType === 'assistant' || messageType === 'user') {
+        this.coordinatorTurnActive = true;
+      }
+    }
+    if (
+      hostId === this.coordinatorHostId
+      && e.source === 'talker'
       && e.event.kind === 'ended'
       && !this.closed
     ) {
@@ -576,6 +922,7 @@ export class Orchestrator implements OrchestratorBridge {
     try {
       await hg.start();
       this.safeEmit({ source: 'system', hostId, event: { kind: 'session-ready' } });
+      if (hostId === this.coordinatorHostId) this.resumeDisconnectedReviews();
       return { ok: true };
     } catch (err) {
       this.diagnostics.log('host-restart-failed', {
@@ -598,25 +945,89 @@ export class Orchestrator implements OrchestratorBridge {
   }
 
   private safeEmit(e: OrchestratorEvent) {
-    if (this.closed) return;
+    if (this.closed || this.repository.isWriteFaulted()) return;
     // Ensure hostId is always present; default to 'default' when absent.
     if (!e.hostId) e = { ...e, hostId: DEFAULT_HOST_ID };
-    void this.repository.append(`event:${e.event.kind}`, e);
-    if (
+    const append = this.repository.append(`event:${e.event.kind}`, e);
+    const shouldSnapshot = (
       e.event.kind === 'plan-updated'
       || e.event.kind === 'worker-spawned'
       || e.event.kind === 'worker-ended'
       || e.event.kind === 'coordinator-failed'
-    ) {
-      void this.snapshotActiveMeeting();
-    }
-    this.emit(e);
+      || e.event.kind === 'worker-event'
+      || e.event.kind === 'delivery-status'
+      || e.event.kind === 'worker-delivery'
+      || e.event.kind === 'meeting-delivery-updated'
+    );
+    // Every renderer-visible orchestration event is emitted only after its
+    // journal line is durable. If one write fails, MeetingRepository faults
+    // permanently and later live notifications are suppressed.
+    void append.then(() => {
+      if (this.closed || this.repository.isWriteFaulted()) return;
+      this.emit(e);
+      if (shouldSnapshot) {
+        void this.snapshotActiveMeeting().catch((error) => {
+          console.error('[orchestrator] rebuildable Meeting snapshot write failed', {
+            kind: e.event.kind,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        });
+      }
+      if (
+        e.event.kind === 'delivery-status'
+        && e.event.delivery.status === 'accepted'
+      ) {
+        void this.prepareFinalMeetingDelivery().catch((error) => {
+          console.error('[orchestrator] final Meeting delivery preparation failed', {
+            error: error instanceof Error ? error.message : String(error),
+          });
+        });
+      }
+    }).catch((error) => {
+      console.error('[orchestrator] event journal write failed; Meeting is fail-stopped', {
+        kind: e.event.kind,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
   }
 
   async start(greeting?: string) {
+    await this.repositoryReady;
+    this.repository.assertWritable();
+    const journal = await MeetingRepository.replay(this.meetingId);
+    this.integrationQueue.restore(journal);
+    const interruptedIntegration = await this.integrationQueue.detectInterruptedOperation();
+    if (interruptedIntegration) {
+      const integrationTaskId = this.integrationQueue.snapshot().activeTaskId;
+      const recovered = this.recoveredTasks.find((task) => task.id === integrationTaskId);
+      if (recovered) {
+        recovered.status = 'integration-conflict';
+        recovered.recovery = assessTaskRecovery(recovered);
+        this.meetingScheduler.markRecoveredIntegrationConflict(String(integrationTaskId));
+      }
+    }
+    this.restoreFinalMeetingDelivery(journal);
+    await this.reconcileInterruptedFinalAcceptance(journal);
+    this.taskMailbox.restore(journal);
+    this.taskProjection = projectMeetingTasks(journal);
     await this.defaultHost().start(greeting);
     if (this.recoveredTasks.length > 0) {
-      this.emitRecoveredPlan();
+      this.meetingScheduler.emitRecoveredState();
+      await this.autoResumeRecoveredReadOnlyTasks();
+    }
+    if (this.finalMeetingDelivery || this.finalMeetingDecision) {
+      this.safeEmit({
+        source: 'system',
+        event: {
+          kind: 'meeting-delivery-updated',
+          delivery: this.finalMeetingDelivery
+            ? structuredClone(this.finalMeetingDelivery)
+            : null,
+          decision: this.finalMeetingDecision
+            ? structuredClone(this.finalMeetingDecision)
+            : null,
+        },
+      });
     }
     // Persist the native backend handle before the renderer is told the Host
     // is ready. A crash after readiness can then recover the exact thread.
@@ -625,46 +1036,136 @@ export class Orchestrator implements OrchestratorBridge {
 
   async resolveRecoveredTask(
     taskId: string,
-    action: 'continue' | 'retry' | 'complete' | 'abandon',
+    action: TaskRecoveryAction,
+  ): Promise<{ ok: true } | { ok: false; error: string }> {
+    return this.resolveRecoveredTaskWithActor(taskId, action, 'user');
+  }
+
+  private async autoResumeRecoveredReadOnlyTasks(): Promise<void> {
+    const candidates = this.recoveredTasks
+      .filter((task) => assessTaskRecovery(task).autoResume)
+      .map((task) => String(task.id ?? ''))
+      .filter(Boolean);
+    for (const taskId of candidates) {
+      const result = await this.resolveRecoveredTaskWithActor(
+        taskId,
+        'continue-read-only',
+        'system-auto-read-only',
+      );
+      if (!result.ok) {
+        await this.repository.append('recovered-task-auto-resume-failed', {
+          schemaVersion: 1,
+          taskId,
+          error: result.error.slice(0, 2_000),
+        });
+      }
+    }
+  }
+
+  private async resolveRecoveredTaskWithActor(
+    taskId: string,
+    action: TaskRecoveryAction,
+    actor: 'user' | 'system-auto-read-only',
   ): Promise<{ ok: true } | { ok: false; error: string }> {
     const index = this.recoveredTasks.findIndex((task) => task.id === taskId);
     if (index < 0) return { ok: false, error: 'interrupted task not found' };
     const current = this.recoveredTasks[index];
-    if (current.status !== 'interrupted' && current.status !== 'running') {
+    if (
+      current.status !== 'interrupted'
+      && current.status !== 'running'
+      && current.status !== 'budget-paused'
+      && current.status !== 'integration-conflict'
+    ) {
       return { ok: false, error: `task is already ${String(current.status)}` };
     }
-
-    if (action === 'complete' || action === 'abandon') {
-      this.recoveredTasks[index] = {
-        ...current,
-        status: action === 'complete' ? 'done' : 'failed',
-      };
-      await this.repository.append('recovered-task-resolved', { taskId, action });
-      this.emitRecoveredPlan();
+    let recovery;
+    try {
+      recovery = assertRecoveryActionAllowed(current, action);
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+    if (actor === 'system-auto-read-only' && !recovery.autoResume) {
+      return { ok: false, error: 'only explicit read-only tasks may auto-resume' };
+    }
+    if (actor !== 'user' && action !== 'continue-read-only') {
+      return { ok: false, error: 'side-effecting recovery requires a user decision' };
+    }
+    if (action === 'resolve-integration-conflict') {
+      const resolution = await this.integrationQueue.resolveInterruptedOperation(taskId);
+      if (!resolution.ok) return resolution;
+      await this.repository.append('recovered-integration-conflict-resolved', {
+        schemaVersion: 1,
+        taskId,
+        action,
+        actor,
+        recovery,
+      });
+      await this.repository.flush();
+      this.recoveredTasks[index] = { ...current, status: 'interrupted' };
+      this.meetingScheduler.clearRecoveredIntegrationConflict(taskId);
       await this.snapshotActiveMeeting();
       return { ok: true };
     }
 
-    const task: PlanMeetingTask = {
+    const recoveredTask: PlanMeetingTaskInput = {
       id: String(current.id ?? ''),
       title: String(current.title ?? current.id ?? 'Recovered task'),
       prompt: String(current.prompt ?? ''),
-      // An interrupted dependency graph is not silently replayed. A user
-      // explicitly resumes each side-effecting task, so this retry is a new
-      // independent execution at the same durable task identity.
-      deps: [],
+      deps: Array.isArray(current.deps) ? current.deps.map(String) : [],
       executorBackendId: typeof current.executorBackendId === 'string'
         ? current.executorBackendId
         : undefined,
       writePaths: Array.isArray(current.writePaths) ? current.writePaths.map(String) : undefined,
+      executionProfile: current.executionProfile as PlanMeetingTaskInput['executionProfile'],
+      contextSelection: current.contextSelection as PlanMeetingTaskInput['contextSelection'],
+      workspaceMode: current.workspaceMode as PlanMeetingTaskInput['workspaceMode'],
+      authorityRequest: current.authorityRequest as PlanMeetingTaskInput['authorityRequest'],
+      budget: current.budget as PlanMeetingTaskInput['budget'],
+      acceptanceCriteria: Array.isArray(current.acceptanceCriteria)
+        ? current.acceptanceCriteria
+        : undefined,
+      requiresDecision: typeof current.requiresDecision === 'boolean'
+        ? current.requiresDecision
+        : undefined,
     };
+    let task: PlanMeetingTask;
+    try {
+      task = normalizePlanMeetingTasks([recoveredTask], this.defaultHost().backendId).tasks[0];
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
     if (!task.id || !task.prompt) return { ok: false, error: 'recovered task is missing its id or prompt' };
-    const backendError = this.validateExecutionBackends([task]);
-    if (backendError) return { ok: false, error: backendError };
-    const result = this.meetingScheduler.installPlan([task]);
+    if (action !== 'abandon-task') {
+      const backendError = await this.validateExecutionBackends([task]);
+      if (backendError) return { ok: false, error: backendError };
+    }
+    // Persist and fsync the exact user/automatic authorization before any
+    // Backend prompt can be sent by Scheduler.spawnReadyWorkers().
+    await this.repository.append('recovered-task-resolution-authorized', {
+      schemaVersion: 1,
+      taskId,
+      action,
+      actor,
+      recovery,
+      attempt: typeof current.attempt === 'number' ? current.attempt : 1,
+    });
+    await this.repository.flush();
+    const result = await this.meetingScheduler.resolveRecoveredTask(
+      taskId,
+      action as Exclude<TaskRecoveryAction, 'resolve-integration-conflict'>,
+    );
     if (!result.ok) return result;
-    this.recoveredTasks.splice(index, 1);
-    await this.repository.append('recovered-task-resolved', { taskId, action });
+    if (action === 'abandon-task') {
+      this.recoveredTasks[index] = { ...current, status: 'failed' };
+    } else {
+      this.recoveredTasks.splice(index, 1);
+    }
+    await this.repository.append('recovered-task-resolved', {
+      schemaVersion: 1,
+      taskId,
+      action,
+      actor,
+    });
     await this.snapshotActiveMeeting();
     return { ok: true };
   }
@@ -676,7 +1177,13 @@ export class Orchestrator implements OrchestratorBridge {
       status: task.status === 'running' ? 'interrupted' : task.status,
       deps: Array.isArray(task.deps) ? task.deps.map(String) : [],
     })).filter((node) => node.id) as MeetingPlanNode[];
-    this.safeEmit({ source: 'system', event: { kind: 'plan-updated', plan: { nodes } } });
+    this.safeEmit({
+      source: 'system',
+      event: {
+        kind: 'plan-updated',
+        plan: { version: this.meetingScheduler.getPlanVersion(), nodes },
+      },
+    });
   }
 
   private snapshotActiveMeeting(): Promise<void> {
@@ -687,7 +1194,36 @@ export class Orchestrator implements OrchestratorBridge {
       coordinatorHostId: this.coordinatorHostId,
       hosts: this.listHosts(),
       tasks: liveTasks.length > 0 ? liveTasks : this.recoveredTasks,
+      taskMailboxes: (liveTasks.length > 0 ? liveTasks : this.recoveredTasks)
+        .map((task) => {
+          const taskId = String(task.id ?? '');
+          const messages = taskId ? this.taskMailbox.list(taskId) : [];
+          return {
+            taskId,
+            cursor: messages.at(-1)?.seq ?? 0,
+            pending: messages
+              .filter((message) => message.status !== 'acknowledged')
+              .slice(-500)
+              .map((message) => ({
+                id: message.id,
+                seq: message.seq,
+                attempt: message.attempt,
+                kind: message.kind,
+                status: message.status,
+              })),
+          };
+        })
+        .filter((mailbox) => mailbox.taskId),
+      reviewSessions: this.coordinatorReviewDriver.snapshot(),
+      integrationQueue: this.integrationQueue.snapshot(),
+      planVersion: this.meetingScheduler.getPlanVersion(),
       autoOrchestration: this.autoOrchestration,
+      finalMeetingDelivery: this.finalMeetingDelivery
+        ? structuredClone(this.finalMeetingDelivery)
+        : null,
+      finalMeetingDecision: this.finalMeetingDecision
+        ? structuredClone(this.finalMeetingDecision)
+        : null,
     });
   }
 
@@ -747,6 +1283,10 @@ export class Orchestrator implements OrchestratorBridge {
    *  it to acquire the shared server for a meeting tab). */
   getMeetingId(): string {
     return this.meetingId;
+  }
+
+  getDeliveryArtifactRoot(): string {
+    return this.repository.deliveryArtifactRoot();
   }
 
   async interrupt() {
@@ -822,6 +1362,7 @@ export class Orchestrator implements OrchestratorBridge {
     }
 
     this.closed = true;
+    this.stopReviewStallWatchdog();
 
     // End all host groups — wrap in try/finally so cleanup always runs.
     const errors: unknown[] = [];
@@ -855,22 +1396,90 @@ export class Orchestrator implements OrchestratorBridge {
   }
 
   /** Manual entry point: renderer-side "Plan meeting" button. */
-  async installPlan(tasks: PlanMeetingTask[]): Promise<{ ok: true } | { ok: false; error: string }> {
-    const backendError = this.validateExecutionBackends(tasks);
+  async installPlan(tasks: PlanMeetingTaskInput[]): Promise<{ ok: true } | { ok: false; error: string }> {
+    let normalized: PlanMeetingTask[];
+    try {
+      normalized = normalizePlanMeetingTasks(tasks, this.defaultHost().backendId).tasks;
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+    const backendError = await this.validateExecutionBackends(normalized);
     if (backendError) return { ok: false, error: backendError };
-    return this.meetingScheduler.installPlan(tasks);
+    return this.installApprovedPlan(normalized, 'manual-install');
   }
 
-  async proposePlan(tasks: PlanMeetingTask[]): Promise<{ ok: true } | { ok: false; error: string }> {
-    const backendError = this.validateExecutionBackends(tasks);
+  /** Internal Task 9 seam; renderer and Backends never receive the repository
+   * or mutate mailbox state directly. */
+  getTaskMailbox(): TaskMailbox {
+    return this.taskMailbox;
+  }
+
+  getTaskProjection(): TaskProjectionResult {
+    return {
+      tasks: structuredClone(this.taskProjection.tasks),
+      diagnostics: structuredClone(this.taskProjection.diagnostics),
+    };
+  }
+
+  /** Main-process Task IPC source. It intentionally returns internal records
+   * only to the privileged IPC projector; the renderer receives a redacted
+   * task view from electron/ipc/tasks.ts. */
+  async getTaskInspectorSource(taskId: string): Promise<{
+    meetingId: string;
+    task: ReturnType<WorkerScheduler['snapshot']>[number];
+    record: TaskProjectionResult['tasks'][number] | null;
+    diagnostics: TaskProjectionResult['diagnostics'];
+    mailbox: TaskMessage[];
+    events: PersistedMeetingEvent[];
+  } | null> {
+    await this.repositoryReady;
+    const task = this.meetingScheduler.snapshot().find((entry) => entry.id === taskId);
+    if (!task) return null;
+    const events = await this.repository.replayAll();
+    const durableProjection = projectMeetingTasks(events);
+    return {
+      meetingId: this.meetingId,
+      task: structuredClone(task),
+      record: structuredClone(
+        durableProjection.tasks.find((entry) => entry.id === taskId) ?? null,
+      ),
+      diagnostics: structuredClone(
+        durableProjection.diagnostics.filter(
+          (entry) => entry.taskId === undefined || entry.taskId === taskId,
+        ),
+      ),
+      mailbox: this.taskMailbox.list(taskId),
+      events,
+    };
+  }
+
+  async replayMeetingJournal(): Promise<PersistedMeetingEvent[]> {
+    await this.repositoryReady;
+    return this.repository.replayAll();
+  }
+
+  subscribeMeetingJournal(
+    listener: (event: PersistedMeetingEvent) => void,
+  ): () => void {
+    return this.repository.subscribe(listener);
+  }
+
+  async proposePlan(tasks: PlanMeetingTaskInput[]): Promise<{ ok: true } | { ok: false; error: string }> {
+    let normalized: PlanMeetingTask[];
+    try {
+      normalized = normalizePlanMeetingTasks(tasks, this.defaultHost().backendId).tasks;
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+    const backendError = await this.validateExecutionBackends(normalized);
     if (backendError) return { ok: false, error: backendError };
     if (!this.autoOrchestration) {
-      this.pendingPlan = tasks.map((task) => ({ ...task, deps: [...(task.deps ?? [])] }));
+      this.pendingPlan = normalized.map((task) => ({ ...task, deps: [...(task.deps ?? [])] }));
       this.safeEmit({ source: 'system', event: { kind: 'plan-proposed', tasks: this.pendingPlan } });
       void this.repository.append('plan-proposed', { tasks: this.pendingPlan });
       return { ok: true };
     }
-    return this.meetingScheduler.installPlan(tasks);
+    return this.installApprovedPlan(normalized, 'auto-orchestration');
   }
 
   setAutoOrchestration(enabled: boolean): void {
@@ -878,22 +1487,87 @@ export class Orchestrator implements OrchestratorBridge {
     void this.repository.append('orchestration-mode-changed', { enabled });
   }
 
-  approvePendingPlan(approved: boolean): { ok: true } | { ok: false; error: string } {
-    const tasks = this.pendingPlan;
+  async approvePendingPlan(
+    approved: boolean,
+    revisedTasks?: PlanMeetingTaskInput[],
+  ): Promise<{ ok: true } | { ok: false; error: string }> {
+    let tasks: PlanMeetingTask[] | null = this.pendingPlan;
+    if (revisedTasks) {
+      try {
+        tasks = normalizePlanMeetingTasks(revisedTasks, this.defaultHost().backendId).tasks;
+      } catch (error) {
+        return { ok: false, error: error instanceof Error ? error.message : String(error) };
+      }
+      const backendError = await this.validateExecutionBackends(tasks);
+      if (backendError) return { ok: false, error: backendError };
+    }
     this.pendingPlan = null;
     if (!tasks) return { ok: false, error: 'no pending plan' };
     if (!approved) return { ok: true };
-    return this.meetingScheduler.installPlan(tasks);
+    return this.installApprovedPlan(tasks, 'plan-meeting-confirmation');
   }
 
-  private validateExecutionBackends(tasks: PlanMeetingTask[]): string | null {
+  private async installApprovedPlan(
+    tasks: PlanMeetingTask[],
+    source: 'manual-install' | 'auto-orchestration' | 'plan-meeting-confirmation',
+  ): Promise<{ ok: true } | { ok: false; error: string }> {
+    const decisionId = randomUUID();
+    const approvedAt = Date.now();
+    await this.repository.append('plan-authority-approved', {
+      decisionId,
+      approvedAt,
+      source,
+      planVersion: this.meetingScheduler.getPlanVersion() + 1,
+      tasks: tasks.map((task) => ({
+        taskId: task.id,
+        authorityRequestHash: hashTaskAuthorityRequest(task.authorityRequest),
+      })),
+    });
+    await this.repository.flush();
+    return this.meetingScheduler.installPlan(tasks, { decisionId, approvedAt });
+  }
+
+  private async validateExecutionBackends(tasks: PlanMeetingTask[]): Promise<string | null> {
     const defaultBackendId = this.defaultHost().backendId;
+    const checked = new Set<string>();
     for (const task of tasks) {
       const backendId = task.executorBackendId ?? defaultBackendId;
       const backend = getBackendRegistry().get(backendId);
       if (!backend) return `backend '${backendId}' is not registered`;
       if (!backend.capabilities.executeTasks) {
         return `backend '${backendId}' cannot execute delivery tasks`;
+      }
+      if (!backend.compileTaskProfile) {
+        return `backend '${backendId}' does not compile task profiles`;
+      }
+      if (!backend.normalizePermissionRequest) {
+        return `backend '${backendId}' does not normalize permission requests`;
+      }
+      if (checked.has(backendId)) continue;
+      checked.add(backendId);
+      // Unit/integration tests inject a controlled SessionFactory. Production
+      // plans must additionally pass the exact runtime/auth gate before any
+      // task is installed into the global Scheduler.
+      if (this.sessionFactory !== Orchestrator.defaultClaudeFactory) continue;
+      const authEntry = getBackendAuth(backendId);
+      const auth = authEntry
+        ? {
+            authMode: authEntry.authMode,
+            apiKey: authEntry.apiKey,
+            baseUrl: authEntry.baseUrl,
+            model: authEntry.model,
+          }
+        : { authMode: 'none' as const };
+      const probe = await getBackendRegistry().probe(backendId, auth);
+      const assessment = assessWorkerRuntime({
+        backendId,
+        installed: probe.installed,
+        implementationEnabled: backend.capabilities.executeTasks,
+        authenticated: probe.auth !== 'required',
+        version: probeWorkerRuntimeVersion(backendId, probe.runtimePath),
+      });
+      if (assessment.state !== 'available') {
+        return `backend '${backendId}' is unavailable: ${assessment.reason}`;
       }
     }
     return null;
@@ -915,9 +1589,117 @@ export class Orchestrator implements OrchestratorBridge {
     return this.meetingScheduler.delegateSingleTask(description);
   }
 
-  steerWorker(workerId: string, addendum: string): SteerResult {
+  steerWorker(workerId: string, addendum: string): Promise<SteerResult> {
     // Search across all host groups — worker IDs are unique.
     return this.meetingScheduler.steerWorker(workerId, addendum);
+  }
+
+  async sendTaskMessage(taskId: string, message: string): Promise<{ id: string; status: string }> {
+    const queued = await this.meetingScheduler.sendTaskMessage(taskId, message);
+    return { id: queued.id, status: queued.status };
+  }
+
+  async queueTaskFollowUp(taskId: string, message: string): Promise<{ id: string; status: string }> {
+    const queued = await this.meetingScheduler.queueFollowUp(taskId, message);
+    return { id: queued.id, status: queued.status };
+  }
+
+  async extendTaskBudget(
+    taskId: string,
+    expectedPlanVersion: number,
+    rawBudget: TaskBudget,
+  ): Promise<{ planVersion: number; budget: TaskBudget }> {
+    const budget = taskBudgetSchema.parse(rawBudget);
+    if (expectedPlanVersion !== this.meetingScheduler.getPlanVersion()) {
+      throw new Error(
+        `stale plan version: expected ${expectedPlanVersion}, current ${this.meetingScheduler.getPlanVersion()}`,
+      );
+    }
+    const task = this.meetingScheduler.snapshot().find((entry) => entry.id === taskId);
+    if (!task) throw new Error(`unknown task: ${taskId}`);
+    if (task.status !== 'budget-paused' || !task.budget) {
+      throw new Error(`task ${taskId} is not paused by its budget`);
+    }
+    const keys = [
+      'maxAttempts',
+      'maxTotalTokens',
+      'maxTotalDurationMs',
+      'maxStagnantAttempts',
+    ] as const;
+    if (keys.some((key) => budget[key] < task.budget![key])) {
+      throw new Error('a budget extension cannot reduce an approved limit');
+    }
+    if (keys.every((key) => budget[key] === task.budget![key])) {
+      throw new Error('a budget extension must increase at least one limit');
+    }
+    const decisionId = `budget-${randomUUID()}`;
+    await this.repository.appendTaskEvent('task-budget-extension-approved', {
+      schemaVersion: 1,
+      taskId,
+      attempt: task.attempt,
+      data: {
+        schemaVersion: 1,
+        decisionId,
+        expectedPlanVersion,
+        previousBudget: structuredClone(task.budget),
+        budget: structuredClone(budget),
+        authorityRequestHash: task.authorityRequest
+          ? hashTaskAuthorityRequest(task.authorityRequest)
+          : null,
+        decidedAt: Date.now(),
+      },
+    });
+    await this.repository.flush();
+    const result = await this.meetingScheduler.extendTaskBudget(
+      taskId,
+      expectedPlanVersion,
+      budget,
+      decisionId,
+    );
+    await this.repository.appendTaskEvent('task-budget-extension-applied', {
+      schemaVersion: 1,
+      taskId,
+      attempt: (task.attempt ?? 1) + 1,
+      data: {
+        schemaVersion: 1,
+        decisionId,
+        planVersion: result.planVersion,
+        budget: structuredClone(result.budget),
+      },
+    });
+    await this.snapshotActiveMeeting();
+    await this.repository.flush();
+    return result;
+  }
+
+  interruptWorker(workerId: string, reason?: string): Promise<{ ok: true } | { ok: false; error: string }> {
+    return this.meetingScheduler.interruptWorker(workerId, reason);
+  }
+
+  async forwardTaskMessage(
+    fromTaskId: string,
+    toTaskId: string,
+    messageId: string,
+  ): Promise<{ id: string; status: string }> {
+    const forwarded = await this.meetingScheduler.forwardTaskMessage(
+      fromTaskId,
+      toTaskId,
+      messageId,
+    );
+    return { id: forwarded.id, status: forwarded.status };
+  }
+
+  async askCoordinator(
+    workerId: string,
+    question: string,
+    sourceAttempt?: number,
+  ): Promise<{ id: string; status: string }> {
+    const message = await this.meetingScheduler.recordWorkerQuestion(
+      workerId,
+      question,
+      sourceAttempt,
+    );
+    return { id: message.id, status: message.status };
   }
 
   hasWorker(workerId: string): boolean {
@@ -976,6 +1758,145 @@ export class Orchestrator implements OrchestratorBridge {
       remindersOk: created.reminders.ok,
       sideChannelNote,
     };
+  }
+
+  private async getAuthorizedTaskContextSource(
+    taskId: string,
+    selection: ContextSelection,
+  ): Promise<AuthorizedMeetingContextSource> {
+    const messages = Array.from(this.hostGroups.values())
+      .flatMap((host) => host.getTranscript())
+      .sort((left, right) => left.timestamp - right.timestamp || left.id.localeCompare(right.id));
+    const meetingSummary = messages
+      .slice(-40)
+      .map((message) => `${message.role === 'user' ? 'User' : 'Assistant'}: ${message.text}`)
+      .join('\n');
+    return {
+      messages,
+      meetingSummary,
+      decisions: Array.from(this.resolvedDecisionContext.values())
+        .sort((left, right) => left.id.localeCompare(right.id)),
+      dependencyReports: this.meetingScheduler.getAcceptedDependencyReports(taskId),
+      attachments: await listAuthorizedAssetReferences(this.cwd, selection.attachmentIds),
+    };
+  }
+
+  private async persistContextPackage(contextPackage: ContextPackage): Promise<void> {
+    await this.repository.appendTaskEvent('context-package-frozen', {
+      schemaVersion: 1,
+      taskId: contextPackage.taskId,
+      attempt: contextPackage.attempt,
+      data: { package: contextPackage },
+    });
+    await this.repository.flush();
+  }
+
+  private async compileTaskProfile(
+    requestedProfile: TaskExecutionProfile,
+  ): Promise<{
+    runtime: BackendRuntime;
+    effectiveProfile: BackendEffectiveProfile;
+  }> {
+    const registry = getBackendRegistry();
+    const backend = registry.get(requestedProfile.backendId);
+    if (!backend) {
+      throw new Error(`backend '${requestedProfile.backendId}' is not registered`);
+    }
+    if (!backend.capabilities.executeTasks || !backend.compileTaskProfile) {
+      throw new Error(`backend '${requestedProfile.backendId}' cannot compile Worker task profiles`);
+    }
+    const runtimePath = backend.resolveBinary();
+    if (!runtimePath) {
+      throw new Error(`backend '${requestedProfile.backendId}' runtime is unavailable`);
+    }
+    const version = probeWorkerRuntimeVersion(requestedProfile.backendId, runtimePath);
+    const assessment = assessWorkerRuntime({
+      backendId: requestedProfile.backendId,
+      installed: true,
+      implementationEnabled: true,
+      authenticated: true,
+      version,
+    });
+    if (assessment.state !== 'available' || !assessment.version) {
+      throw new Error(
+        `backend '${requestedProfile.backendId}' runtime profile is unavailable: ${assessment.reason}`,
+      );
+    }
+    const runtime = backendRuntimeSchema.parse({
+      schemaVersion: 1,
+      backendId: requestedProfile.backendId,
+      runtimeVersion: assessment.version,
+    });
+    return {
+      runtime,
+      effectiveProfile: registry.compileTaskProfile(
+        requestedProfile.backendId,
+        requestedProfile,
+        runtime,
+      ),
+    };
+  }
+
+  private async persistTaskProfile(input: {
+    taskId: string;
+    attempt: number;
+    requestedProfile: TaskExecutionProfile;
+    runtime: BackendRuntime;
+    effectiveProfile: BackendEffectiveProfile;
+  }): Promise<void> {
+    await this.repository.appendTaskEvent('backend-profile-compiled', {
+      schemaVersion: 1,
+      taskId: input.taskId,
+      attempt: input.attempt,
+      data: {
+        requestedProfile: input.requestedProfile,
+        runtime: input.runtime,
+        effectiveProfile: input.effectiveProfile,
+        capabilityHash: input.effectiveProfile.capabilityHash,
+      },
+    });
+    await this.repository.flush();
+  }
+
+  private async persistTaskAuthority(input: {
+    taskId: string;
+    attempt: number;
+    authorityGrant: TaskAuthorityGrant;
+  }): Promise<void> {
+    await this.repository.appendTaskEvent('task-authority-compiled', {
+      schemaVersion: 1,
+      taskId: input.taskId,
+      attempt: input.attempt,
+      data: {
+        authorityGrant: input.authorityGrant,
+        grantHash: input.authorityGrant.grantHash,
+      },
+    });
+    await this.repository.flush();
+  }
+
+  private async persistPermissionDecision(input: {
+    taskId: string;
+    attempt: number;
+    nativeRequestId: string;
+    decision: 'allow' | 'ask-user' | 'deny';
+    reason: string;
+    safeInput: Record<string, unknown>;
+    grantHash?: string;
+  }): Promise<void> {
+    await this.repository.appendTaskEvent('task-permission-decided', {
+      schemaVersion: 1,
+      taskId: input.taskId,
+      attempt: input.attempt,
+      data: {
+        nativeRequestId: input.nativeRequestId,
+        decision: input.decision,
+        reason: input.reason,
+        safeInput: input.safeInput,
+        ...(input.grantHash ? { grantHash: input.grantHash } : {}),
+      },
+    });
+    await this.repository.flush();
   }
 
   async saveMemory(input: { category: MemoryCategory; content: string; tags: string[] }): Promise<SaveMemoryResult> {
@@ -1040,13 +1961,563 @@ export class Orchestrator implements OrchestratorBridge {
     this.meetingScheduler.markTaskDone(workerId, summary);
   }
 
+  /** Build and durably expose the sole final Meeting delivery. Per-task
+   * acceptance only advances the private integration branch; this method
+   * additionally re-verifies every accepted task on the exact final head. */
+  async prepareFinalMeetingDelivery(): Promise<MeetingDelivery | null> {
+    if (this.finalDeliveryBuild) return this.finalDeliveryBuild;
+    this.finalDeliveryBuild = this.buildFinalMeetingDelivery().finally(() => {
+      this.finalDeliveryBuild = undefined;
+    });
+    return this.finalDeliveryBuild;
+  }
+
+  getMeetingDelivery(): Promise<MeetingDelivery | null> {
+    return this.prepareFinalMeetingDelivery();
+  }
+
+  getFinalMeetingDecision(): FinalMeetingDecision | null {
+    return this.finalMeetingDecision
+      ? structuredClone(this.finalMeetingDecision)
+      : null;
+  }
+
+  async acceptMeetingDelivery(
+    deliveryId: string,
+    contentHash: string,
+  ): Promise<MeetingDelivery> {
+    const delivery = await this.requireCurrentMeetingDelivery(deliveryId, contentHash);
+    if (this.finalMeetingDecision) {
+      if (
+        this.finalMeetingDecision.kind === 'accept'
+        && this.finalMeetingDecision.deliveryId === deliveryId
+        && this.finalMeetingDecision.contentHash === contentHash
+      ) return structuredClone(this.finalMeetingDelivery ?? delivery);
+      throw new Error('final Meeting delivery already has a conflicting decision');
+    }
+    const intent = {
+      schemaVersion: 1,
+      deliveryId,
+      contentHash,
+      integrationHead: delivery.integrationHead,
+      decidedAt: Date.now(),
+    };
+    await this.repository.append('meeting-delivery-accept-intent', intent);
+    await this.repository.flush();
+    const publication = await this.integrationQueue.publishFinalDelivery({
+      deliveryId,
+      contentHash,
+      integrationHead: delivery.integrationHead,
+      expectedUserBaseRevision: delivery.expectedUserBaseRevision,
+    });
+    const published = publishedMeetingDelivery(delivery);
+    const decision: FinalMeetingDecision = {
+      kind: 'accept',
+      deliveryId,
+      contentHash,
+      integrationHead: publication.publishedHead,
+      decidedAt: intent.decidedAt,
+    };
+    await this.repository.append('meeting-delivery-accepted', {
+      schemaVersion: 1,
+      delivery: published,
+      decision,
+      publication,
+    });
+    await this.repository.flush();
+    this.finalMeetingDelivery = published;
+    this.finalMeetingDecision = decision;
+    this.safeEmit({
+      source: 'system',
+      event: {
+        kind: 'meeting-delivery-updated',
+        delivery: structuredClone(published),
+        decision: structuredClone(decision),
+      },
+    });
+    await this.snapshotActiveMeeting();
+    await this.integrationQueue.cleanupPublishedIntegration(publication.publishedHead);
+    return structuredClone(published);
+  }
+
+  async requestMeetingDeliveryRework(
+    deliveryId: string,
+    contentHash: string,
+    reason: string,
+  ): Promise<{ planVersion: number; taskIds: string[] }> {
+    const delivery = await this.requireCurrentMeetingDelivery(deliveryId, contentHash);
+    const normalizedReason = reason.trim();
+    if (!normalizedReason || normalizedReason.length > 20_000) {
+      throw new Error('final Meeting rework reason must contain 1-20000 characters');
+    }
+    if (this.finalMeetingDecision) {
+      if (
+        this.finalMeetingDecision.kind === 'rework'
+        && this.finalMeetingDecision.deliveryId === deliveryId
+        && this.finalMeetingDecision.contentHash === contentHash
+        && this.finalMeetingDecision.reason === normalizedReason
+      ) {
+        return {
+          planVersion: this.finalMeetingDecision.planVersion,
+          taskIds: [...this.finalMeetingDecision.taskIds],
+        };
+      }
+      throw new Error('final Meeting delivery already has a conflicting decision');
+    }
+    await this.repository.append('meeting-delivery-rework-intent', {
+      schemaVersion: 1,
+      deliveryId,
+      contentHash,
+      integrationHead: delivery.integrationHead,
+      reason: normalizedReason,
+    });
+    await this.repository.flush();
+    const replacement = this.meetingScheduler.createFinalDeliveryRework(
+      normalizedReason,
+      contentHash,
+    );
+    const decision: FinalMeetingDecision = {
+      kind: 'rework',
+      deliveryId,
+      contentHash,
+      reason: normalizedReason,
+      planVersion: replacement.planVersion,
+      taskIds: [...replacement.taskIds],
+      decidedAt: Date.now(),
+    };
+    await this.repository.append('meeting-delivery-rework-created', {
+      schemaVersion: 1,
+      decision,
+      operations: replacement.taskIds.map((taskId, index) => ({
+        kind: 'add-rework-task',
+        taskId,
+        supersedesTaskId: delivery.tasks[index]?.taskId,
+        deliveryHash: contentHash,
+        reason: normalizedReason,
+      })),
+    });
+    await this.repository.flush();
+    this.finalMeetingDecision = decision;
+    this.safeEmit({
+      source: 'system',
+      event: {
+        kind: 'meeting-delivery-updated',
+        delivery: structuredClone(delivery),
+        decision: structuredClone(decision),
+      },
+    });
+    await this.snapshotActiveMeeting();
+    return replacement;
+  }
+
+  private async buildFinalMeetingDelivery(): Promise<MeetingDelivery | null> {
+    const tasks = this.meetingScheduler.snapshot();
+    const integration = await this.integrationQueue.inspectState();
+    if (
+      this.finalMeetingDelivery
+      && this.finalMeetingDelivery.planVersion === this.meetingScheduler.getPlanVersion()
+      && this.finalMeetingDelivery.integrationHead === integration.durableHead
+    ) return structuredClone(this.finalMeetingDelivery);
+
+    const meetingChecks: Array<{ taskId: string; summary: string }> = [];
+    try {
+      for (const task of tasks) {
+        if (task.status !== 'accepted') continue;
+        const delivery = task.delivery;
+        const candidate = delivery?.candidate;
+        if (!delivery || !candidate) {
+          throw new MeetingDeliveryNotReadyError([`${task.id}:missing accepted candidate`]);
+        }
+        const verification = await this.deliveryVerifier.verify({
+          deliveryId: delivery.id,
+          taskId: task.id,
+          attempt: candidate.attempt,
+          meetingId: this.meetingId,
+          goal: delivery.spec.objective,
+          acceptanceCriteria: structuredClone(delivery.spec.acceptanceCriteria),
+          workspace: integration.workspace,
+          sourceRevision: integration.durableHead,
+        }, candidate.report);
+        if (!verification.passed) {
+          throw new MeetingDeliveryNotReadyError([
+            `${task.id}:${verification.error ?? 'full Meeting verification failed'}`,
+          ]);
+        }
+        const summaries = verification.checks.map((check) => {
+          if (typeof check === 'string') return check;
+          if (check && typeof check === 'object') {
+            const record = check as Record<string, unknown>;
+            return String(record.summary ?? record.description ?? record.status ?? 'passed');
+          }
+          return String(check);
+        });
+        meetingChecks.push({
+          taskId: task.id,
+          summary: summaries.join('; ') || 'verification passed on final integration head',
+        });
+      }
+      const delivery = buildMeetingDelivery({
+        meetingId: this.meetingId,
+        planVersion: this.meetingScheduler.getPlanVersion(),
+        tasks,
+        integrationHead: integration.durableHead,
+        expectedUserBaseRevision: this.expectedUserBaseRevision,
+        meetingVerification: {
+          integrationHead: integration.durableHead,
+          checks: meetingChecks,
+        },
+      });
+      await this.repository.append('meeting-delivery-ready', {
+        schemaVersion: 1,
+        delivery,
+      });
+      await this.repository.flush();
+      this.finalMeetingDelivery = delivery;
+      this.finalMeetingDecision = null;
+      this.safeEmit({
+        source: 'system',
+        event: {
+          kind: 'meeting-delivery-updated',
+          delivery: structuredClone(delivery),
+          decision: null,
+        },
+      });
+      await this.snapshotActiveMeeting();
+      return structuredClone(delivery);
+    } catch (error) {
+      if (error instanceof MeetingDeliveryNotReadyError) return null;
+      throw error;
+    }
+  }
+
+  private async requireCurrentMeetingDelivery(
+    deliveryId: string,
+    contentHash: string,
+  ): Promise<MeetingDelivery> {
+    if (
+      !deliveryId
+      || !/^[0-9a-f]{64}$/u.test(contentHash)
+    ) throw new Error('final Meeting delivery identity is invalid');
+    const delivery = await this.prepareFinalMeetingDelivery();
+    if (
+      !delivery
+      || delivery.id !== deliveryId
+      || delivery.contentHash !== contentHash
+    ) throw new Error('final Meeting delivery is stale or no longer ready');
+    return delivery;
+  }
+
+  private restoreFinalMeetingDelivery(events: PersistedMeetingEvent[]): void {
+    this.finalMeetingDelivery = null;
+    this.finalMeetingDecision = null;
+    for (const event of events) {
+      if (event.type === 'meeting-delivery-ready') {
+        const record = objectRecord(event.payload);
+        const delivery = parseMeetingDelivery(record.delivery);
+        if (delivery) {
+          this.finalMeetingDelivery = delivery;
+          this.finalMeetingDecision = null;
+        }
+        continue;
+      }
+      if (event.type === 'meeting-delivery-accepted') {
+        const record = objectRecord(event.payload);
+        const delivery = parseMeetingDelivery(record.delivery);
+        const decision = parseFinalMeetingDecision(record.decision);
+        if (delivery && decision?.kind === 'accept') {
+          this.finalMeetingDelivery = delivery;
+          this.finalMeetingDecision = decision;
+        }
+        continue;
+      }
+      if (event.type === 'meeting-delivery-rework-created') {
+        const decision = parseFinalMeetingDecision(objectRecord(event.payload).decision);
+        if (decision?.kind === 'rework') this.finalMeetingDecision = decision;
+      }
+    }
+  }
+
+  private async reconcileInterruptedFinalAcceptance(
+    events: PersistedMeetingEvent[],
+  ): Promise<void> {
+    if (!this.finalMeetingDelivery || this.finalMeetingDecision) return;
+    const intentEvent = [...events].reverse().find(
+      (event) => event.type === 'meeting-delivery-accept-intent',
+    );
+    if (!intentEvent || !intentEvent.payload || typeof intentEvent.payload !== 'object') return;
+    const intent = intentEvent.payload as Record<string, unknown>;
+    const queue = this.integrationQueue.snapshot();
+    const request = queue.publicationRequest;
+    const publication = queue.publication;
+    const delivery = this.finalMeetingDelivery;
+    if (
+      queue.publicationState !== 'published'
+      || !request
+      || !publication
+      || intent.deliveryId !== delivery.id
+      || intent.contentHash !== delivery.contentHash
+      || intent.integrationHead !== delivery.integrationHead
+      || request.deliveryId !== delivery.id
+      || request.contentHash !== delivery.contentHash
+      || request.integrationHead !== delivery.integrationHead
+      || request.expectedUserBaseRevision !== delivery.expectedUserBaseRevision
+      || publication.expectedUserBaseRevision !== delivery.expectedUserBaseRevision
+      || publication.integrationHead !== delivery.integrationHead
+      || publication.publishedHead !== delivery.integrationHead
+    ) return;
+    const decidedAt = typeof intent.decidedAt === 'number' && Number.isFinite(intent.decidedAt)
+      ? intent.decidedAt
+      : intentEvent.ts;
+    const published = publishedMeetingDelivery(delivery);
+    const decision: FinalMeetingDecision = {
+      kind: 'accept',
+      deliveryId: delivery.id,
+      contentHash: delivery.contentHash,
+      integrationHead: publication.publishedHead,
+      decidedAt,
+    };
+    await this.repository.append('meeting-delivery-accepted', {
+      schemaVersion: 1,
+      delivery: published,
+      decision,
+      publication,
+      recoveredFromAcceptIntentSeq: intentEvent.seq,
+    });
+    await this.repository.flush();
+    this.finalMeetingDelivery = published;
+    this.finalMeetingDecision = decision;
+    await this.snapshotActiveMeeting();
+    await this.integrationQueue.cleanupPublishedIntegration(publication.publishedHead);
+  }
+
+  async acceptDelivery(deliveryId: string, candidateId: string) {
+    const view = await this.meetingScheduler.acceptDelivery(deliveryId, candidateId);
+    await this.repository.append('delivery-user-accepted', {
+      deliveryId,
+      candidateId,
+      attempt: view.attempt,
+    });
+    await this.snapshotActiveMeeting();
+    await this.repository.flush();
+    return view;
+  }
+
+  async returnDelivery(
+    deliveryId: string,
+    candidateId: string | undefined,
+    feedback: string,
+  ) {
+    const view = await this.meetingScheduler.returnDelivery(
+      deliveryId,
+      candidateId,
+      feedback,
+    );
+    await this.repository.append('delivery-user-returned', {
+      deliveryId,
+      candidateId: candidateId ?? null,
+      feedback,
+      attempt: view.attempt,
+    });
+    await this.snapshotActiveMeeting();
+    await this.repository.flush();
+    return view;
+  }
+
+  inspectDeliveryReview(reviewId: string) {
+    return safeCoordinatorReviewProjection(this.coordinatorReviewDriver.inspect(reviewId));
+  }
+
+  getDeliveryReviewChunk(reviewId: string, chunkId?: string) {
+    const chunk = this.coordinatorReviewDriver.getChunk(reviewId, chunkId);
+    if (!chunk) return null;
+    if (chunk.requiresUserConfirmation) {
+      const { content: _content, ...safe } = chunk;
+      return safe;
+    }
+    return chunk;
+  }
+
+  async submitDeliveryChunkReview(
+    reviewId: string,
+    input: {
+      chunkId: string;
+      chunkHash: string;
+      verdict: 'passed' | 'blocking';
+      findings: CoordinatorReviewFinding[];
+    },
+  ) {
+    const session = await this.coordinatorReviewDriver.submitChunkReview(reviewId, input);
+    return safeCoordinatorReviewProjection(session);
+  }
+
+  async completeDeliveryReview(reviewId: string) {
+    const session = await this.coordinatorReviewDriver.complete(reviewId);
+    return safeCoordinatorReviewProjection(session);
+  }
+
+  async requestDeliveryRework(
+    reviewId: string,
+    findings: CoordinatorReviewFinding[],
+  ) {
+    const session = await this.coordinatorReviewDriver.requestRework(reviewId, findings);
+    return safeCoordinatorReviewProjection(session);
+  }
+
+  async confirmDeliveryReviewEvidence(
+    reviewId: string,
+    input: { chunkId: string; chunkHash: string; decisionId: string },
+  ) {
+    const session = await this.coordinatorReviewDriver.confirmEvidence(reviewId, input);
+    return safeCoordinatorReviewProjection(session);
+  }
+
+  submitWorkerReport(workerId: string, report: import('./worker-protocol.js').WorkReport): void {
+    this.meetingScheduler.submitWorkerReport(workerId, report);
+  }
+
   // Test-only proxy: forward session events to the scheduler for simulation.
   schedulerOnWorkerEvent(workerId: string, e: SessionEvent): void {
-    this.meetingScheduler.onWorkerEvent(workerId, e);
+    this.meetingScheduler.onWorkerEvent(
+      workerId,
+      e as unknown as import('./backends/cli-backend.js').BackendSessionEvent,
+    );
   }
 
   submitWorkerDelivery(workerId: string, files: string[]): void {
     this.meetingScheduler.submitWorkerDelivery(workerId, files);
+  }
+
+  private notifyCoordinatorReview(briefing: CoordinatorReviewBriefing): void {
+    const host = this.hostGroups.get(this.coordinatorHostId)?.getHost();
+    if (!host) {
+      void this.coordinatorReviewDriver.pauseForDisconnect(briefing.reviewId);
+      return;
+    }
+    if (this.coordinatorTurnActive) this.reviewsAwaitingFirstTurn.add(briefing.reviewId);
+    else this.reviewsAwaitingFirstTurn.delete(briefing.reviewId);
+    this.ensureReviewStallWatchdog();
+    host.sendUserText(
+      `(coordinator review)\n${JSON.stringify(briefing)}`,
+      'high',
+    );
+    this.coordinatorTurnActive = true;
+  }
+
+  /**
+   * A frozen candidate only leaves `coordinator-reviewing` when the Coordinator
+   * itself covers every chunk. Without this the briefing was a single
+   * fire-and-forget message: a Coordinator that reviewed two chunks and moved on
+   * left the delivery — and every task depending on it — stalled forever.
+   */
+  private async driveCoordinatorReviews(): Promise<void> {
+    if (this.closed) return;
+    for (const session of this.coordinatorReviewDriver.activeSessions()) {
+      if (this.reviewsAwaitingFirstTurn.delete(session.id)) continue;
+      try {
+        await this.coordinatorReviewDriver.onCoordinatorTurnEnded(session.id);
+      } catch (err) {
+        this.diagnostics.log('coordinator-review-turn-failed', {
+          reviewId: session.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  }
+
+  /** A silent Coordinator never emits a turn boundary, so time also charges the budget. */
+  private ensureReviewStallWatchdog(): void {
+    if (this.reviewStallTimer || this.reviewStallTimeoutMs <= 0) return;
+    const timer = setInterval(
+      () => { void this.sweepStalledReviews(); },
+      Math.max(1_000, Math.floor(this.reviewStallTimeoutMs / 2)),
+    );
+    timer.unref?.();
+    this.reviewStallTimer = timer;
+  }
+
+  private stopReviewStallWatchdog(): void {
+    if (!this.reviewStallTimer) return;
+    clearInterval(this.reviewStallTimer);
+    this.reviewStallTimer = null;
+  }
+
+  private async sweepStalledReviews(): Promise<void> {
+    const active = this.closed ? [] : this.coordinatorReviewDriver.activeSessions();
+    if (active.length === 0) {
+      this.stopReviewStallWatchdog();
+      return;
+    }
+    const deadline = Date.now() - this.reviewStallTimeoutMs;
+    for (const session of active) {
+      if (session.updatedAt > deadline) continue;
+      this.reviewsAwaitingFirstTurn.delete(session.id);
+      try {
+        await this.coordinatorReviewDriver.onCoordinatorTurnEnded(session.id);
+      } catch (err) {
+        this.diagnostics.log('coordinator-review-stall-sweep-failed', {
+          reviewId: session.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  }
+
+  /**
+   * A paused review is never an implicit pass. Surface it to the user and tell
+   * the Coordinator to hand the decision over instead of guessing.
+   */
+  private async escalateStalledReview(session: CoordinatorReviewSession): Promise<void> {
+    const uncoveredChunkIds = listUncoveredCoordinatorReviewChunkIds(session);
+    const remainingChunks = session.coverage.totalChunks - session.coverage.reviewedChunks;
+    this.safeEmit({
+      source: 'system',
+      event: {
+        kind: 'coordinator-review-stalled',
+        reviewId: session.id,
+        deliveryId: session.deliveryId,
+        ...(session.taskId ? { taskId: session.taskId } : {}),
+        reason: session.pauseReason ?? 'user-required',
+        uncoveredChunkIds,
+        remainingChunks,
+      },
+    });
+    if (session.pauseReason === 'coordinator-disconnected') return;
+    this.hostGroups.get(this.coordinatorHostId)?.getHost()?.sendUserText(
+      `(coordinator review paused) 审查 ${session.id} 因为 ${session.pauseReason ?? 'user-required'} 已暂停，还有 ${remainingChunks} 个分片没有覆盖：${uncoveredChunkIds.join(', ') || 'none'}。请直接告诉用户审查没走完、卡在哪里，并让用户决定是继续审查还是自己接手。不要声称交付已通过。`,
+      'normal',
+    );
+  }
+
+  /** Resume a paused review. Exposed so the user can restart a stalled Coordinator. */
+  async resumeDeliveryReview(reviewId: string) {
+    const session = await this.coordinatorReviewDriver.resume(reviewId);
+    return safeCoordinatorReviewProjection(session);
+  }
+
+  /** After the Coordinator comes back, reviews parked on disconnect resume themselves. */
+  private resumeDisconnectedReviews(): void {
+    if (this.closed) return;
+    if (!this.hostGroups.get(this.coordinatorHostId)?.getHost()) return;
+    for (const session of this.coordinatorReviewDriver.pausedSessions()) {
+      if (session.pauseReason !== 'coordinator-disconnected') continue;
+      void this.coordinatorReviewDriver.resume(session.id).catch((err) => {
+        this.diagnostics.log('coordinator-review-resume-failed', {
+          reviewId: session.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    }
+  }
+
+  activeReviewGate(): ActiveReviewGate | null {
+    const [session] = this.coordinatorReviewDriver.activeSessions();
+    if (!session) return null;
+    return {
+      reviewId: session.id,
+      deliveryId: session.deliveryId,
+      uncoveredChunkIds: listUncoveredCoordinatorReviewChunkIds(session),
+      remainingChunks: session.coverage.totalChunks - session.coverage.reviewedChunks,
+    };
   }
 
   // ===========================================================================
@@ -1071,6 +2542,10 @@ export class Orchestrator implements OrchestratorBridge {
       },
     });
     const condensed = r.conclusion.length > 400 ? `${r.conclusion.slice(0, 398)}…` : r.conclusion;
+    this.resolvedDecisionContext.set(r.id, {
+      id: r.id,
+      summary: question ? `${question}: ${condensed}` : condensed,
+    });
     this.defaultHost().getHost()?.sendUserText(
       `(decision update) 用户对"${question}"给出了结论：${condensed}\n\n如果这跟你之前推进的方向不一致，请马上调整：可以 delegate_to 现有 worker 让他改，或开新 worker 走另一条路；并简短告诉用户你怎么调整。`,
       'normal',
@@ -1088,4 +2563,38 @@ export class Orchestrator implements OrchestratorBridge {
       });
     }
   }
+}
+
+function objectRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function parseFinalMeetingDecision(value: unknown): FinalMeetingDecision | null {
+  const record = objectRecord(value);
+  const common = (
+    typeof record.deliveryId === 'string'
+    && typeof record.contentHash === 'string'
+    && /^[0-9a-f]{64}$/u.test(record.contentHash)
+    && typeof record.decidedAt === 'number'
+    && Number.isFinite(record.decidedAt)
+  );
+  if (!common) return null;
+  if (
+    record.kind === 'accept'
+    && typeof record.integrationHead === 'string'
+    && /^[0-9a-f]{40,64}$/u.test(record.integrationHead)
+  ) return structuredClone(record as unknown as FinalMeetingDecision);
+  if (
+    record.kind === 'rework'
+    && typeof record.reason === 'string'
+    && record.reason.trim().length > 0
+    && record.reason.length <= 20_000
+    && typeof record.planVersion === 'number'
+    && Number.isSafeInteger(record.planVersion)
+    && Array.isArray(record.taskIds)
+    && record.taskIds.every((entry) => typeof entry === 'string')
+  ) return structuredClone(record as unknown as FinalMeetingDecision);
+  return null;
 }

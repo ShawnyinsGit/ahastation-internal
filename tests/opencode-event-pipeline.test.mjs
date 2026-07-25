@@ -111,6 +111,73 @@ test('buildEnv injects nothing without an apikey-mode key; extra passes through'
   assert.equal('ANTHROPIC_API_KEY' in oauth, false);
 });
 
+test('worker parts translate to provider-neutral progress and tool signals', async () => {
+  const { mapOpencodePartToWorkerSignal } = await import(
+    '../dist-electron/backends/opencode-adapter.js'
+  );
+  assert.deepEqual(
+    mapOpencodePartToWorkerSignal({ type: 'text', text: '正在修改文件' }),
+    { kind: 'progress', message: '正在修改文件' },
+  );
+  assert.deepEqual(
+    mapOpencodePartToWorkerSignal({
+      type: 'tool',
+      tool: 'edit',
+      state: { status: 'completed', output: 'updated src/app.ts' },
+    }),
+    {
+      kind: 'tool',
+      toolName: 'edit',
+      phase: 'completed',
+      detail: 'updated src/app.ts',
+    },
+  );
+  assert.equal(
+    mapOpencodePartToWorkerSignal({
+      type: 'text',
+      text: '```work-report\n{"status":"completed"}',
+    }),
+    null,
+    'partial protocol frames must never leak as visible progress',
+  );
+});
+
+test('worker turn finalization emits one strict delivery then ended', async () => {
+  const { finalizeOpencodeWorkerText } = await import(
+    '../dist-electron/backends/opencode-adapter.js'
+  );
+  const report = {
+    status: 'completed',
+    summary: 'Implemented the requested change',
+    files: [{ path: 'src/app.ts', action: 'modified' }],
+    tests: [{ command: 'npm test', status: 'passed' }],
+    unresolved: [],
+  };
+  assert.deepEqual(
+    finalizeOpencodeWorkerText(`done\n\`\`\`work-report\n${JSON.stringify(report)}\n\`\`\``),
+    [
+      { kind: 'delivery', report },
+      { kind: 'ended', reason: 'completed' },
+    ],
+  );
+});
+
+test('worker turn finalization fails closed when WorkReport is absent or invalid', async () => {
+  const { finalizeOpencodeWorkerText } = await import(
+    '../dist-electron/backends/opencode-adapter.js'
+  );
+  const missing = finalizeOpencodeWorkerText('done');
+  assert.equal(missing[0].kind, 'failed');
+  assert.equal(missing[0].code, 'missing-work-report');
+  assert.deepEqual(missing[1], { kind: 'ended', reason: 'completed' });
+
+  const invalid = finalizeOpencodeWorkerText(
+    '```work-report\n{"status":"completed"}\n```',
+  );
+  assert.equal(invalid[0].kind, 'failed');
+  assert.equal(invalid[0].code, 'invalid-work-report');
+});
+
 // ---------------------------------------------------------------------------
 // Password generation + Basic auth header
 // ---------------------------------------------------------------------------

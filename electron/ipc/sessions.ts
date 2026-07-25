@@ -193,6 +193,16 @@ export function registerSessionsIpc(ctx: IpcContext): void {
         recoveredTasks: recovery && Array.isArray(recovery.state.tasks)
           ? recovery.state.tasks.filter((task): task is Record<string, unknown> => typeof task === 'object' && task !== null)
           : undefined,
+        recoveredPlanVersion: recovery && typeof recovery.state.planVersion === 'number'
+          ? recovery.state.planVersion
+          : undefined,
+        recoveredReviewSessions: recovery && Array.isArray(recovery.state.reviewSessions)
+          ? recovery.state.reviewSessions.filter(
+              (session): session is import('../coordinator-review.js').CoordinatorReviewSession => (
+                Boolean(session && typeof session === 'object' && !Array.isArray(session))
+              ),
+            )
+          : undefined,
       });
 
       const result = ctx.registry.open(sessionId, resolvedCwd, orch);
@@ -323,7 +333,13 @@ export function registerSessionsIpc(ctx: IpcContext): void {
     if (typeof taskId !== 'string' || !/^[a-zA-Z0-9._-]{1,128}$/.test(taskId)) {
       return { ok: false, error: 'invalid task id' };
     }
-    if (action !== 'continue' && action !== 'retry' && action !== 'complete' && action !== 'abandon') {
+    if (
+      action !== 'continue-read-only'
+      && action !== 'continue-side-effecting'
+      && action !== 'retry-attempt'
+      && action !== 'resolve-integration-conflict'
+      && action !== 'abandon-task'
+    ) {
       return { ok: false, error: 'invalid recovery action' };
     }
     const orch = ctx.getOrchestrator(typeof sessionId === 'string' ? sessionId : null);

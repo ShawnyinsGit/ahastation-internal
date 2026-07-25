@@ -1,6 +1,6 @@
 import { useMemo, useCallback } from 'react';
 import type { HostGroupState, WorkerState } from '../lib/meeting-store';
-import type { MeetingPlan } from '../types';
+import type { CoordinatorBriefing, MeetingPlan } from '../types';
 import { ClaudeWorkspace } from './ClaudeWorkspace';
 import { UserTasksPanel } from './UserTasksPanel';
 
@@ -10,6 +10,7 @@ interface ActivityTabContentProps {
   workers: WorkerState[];
   hostGroups: Map<string, HostGroupState>;
   plan: MeetingPlan | null;
+  coordinatorBriefings: CoordinatorBriefing[];
   running: boolean;
   aiSpeaking: boolean;
   onResolvePermission: (id: string, decision: 'allow' | 'deny') => void;
@@ -27,6 +28,7 @@ export function ActivityTabContent({
   workers,
   hostGroups,
   plan,
+  coordinatorBriefings,
   running,
   aiSpeaking,
   onResolvePermission,
@@ -124,8 +126,33 @@ export function ActivityTabContent({
           lastText={selectedWorker.lastText}
           startedAt={selectedWorker.startedAt}
           pendingPermissionTool={selectedWorker.pendingPermission?.toolName ?? null}
+          backendId={selectedWorker.backendId}
+          attempt={selectedWorker.attempt}
+          workerEvents={selectedWorker.workerEvents}
+          workReport={selectedWorker.workReport}
+          coordinatorBriefings={selectedWorker.role === 'talker' ? coordinatorBriefings : undefined}
+          onInterruptTask={
+            selectedWorker.role === 'worker'
+              && selectedWorker.status === 'running'
+              && sessionId
+              ? () => window.vibeMeet.interruptWorker(sessionId, selectedWorker.id)
+              : undefined
+          }
+          onSteerTask={
+            selectedWorker.role === 'worker'
+              && selectedWorker.status === 'running'
+              && sessionId
+              ? (instruction) => window.vibeMeet.steerWorker(sessionId, selectedWorker.id, instruction)
+              : undefined
+          }
+          onOpenWorkspace={
+            selectedWorker.role === 'worker' && sessionId
+              ? () => window.vibeMeet.documents.openExternal(sessionId, '.')
+              : undefined
+          }
           onOpenInTerminal={onOpenInTerminal ? handleOpenInTerminal : undefined}
           isTalker={selectedWorker.role === 'talker'}
+          commandLog={selectedWorker.commandLog}
         />
       )}
     </div>

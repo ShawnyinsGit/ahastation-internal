@@ -196,7 +196,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          DEB="$(ls release/ahastation_*_arm64.deb | head -n1)"
+          DEB="$(ls release/*arm64*.deb release/ahastation_*_arm64.deb 2>/dev/null | head -n1)"
           echo "Installing $DEB — apt resolves Depends (libgtk-3-0, libnss3, libasound2, …)"
           apt-get install -y "./$DEB"
           BIN=/opt/AhaStation/ahastation
@@ -216,12 +216,19 @@ jobs:
             echo "smoke OK: all shared libraries resolve"
           fi
 
+      - name: Verify Linux arm64 package closure
+        run: node scripts/verify-linux-arm64-package.mjs
+
+      - name: Generate SHA-256 manifest
+        run: node scripts/generate-release-manifest.mjs
+
       - uses: actions/upload-artifact@v4
         with:
           name: pkg-linux-arm64
           path: |
             release/*.AppImage
             release/*.deb
+            release/SHA256SUMS
           if-no-files-found: error
           retention-days: 30
 
@@ -239,6 +246,18 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts
+
+      - name: Import release signing key
+        env:
+          AHASTATION_RELEASE_GPG_PRIVATE_KEY: ${{ secrets.AHASTATION_RELEASE_GPG_PRIVATE_KEY }}
+        run: |
+          test -n "$AHASTATION_RELEASE_GPG_PRIVATE_KEY"
+          printf '%s' "$AHASTATION_RELEASE_GPG_PRIVATE_KEY" | gpg --batch --import
+
+      - name: Generate and sign release manifest
+        env:
+          AHASTATION_RELEASE_GPG_KEY_ID: ${{ secrets.AHASTATION_RELEASE_GPG_KEY_ID }}
+        run: node scripts/generate-release-manifest.mjs --dir artifacts --require-signature
 
       - name: Create / update release
         uses: softprops/action-gh-release@v2
@@ -258,5 +277,7 @@ jobs:
             artifacts/pkg-ubuntu-latest/latest*.yml
             artifacts/pkg-linux-arm64/*.AppImage
             artifacts/pkg-linux-arm64/*.deb
+            artifacts/SHA256SUMS
+            artifacts/SHA256SUMS.asc
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

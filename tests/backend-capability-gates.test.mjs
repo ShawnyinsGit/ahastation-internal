@@ -2,6 +2,21 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { Orchestrator } from '../dist-electron/orchestrator.js';
+import { getBackendRegistry } from '../dist-electron/backends/registry.js';
+import {
+  WORKER_STABILITY_GATES,
+  assessWorkerRelease,
+} from '../dist-electron/backends/worker-runtime-contract.js';
+
+async function waitFor(predicate, message, timeoutMs = 1_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) {
+      assert.fail(message);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
 
 function fakeSessionFactory() {
   return {
@@ -9,6 +24,93 @@ function fakeSessionFactory() {
     resolvePermission() {}, async interrupt() {},
   };
 }
+
+test('the four release backends expose the tested Worker implementation contract', () => {
+  const registry = getBackendRegistry();
+  for (const backendId of ['claude-code', 'opencode', 'codex', 'kimi']) {
+    const backend = registry.get(backendId);
+    assert.equal(backend?.capabilities.executeTasks, true, `${backendId} Worker implementation`);
+    assert.equal(backend?.capabilities.interrupt, true, `${backendId} interrupt contract`);
+  }
+  assert.equal(registry.get('qoder')?.capabilities.executeTasks, false);
+});
+
+function completeStabilityEvidence(backendId, runtimeVersion, overrides = {}) {
+  return {
+    runtimeCompatible: true,
+    authReady: true,
+    profileCompilation: true,
+    workReport: true,
+    interrupt: true,
+    resume: true,
+    permissionBridge: true,
+    canonicalPermissionNormalization: true,
+    recovery: true,
+    realVerticalSmoke: {
+      schemaVersion: 1,
+      kind: 'real-backend-smoke',
+      backendId,
+      runtimeVersion,
+      runId: `real-${backendId}-2026-07-24`,
+      verifiedAt: '2026-07-24T08:00:00.000Z',
+      checks: [
+        'work-report',
+        'interrupt',
+        'resume',
+        'permission-bridge',
+        'canonical-permission-normalization',
+        'recovery',
+      ],
+    },
+    ...overrides,
+  };
+}
+
+test('stable Worker qualification requires every gate and exact real smoke evidence', () => {
+  const missingReal = completeStabilityEvidence('claude-code', '2.1.150');
+  delete missingReal.realVerticalSmoke;
+  const incomplete = assessWorkerRelease({
+    backendId: 'claude-code',
+    implementationEnabled: true,
+    expectedRuntimeVersion: '2.1.150',
+    evidence: missingReal,
+  });
+  assert.equal(incomplete.tier, 'experimental');
+  assert.deepEqual(incomplete.blockers, ['real-vertical-smoke']);
+
+  const mismatched = assessWorkerRelease({
+    backendId: 'codex',
+    implementationEnabled: true,
+    expectedRuntimeVersion: '0.144.1',
+    evidence: completeStabilityEvidence('codex', '0.144.6'),
+  });
+  assert.equal(mismatched.tier, 'experimental');
+  assert.equal(mismatched.gates['real-vertical-smoke'], false);
+
+  const stable = assessWorkerRelease({
+    backendId: 'codex',
+    implementationEnabled: true,
+    expectedRuntimeVersion: '0.144.1',
+    evidence: completeStabilityEvidence('codex', '0.144.1'),
+  });
+  assert.equal(stable.tier, 'stable');
+  assert.deepEqual(stable.blockers, []);
+  assert.deepEqual(Object.keys(stable.gates).sort(), [...WORKER_STABILITY_GATES].sort());
+});
+
+test('OpenCode and Kimi remain experimental even with complete mocked-looking gates', () => {
+  const registry = getBackendRegistry();
+  for (const [backendId, version] of [['opencode', '1.18.3'], ['kimi', '0.24.1']]) {
+    const assessment = registry.assessWorkerRelease(
+      backendId,
+      version,
+      completeStabilityEvidence(backendId, version),
+    );
+    assert.equal(assessment.tier, 'experimental');
+    assert.deepEqual(assessment.blockers, []);
+    assert.match(assessment.reason, /policy keeps this Worker experimental/i);
+  }
+});
 
 test('a backend without coordinator capability cannot become the default coordinator', () => {
   assert.throws(() => new Orchestrator({
@@ -31,11 +133,11 @@ test('a plan cannot select a backend that cannot execute delivery tasks', async 
       id: 'unsupported-worker',
       title: 'Unsupported worker',
       prompt: 'Do the task',
-      executorBackendId: 'kimi',
+      executorBackendId: 'qoder',
     }]);
     assert.deepEqual(result, {
       ok: false,
-      error: "backend 'kimi' cannot execute delivery tasks",
+      error: "backend 'qoder' cannot execute delivery tasks",
     });
   } finally {
     await orchestrator.end();
@@ -64,7 +166,7 @@ test('unknown executor backends fail instead of silently falling back to Claude'
   }
 });
 
-test('single-task delegation respects the coordinator backend worker capability', async () => {
+test('Codex coordinator can delegate through its verified Worker contract', async () => {
   const orchestrator = new Orchestrator({
     emit() {},
     cwd: process.cwd(),
@@ -72,10 +174,9 @@ test('single-task delegation respects the coordinator backend worker capability'
     defaultBackendId: 'codex',
   });
   try {
-    assert.throws(
-      () => orchestrator.delegateSingleTask('change the code'),
-      /backend 'codex' cannot execute delivery tasks/i,
-    );
+    const delegated = orchestrator.delegateSingleTask('change the code');
+    assert.match(delegated.workerId, /^task-/);
+    assert.equal(delegated.reused, false);
   } finally {
     await orchestrator.end();
   }
@@ -108,6 +209,28 @@ test('a connecting host cannot take over coordination before readiness', async (
     releaseSecond();
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(orchestrator.setCoordinator('connecting-codex').ok, true);
+  } finally {
+    await orchestrator.end();
+  }
+});
+
+test('a meeting admits at most three hosts including the default coordinator', async () => {
+  const orchestrator = new Orchestrator({
+    emit() {},
+    cwd: process.cwd(),
+    sessionFactory: () => ({
+      async start() {}, end() {}, sendUserText() {}, sendUserContent() {},
+      resolvePermission() {}, async interrupt() {},
+    }),
+  });
+  try {
+    await orchestrator.start();
+    assert.equal(orchestrator.addHost('codex', 'host-two').ok, true);
+    assert.equal(orchestrator.addHost('codex', 'host-three').ok, true);
+    assert.deepEqual(orchestrator.addHost('codex', 'host-four'), {
+      ok: false,
+      error: 'host capacity reached (3/3)',
+    });
   } finally {
     await orchestrator.end();
   }
@@ -173,6 +296,10 @@ test('a backend mention routes the user turn to the ready expert instead of the 
         message: { role: 'assistant', content: [{ type: 'text', text: 'ASR 依赖没有加载成功。' }] },
       },
     });
+    await waitFor(
+      () => emitted.some((event) => event.hostId === 'codex-expert' && event.event.kind === 'message'),
+      'the expert response should emit after its journal entry is durable',
+    );
     assert.ok(emitted.some((event) => event.hostId === 'codex-expert' && event.event.kind === 'message'));
     assert.match(sessions[0].inputs[0], /expert response from codex-expert.*ASR 依赖没有加载成功/s);
   } finally {
@@ -207,6 +334,10 @@ test('narrating one assistant line does not feed a new turn back into the host',
   try {
     await orchestrator.start();
     orchestrator.narrateAssistantLine('one intended line');
+    await waitFor(
+      () => emittedLines.length === 1,
+      'the narration should emit after its journal entry is durable',
+    );
     assert.deepEqual(emittedLines, ['one intended line']);
     assert.deepEqual(hostInputs, []);
   } finally {

@@ -8,6 +8,7 @@ import test from 'node:test';
 import { CodexBackend, codexLoginArgs } from '../dist-electron/backends/codex-adapter.js';
 import { ClaudeCodeBackend } from '../dist-electron/backends/claude-code-adapter.js';
 import { resolveBinaryFromPath } from '../dist-electron/backends/subprocess-backend.js';
+import { removeBackendAuth, setBackendAuth } from '../dist-electron/store.js';
 
 test('packaged runtime resolver finds the canonical Kimi Code install directory', async (t) => {
   const home = await mkdtemp(join(tmpdir(), 'ahastation-kimi-home-'));
@@ -32,6 +33,7 @@ test('packaged runtime resolver finds the canonical Kimi Code install directory'
 });
 
 test('Codex auth status is based on the CLI probe, not config.toml existence', async () => {
+  await removeBackendAuth('codex');
   const backend = new CodexBackend({
     resolveBinary: () => '/fake/codex',
     execFile: () => {
@@ -39,6 +41,29 @@ test('Codex auth status is based on the CLI probe, not config.toml existence', a
     },
   });
   assert.deepEqual(await backend.checkAuthStatus(), { loggedIn: false });
+});
+
+test('Codex auth status treats a saved API key as logged in', async (t) => {
+  await setBackendAuth('codex', { authMode: 'apikey', apiKey: 'sk-test' });
+  t.after(async () => { await removeBackendAuth('codex'); });
+  const backend = new CodexBackend({
+    resolveBinary: () => '/fake/codex',
+    execFile: () => {
+      throw new Error('CLI auth probe should not run when an API key is saved');
+    },
+  });
+  assert.deepEqual(await backend.checkAuthStatus(), { loggedIn: true });
+});
+
+test('Codex buildEnv normalizes trailing slashes on OPENAI_BASE_URL', () => {
+  const backend = new CodexBackend();
+  const env = backend.buildEnv({
+    authMode: 'apikey',
+    apiKey: 'sk-test',
+    baseUrl: 'https://gateway.example/v1/',
+  });
+  assert.equal(env.OPENAI_BASE_URL, 'https://gateway.example/v1');
+  assert.equal(env.OPENAI_API_KEY, 'sk-test');
 });
 
 test('Codex auth status accepts a successful CLI status probe', async () => {
