@@ -258,10 +258,31 @@ export function useVoiceCapture({
         setPermissionDenied(false);
         setStatus('initializing');
         const { MicVAD } = await import('@ricky0123/vad-web');
-        const vad = await MicVAD.new({
+        // Watchdog: if MicVAD.new ever hangs silently again (a failed emscripten
+        // pthread worker currently rejects with an EMPTY error and the runtime
+        // waits on it forever), surface a retryable failure instead of leaving
+        // the mic button stuck at "Starting…" indefinitely.
+        const vadInitTimeout = new Promise<never>((_, reject) => {
+          setTimeout(() => reject(new Error('MicVAD init timed out after 45s')), 45000);
+        });
+        const vad = await Promise.race([
+          MicVAD.new({
           model: 'v5',
           baseAssetPath: VAD_ASSET_BASE,
           onnxWASMBasePath: VAD_ASSET_BASE,
+          // Packaged-Electron fix: vad-web's inline onnxruntime-web ships the
+          // THREADED wasm build, whose emscripten pthread pool spawns module
+          // workers from app://bundle/vad/ort-wasm-simd-threaded.mjs. Those
+          // workers fail to load in the packaged sandboxed renderer (empty
+          // error event), emscripten then waits on them forever, and
+          // MicVAD.new never resolves — the mic button shows "Starting…"
+          // indefinitely. Forcing a single wasm thread skips pthread worker
+          // creation entirely; VAD is a tiny 512-sample model and runs fine
+          // single-threaded. speaker-embedding.ts does the same for its own
+          // ORT session.
+          ortConfig: (ort) => {
+            ort.env.wasm.numThreads = 1;
+          },
           // Explicit AEC/NS/AGC so the speaker->mic loop is dampened. Browsers
           // default these on for `{audio: true}`, but the lib's default
           // getStream doesn't pass them through, and without AEC the VAD
@@ -588,7 +609,9 @@ export function useVoiceCapture({
             segmentFrameCountRef.current += 1;
             segmentProbSumRef.current += probs.isSpeech;
           },
-        });
+          }),
+          vadInitTimeout,
+        ]);
         if (cancelled) {
           const stream = micStreamRef.current;
           micStreamRef.current = null;
