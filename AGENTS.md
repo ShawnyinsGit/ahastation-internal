@@ -24,10 +24,13 @@ If `which node` returns nothing, fall back to the absolute path — for example
 
 ## Typecheck
 
-There is no dedicated `lint` / `typecheck` npm script. Run TypeScript directly
-against each tsconfig:
+There is no lint script. Typecheck via the npm scripts (or run tsc directly
+against each tsconfig):
 
 ```bash
+# Both sides
+/usr/local/bin/npm run typecheck
+
 # Renderer (React app, src/)
 /usr/local/bin/node node_modules/typescript/bin/tsc --noEmit -p tsconfig.json
 
@@ -41,7 +44,8 @@ break without the other noticing.
 
 ## Build / package
 
-- `npm run build` — vite + tsc, no installer.
+- `npm run build` — vite + tsc, no installer. `build:electron` cleans
+  `dist-electron/` first so stale output from deleted sources never ships.
 - `npm run dist:dmg` — full release flow: downloads the speaker model, bundles Codex
   defaults, builds, then runs `electron-builder --mac --arm64 --publish never`.
   Output lands in `release/` as `AhaStation-<version>-arm64.dmg`.

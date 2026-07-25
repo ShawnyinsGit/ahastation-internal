@@ -291,7 +291,20 @@ test('write-intent without writePaths gets a vibe-assets sandbox envelope', () =
   assert.equal(diagnostic, 'intent-defaults-applied');
   assert.deepEqual(task.writePaths, ['.vibe-assets/tasks/ping']);
   assert.equal(task.workspaceMode, 'shared-locked');
+  assert.equal(task.dependencyGate, 'accepted');
   assert.ok(task.authorityRequest.toolKinds.includes('write'));
+});
+
+test('analysis tasks default to reviewed dependency gate', () => {
+  const { task, appliedDefaults } = normalizePlanMeetingTask({
+    id: 'explain',
+    title: 'Explain',
+    prompt: '解释一下登录流程在干什么',
+    deps: [],
+  }, 'claude-code');
+  assert.equal(task.workspaceMode, 'read-only');
+  assert.equal(task.dependencyGate, 'reviewed');
+  assert.ok(appliedDefaults?.some((note) => note.includes('dependency gate reviewed')));
 });
 
 test('test-intent without commands probes package.json for npm test', async (t) => {

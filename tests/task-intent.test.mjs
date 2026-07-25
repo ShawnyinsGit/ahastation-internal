@@ -7,6 +7,7 @@ import test from 'node:test';
 import {
   applyTaskDispatchDefaults,
   detectSuggestedCommands,
+  inferDefaultDependencyGate,
   inferTaskIntent,
   sandboxWritePath,
 } from '../dist-electron/task-intent.js';
@@ -53,6 +54,23 @@ test('inferTaskIntent separates build and lint asks from tests', () => {
 test('sandboxWritePath stays under .vibe-assets/tasks', () => {
   assert.equal(sandboxWritePath('ping-shared'), '.vibe-assets/tasks/ping-shared');
   assert.equal(sandboxWritePath('weird id!!'), '.vibe-assets/tasks/weird-id');
+});
+
+test('inferDefaultDependencyGate prefers reviewed for analysis and accepted for writers', () => {
+  assert.equal(inferDefaultDependencyGate({
+    workspaceMode: 'read-only',
+    prompt: '解释登录流程',
+  }), 'reviewed');
+  assert.equal(inferDefaultDependencyGate({
+    prompt: '解释一下这段代码在干什么',
+  }), 'reviewed');
+  assert.equal(inferDefaultDependencyGate({
+    writePaths: ['src/auth.ts'],
+    prompt: '解释登录流程',
+  }), 'accepted');
+  assert.equal(inferDefaultDependencyGate({
+    prompt: '修复登录校验并补测试',
+  }), 'accepted');
 });
 
 test('detectSuggestedCommands probes package managers and language markers', async (t) => {

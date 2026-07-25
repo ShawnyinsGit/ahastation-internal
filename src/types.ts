@@ -274,6 +274,8 @@ export interface RendererTaskSnapshot {
     title: string;
     prompt: string;
     deps: string[];
+    /** When dependents of this task may start. */
+    dependencyGate?: 'reviewed' | 'accepted';
     status: string;
     backendId: string;
     attempt: number;
@@ -475,6 +477,16 @@ export interface MeetingPlanNode {
   contextSelection?: TaskContextSelection;
   workspaceMode?: TaskWorkspaceMode;
   authorityRequest?: TaskAuthorityRequest;
+  /** When dependents may start. Defaults to accepted when omitted. */
+  dependencyGate?: 'reviewed' | 'accepted';
+  /**
+   * Authoritative DAG readiness from WorkerScheduler.
+   * Prefer this over status heuristics in capacity / board projections.
+   */
+  dependencyRelease?: 'none' | 'reviewed' | 'accepted';
+  /** True while the worker session is being brought up (slot already consumed
+   *  but status is still 'pending'). Mirrors backend MeetingPlanNode.launching. */
+  launching?: boolean;
   budget?: TaskBudget;
   budgetState?: {
     attempts: number;
@@ -700,6 +712,10 @@ export interface DeliveryView {
     report: WorkReport;
     verification: { passed: boolean; checks: unknown[]; error?: string };
     review: { passed: boolean; findings: unknown[] };
+    /** True explore / verbal findings — no code paths to freeze. */
+    reportOnly?: boolean;
+    /** Freeze failed with file changes — Accept must not stage Meeting acceptance. */
+    freezeDeferred?: boolean;
   };
   integration?: Record<string, unknown>;
   error?: string;
@@ -1054,7 +1070,15 @@ export interface SessionsApi {
   setCoordinator: (
     sessionId: string | null,
     hostId: string,
-  ) => Promise<{ ok: true; coordinatorHostId: string } | { ok: false; error: string }>;
+  ) => Promise<
+    | {
+      ok: true;
+      coordinatorHostId: string;
+      executionHostId?: string;
+      handoff?: 'talker-role-only';
+    }
+    | { ok: false; error: string }
+  >;
   restartHost: (
     sessionId: string | null,
     hostId: string,
@@ -1130,7 +1154,13 @@ export interface VibeMeetApi {
     items: AttachmentSendWire[],
     caption: string,
   ) => Promise<{ ok: boolean; error?: string; inlinedCount?: number; workspaceCount?: number }>;
-  resolvePermission: (sessionId: string | null, id: string, decision: 'allow' | 'deny', message?: string) => Promise<{ ok: boolean }>;
+  resolvePermission: (
+    sessionId: string | null,
+    id: string,
+    decision: 'allow' | 'deny',
+    message?: string,
+    scope?: 'worker' | 'task-wide',
+  ) => Promise<{ ok: boolean }>;
   interrupt: (sessionId: string | null) => Promise<{ ok: boolean }>;
   setPermissionMode: (sessionId: string | null, mode: string) => Promise<{ ok: boolean }>;
   setAutoApprove: (scope: AutoApproveScope) => Promise<{ ok: boolean; autoApproveScope?: AutoApproveScope }>;
@@ -1367,6 +1397,7 @@ export interface AhaBarApi {
   resolvePermission: (
     id: string,
     decision: 'allow' | 'deny',
+    scope?: 'worker' | 'task-wide',
   ) => Promise<{ ok: boolean; error?: string }>;
   focusMain: () => Promise<{ ok: boolean }>;
   setExpanded: (expanded: boolean) => Promise<{ ok: boolean }>;
@@ -1494,6 +1525,8 @@ export interface PlanMeetingTaskInput {
   contextSelection?: TaskContextSelection;
   workspaceMode?: TaskWorkspaceMode;
   authorityRequest?: TaskAuthorityRequest;
+  /** When dependents may start: after machine review, or after user acceptance. */
+  dependencyGate?: 'reviewed' | 'accepted';
   requiresDecision?: boolean;
   budget?: TaskBudget;
   acceptanceCriteria?: Array<{

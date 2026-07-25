@@ -8,6 +8,7 @@
 
 import { useState } from 'react';
 import { X } from 'lucide-react';
+import { Modal } from './Modal';
 
 interface VoiceGuideModalProps {
   open: boolean;
@@ -21,8 +22,6 @@ interface VoiceGuideModalProps {
 export function VoiceGuideModal({ open, onClose, onDismissForever }: VoiceGuideModalProps) {
   const [dontShowAgain, setDontShowAgain] = useState(false);
 
-  if (!open) return null;
-
   const handleOpenSettings = () => {
     void window.vibeMeet.openVoiceSettings();
   };
@@ -33,14 +32,19 @@ export function VoiceGuideModal({ open, onClose, onDismissForever }: VoiceGuideM
   };
 
   return (
-    <div className="picker-backdrop" onClick={handleClose}>
-      <div className="picker voice-guide" onClick={(e) => e.stopPropagation()}>
-        <div className="picker-head">
-          <span>升级中文播报音色</span>
-          <button className="picker-close" onClick={handleClose} aria-label="Close"><X size={16} /></button>
-        </div>
+    <Modal
+      open={open}
+      onClose={handleClose}
+      backdropClassName="picker-backdrop"
+      className="picker voice-guide"
+      ariaLabel="升级中文播报音色"
+    >
+      <div className="picker-head">
+        <span>升级中文播报音色</span>
+        <button className="picker-close" onClick={handleClose} aria-label="Close"><X size={16} /></button>
+      </div>
 
-        <div className="voice-guide-body">
+      <div className="voice-guide-body">
           <p className="voice-guide-intro">
             macOS 默认的中文音色比较机械。下载一个 Siri 中文音色后，Claude
             的播报会自然很多——只需要点几下系统设置。
@@ -83,7 +87,6 @@ export function VoiceGuideModal({ open, onClose, onDismissForever }: VoiceGuideM
             </button>
           </div>
         </div>
-      </div>
-    </div>
+    </Modal>
   );
 }

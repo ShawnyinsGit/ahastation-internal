@@ -71,18 +71,6 @@ jobs:
         run: node node_modules/typescript/bin/tsc --noEmit -p tsconfig.electron.json
 
       - name: Test suite
-        if: matrix.os != 'windows-latest'
-        run: npm test
-
-      - name: Test suite (Windows - non-blocking, see TODO)
-        # TODO(win32-tests): ~10 pre-existing failures on win32 (Kimi/Claude/
-        # Codex packaged-runtime resolvers return null - .exe suffix and
-        # path-separator assumptions written on macOS). These are REAL win32
-        # runtime defects, not flaky tests; tracked as a dedicated Windows
-        # adaptation round. Non-blocking so packaging/release isn't held
-        # hostage by pre-existing debt the mac/Linux suites don't cover.
-        if: matrix.os == 'windows-latest'
-        continue-on-error: true
         run: npm test
 
       - name: Package (macOS dmg, unsigned in CI)

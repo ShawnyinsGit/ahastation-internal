@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { access, readFile, stat } from 'node:fs/promises';
 import test from 'node:test';
 
-import { CodexBackend } from '../dist-electron/backends/codex-adapter.js';
+import { CodexBackend, describeCodexTurnError } from '../dist-electron/backends/codex-adapter.js';
 
 function makeSession(commands, events = []) {
   return new CodexBackend().createSession({
@@ -745,4 +745,25 @@ test('Codex app-server steering queues the next turn after interrupt acknowledge
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(turnNumber, 2, 'queued steering starts after authoritative turn completion');
   session.end();
+});
+
+// --- Model suggestions and unsupported-model diagnostics -------------------
+
+test('Codex model suggestions never include third-party IDs the service rejects', () => {
+  const { models } = new CodexBackend().capabilities;
+  assert.ok(models.includes('gpt-5.4'), 'first-party suggestions remain available');
+  assert.equal(models.some((model) => model.toLowerCase().includes('glm')), false,
+    'glm-* IDs 400 under ChatGPT-account auth and must not be suggested');
+});
+
+test('an unsupported-model 400 becomes an actionable message, other errors pass through', () => {
+  const raw = "The 'glm-5.2' model is not supported when signed in with ChatGPT.";
+  const described = describeCodexTurnError(raw);
+  assert.ok(described.startsWith(raw), 'the raw service detail is preserved');
+  assert.ok(described.includes('\"glm-5.2\"'), 'the rejected model ID is named');
+  assert.ok(described.includes('gpt-5.x'), 'the message suggests a supported model family');
+  assert.ok(described.includes('API key'), 'the message suggests the API-key escape hatch');
+
+  const unrelated = 'stream disconnected before completion';
+  assert.equal(describeCodexTurnError(unrelated), unrelated);
 });

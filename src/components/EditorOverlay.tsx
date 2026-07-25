@@ -12,6 +12,7 @@
 import { useEffect, useState } from 'react';
 import { Mic, MicOff, Square, ChevronLeft } from 'lucide-react';
 import { OpenCodeEditor } from './OpenCodeEditor';
+import { requestHideBrowser } from '../lib/browser-store';
 import {
   NO_EDITOR_CAPABILITIES,
   type EditorCapabilities,
@@ -51,6 +52,10 @@ export function EditorOverlay({
 }: EditorOverlayProps) {
   const [capabilities, setCapabilities] = useState<EditorCapabilities>(NO_EDITOR_CAPABILITIES);
   const [bindError, setBindError] = useState<string | null>(null);
+
+  // The overlay covers the stage area where the native browser
+  // WebContentsView paints — hide it for the overlay's lifetime.
+  useEffect(() => requestHideBrowser(), []);
 
   // Resolve the IDE capabilities for the current host (default ide today).
   useEffect(() => {

@@ -8,6 +8,7 @@ import {
   mapUiDecisionToOpencode,
   PermissionBroker,
 } from '../dist-electron/permission-broker.js';
+import { isInProcSafeTool } from '../dist-electron/auto-approve-policy.js';
 import { compileTaskAuthority } from '../dist-electron/task-authority.js';
 import { mkdtempSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -296,5 +297,115 @@ test('canonical decisions use only a valid bounded task grant', () => {
       normalizationDiagnostic: 'opaque-shell-command',
       requiresUser: true,
     },
+  );
+});
+
+// ---------------------------------------------------------------------------
+// In-proc tool whitelist: meeting MCP + Task bypass the external ask-user path
+// ---------------------------------------------------------------------------
+
+test('in-proc meeting tools and Task are whitelisted, other MCP tools are not', () => {
+  assert.equal(isInProcSafeTool('mcp__meeting__report_progress'), true);
+  assert.equal(isInProcSafeTool('mcp__meeting-worker__submit_report'), true);
+  assert.equal(isInProcSafeTool('Task'), true);
+  assert.equal(isInProcSafeTool('mcp__embedded-browser__click'), false);
+  assert.equal(isInProcSafeTool('mcp__computer-use__type'), false);
+  assert.equal(isInProcSafeTool('mcp__github__create_issue'), false);
+  assert.equal(isInProcSafeTool('Bash'), false);
+});
+
+function externalNormalized(root) {
+  return {
+    ok: true,
+    request: {
+      schemaVersion: 1,
+      taskId: 'task-a',
+      attempt: 1,
+      backendId: 'codex',
+      kind: 'external',
+      workspaceRoot: root,
+      readPaths: [],
+      writePaths: [],
+      networkHosts: [],
+      environmentKeys: [],
+      sideEffects: ['external-service'],
+      nativeRequestId: 'native-ext',
+    },
+  };
+}
+
+test('in-proc external tools allow even without a grant, and are journalled', () => {
+  const root = mkdtempSync(join(tmpdir(), 'ahastation-broker-inproc-'));
+  const identity = (toolName) => ({
+    backendId: 'codex',
+    taskId: 'task-a',
+    attempt: 1,
+    nativeRequestId: 'native-ext',
+    toolName,
+  });
+  for (const toolName of ['mcp__meeting-worker__submit_report', 'mcp__meeting__report_progress', 'Task']) {
+    const result = decideTaskPermission(externalNormalized(root), undefined, Date.now(), identity(toolName));
+    assert.deepEqual(result.decision, { kind: 'allow', reason: 'in-proc-tool-safe' }, toolName);
+    // The decision still carries a canonical safeInput for the journal.
+    assert.equal(result.safeInput.taskId, 'task-a');
+    assert.equal(result.safeInput.kind, 'external');
+  }
+});
+
+test('non-whitelisted external tools keep the previous behavior', () => {
+  const root = mkdtempSync(join(tmpdir(), 'ahastation-broker-ext-'));
+  mkdirSync(join(root, 'src'), { recursive: true });
+  const approvedAt = 1_700_000_000_000;
+  const grant = compileTaskAuthority(
+    'task-a',
+    1,
+    1,
+    'approval-a',
+    root,
+    {
+      writePaths: ['src'],
+      toolKinds: ['read', 'write', 'external'],
+      workingDirectories: ['.'],
+      commands: [],
+      environmentKeys: [],
+      maxCommandTimeoutMs: 30_000,
+      networkHosts: [],
+    },
+    approvedAt,
+  );
+  const identity = {
+    backendId: 'codex',
+    taskId: 'task-a',
+    attempt: 1,
+    nativeRequestId: 'native-ext',
+    toolName: 'mcp__embedded-browser__click',
+  };
+  // With a grant: external stays ask-user (high-risk).
+  assert.equal(
+    decideTaskPermission(externalNormalized(root), grant, approvedAt + 1, identity).decision.kind,
+    'ask-user',
+  );
+  // Without a grant: fail closed as before.
+  assert.deepEqual(
+    decideTaskPermission(externalNormalized(root), undefined, approvedAt + 1, identity).decision,
+    { kind: 'deny', reason: 'task-authority-missing' },
+  );
+  // Whitelist never applies to non-external kinds: a workspace write from a
+  // meeting-prefixed tool name still goes through the grant.
+  const writeNormalized = {
+    ok: true,
+    request: {
+      ...externalNormalized(root).request,
+      kind: 'write',
+      writePaths: ['src/a.ts'],
+      sideEffects: ['workspace-write'],
+    },
+  };
+  assert.deepEqual(
+    decideTaskPermission(writeNormalized, undefined, approvedAt + 1, {
+      ...identity,
+      toolName: 'mcp__meeting-worker__submit_report',
+    }).decision,
+    { kind: 'deny', reason: 'task-authority-missing' },
   );
 });

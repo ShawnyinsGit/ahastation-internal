@@ -27,7 +27,8 @@
 
 ```bash
 npm ci
-npm run dev          # vite + electron 开发模式
+npm run dev          # renderer 开发服务器（vite）
+npm run dev:electron # 另开一个终端：编译 electron 侧并连接 vite 启动应用
 npm test             # 全量 node 测试（先构建 electron 侧）
 # 双侧 typecheck
 npm run typecheck
@@ -37,7 +38,7 @@ npm run typecheck
 
 ```bash
 # 显式启用后才会调用真实 Claude / Codex Worker
-set AHASTATION_REAL_WORKER_SMOKE=1
+export AHASTATION_REAL_WORKER_SMOKE=1   # PowerShell: $env:AHASTATION_REAL_WORKER_SMOKE='1'
 npm run test:real-workers
 ```
 

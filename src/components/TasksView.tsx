@@ -10,6 +10,7 @@ import {
   ShieldAlert,
 } from 'lucide-react';
 import type { AggregatedTask, CrossProjectTasks } from '../lib/meeting-store';
+import { dependencyGateShortLabel } from '../lib/dependency-gate';
 import { TASK_COLUMNS, type TaskColumnId } from '../lib/task-columns';
 import type { WorkerStatus } from '../types';
 
@@ -57,6 +58,9 @@ function TaskCard({ task, onOpen }: { task: AggregatedTask; onOpen: () => void }
       </span>
       <span className="tasks-card-foot">
         <em>{task.backendId ?? 'Backend 待定'}</em>
+        <em className={`tasks-card-gate is-${task.dependencyGate}`}>
+          {dependencyGateShortLabel(task.dependencyGate)}
+        </em>
         {task.attempt > 1 && <em>Attempt {task.attempt}</em>}
         {task.deps.length > 0 && <em>依赖 {task.deps.length}</em>}
       </span>

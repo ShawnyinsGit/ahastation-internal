@@ -6,7 +6,7 @@ import { z } from 'zod';
 import { acceptanceCriterionSchema, workReportSchema } from './worker-protocol.js';
 import { taskExecutionProfileSchema } from './task-collaboration.js';
 import { DEFAULT_TASK_BUDGET, taskBudgetSchema } from './task-budget.js';
-import { applyTaskDispatchDefaults } from './task-intent.js';
+import { applyTaskDispatchDefaults, inferDefaultDependencyGate } from './task-intent.js';
 
 export { MEETING_TOOLS, MEETING_TOOL_NAMES } from './meeting-tool-names.js';
 export type { MeetingToolName } from './meeting-tool-names.js';
@@ -41,6 +41,11 @@ const planMeetingTaskBaseShape = {
   writePaths: z.array(z.string().min(1)).max(100).optional().describe('Expected output paths, used for non-Git workspace locking.'),
   acceptanceCriteria: z.array(acceptanceCriterionSchema).max(100).optional()
     .describe('User-approved verification criteria. Legacy tasks without criteria receive one explicit manual criterion.'),
+  dependencyGate: z.enum(['reviewed', 'accepted']).optional()
+    .describe(
+      'When dependents may start. "reviewed" releases after verification+review; '
+      + '"accepted" (default) waits for durable user acceptance and integration.',
+    ),
   requiresDecision: z.boolean().optional()
     .describe('Whether the Coordinator expects this task may need a user decision before completion.'),
   budget: taskBudgetSchema.optional()
@@ -126,6 +131,7 @@ export type PlanMeetingTaskInput = z.infer<typeof planMeetingTaskInputSchema>;
 export const planMeetingTaskSchema = z.object({
   ...planMeetingTaskBaseShape,
   budget: taskBudgetSchema,
+  dependencyGate: z.enum(['reviewed', 'accepted']).default('accepted'),
   executionProfile: taskExecutionProfileSchema,
   contextSelection: taskContextSelectionSchema,
   workspaceMode: z.enum(['read-only', 'git-worktree', 'shared-locked']),
@@ -354,6 +360,17 @@ export function normalizePlanMeetingTask(
     baseAuthority,
     legacy.acceptanceCriteria,
   );
+  const inferredGate = inferDefaultDependencyGate({
+    workspaceMode,
+    writePaths: authorityRequest.writePaths,
+    title: legacy.title,
+    prompt: legacy.prompt,
+  });
+  const dependencyGate = legacy.dependencyGate ?? inferredGate;
+  const gateNotes = [...(defaults.notes ?? [])];
+  if (legacy.dependencyGate === undefined && dependencyGate === 'reviewed') {
+    gateNotes.push('dependency gate reviewed (analysis / read-only)');
+  }
   const normalized = planMeetingTaskSchema.parse({
     ...legacy,
     deps: legacy.deps ?? [],
@@ -377,18 +394,20 @@ export function normalizePlanMeetingTask(
     workspaceMode,
     authorityRequest,
     budget: legacy.budget ?? DEFAULT_TASK_BUDGET,
+    dependencyGate,
   });
   const wasLegacy = legacy.executionProfile === undefined
     || legacy.contextSelection === undefined
     || legacy.workspaceMode === undefined
     || legacy.authorityRequest === undefined
-    || legacy.budget === undefined;
+    || legacy.budget === undefined
+    || legacy.dependencyGate === undefined;
   const diagnostic = defaults.diagnostic
     ?? (wasLegacy ? 'legacy-plan-task-normalized' as const : undefined);
   return {
     task: normalized,
     ...(diagnostic ? { diagnostic } : {}),
-    ...(defaults.notes?.length ? { appliedDefaults: defaults.notes } : {}),
+    ...(gateNotes.length ? { appliedDefaults: gateNotes } : {}),
   };
 }
 

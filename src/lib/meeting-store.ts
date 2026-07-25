@@ -288,6 +288,8 @@ export interface AggregatedTask {
   statusLabel: string;
   backendId: string | null;
   deps: string[];
+  /** When dependents of this task may start. */
+  dependencyGate: 'reviewed' | 'accepted';
   attempt: number;
   /** Why this task is parked on the user, or null when nothing is blocking. */
   blockedReason: string | null;
@@ -751,6 +753,7 @@ class MeetingStore {
           statusLabel: WORKER_STATUS_LABEL[status],
           backendId: worker?.backendId ?? node.executorBackendId ?? null,
           deps: node.deps,
+          dependencyGate: node.dependencyGate === 'reviewed' ? 'reviewed' : 'accepted',
           attempt: worker?.attempt ?? 1,
           blockedReason,
         });
@@ -1659,11 +1662,14 @@ class MeetingStore {
           candidateHostId,
           error: e.error,
         },
-        lastError: `主持人 ${e.hostId} 已退出，可在参与者面板选 ${candidateHostId} 接管`,
+        lastError: `主持人 ${e.hostId} 已退出，可在参与者面板把对话角色交给 ${candidateHostId}（Worker 执行仍在 default）`,
       }));
       this.bumpUnread(slot);
       if (slot.id === this.activeId) {
-        this.announce(`主持人 ${e.hostId} 已退出。可在参与者面板选择 ${e.candidateHostId} 接管，已有 Worker 会继续运行。`);
+        this.announce(
+          `主持人 ${e.hostId} 已退出。可在参与者面板把 Coordinator 对话角色交给 ${e.candidateHostId}；`
+          + '任务调度与工作区仍留在 default，不会跟着迁移。',
+        );
       }
       return;
     }
@@ -2341,7 +2347,8 @@ class MeetingStore {
       return;
     }
     try {
-      await window.vibeMeet.sendUserText(slot.id, text);
+      const res = await window.vibeMeet.sendUserText(slot.id, text);
+      if (!res.ok) throw new Error(res.error ?? 'Send rejected by main process');
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error('[meeting-store] sendText failed:', msg);
@@ -2378,7 +2385,8 @@ class MeetingStore {
       return;
     }
     try {
-      await window.vibeMeet.sendUserImage(slot.id, dataUrl, caption);
+      const res = await window.vibeMeet.sendUserImage(slot.id, dataUrl, caption);
+      if (!res.ok) throw new Error(res.error ?? 'Send rejected by main process');
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error('[meeting-store] sendImage failed:', msg);
@@ -2476,7 +2484,11 @@ class MeetingStore {
     return () => { this.droppedFileListeners.delete(cb); };
   }
 
-  async resolvePermission(id: string, decision: 'allow' | 'deny'): Promise<{ ok: true } | { ok: false; error: string }> {
+  async resolvePermission(
+    id: string,
+    decision: 'allow' | 'deny',
+    scope: 'worker' | 'task-wide' = 'worker',
+  ): Promise<{ ok: true } | { ok: false; error: string }> {
     const sessionId = this.effectiveSessionId();
     if (!sessionId) return { ok: false, error: 'No active session' };
     const slot = this.slots.get(sessionId);
@@ -2496,7 +2508,10 @@ class MeetingStore {
     });
 
     try {
-      await window.vibeMeet.resolvePermission(sessionId, id, decision);
+      const res = await window.vibeMeet.resolvePermission(sessionId, id, decision, undefined, scope);
+      // A structured failure means the main process never delivered the reply
+      // (e.g. session slot not found) — treat it exactly like a thrown error.
+      if (!res.ok) throw new Error('主进程未找到待处理的权限请求');
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error('[meeting-store] resolvePermission IPC failed:', err);

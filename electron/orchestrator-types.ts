@@ -67,6 +67,12 @@ export interface MeetingPlanNode {
   title: string;
   status: WorkerStatusKind;
   deps: string[];
+  /** True while spawnWorker is bringing the session up (context/profile
+   *  compilation, workspace prep, session.start). The handle is still 'pending'
+   *  but a concurrency slot is already consumed; surfacing this lets the
+   *  renderer's capacity banner reflect real saturation during the launch
+   *  window instead of lagging one emit behind. */
+  launching?: boolean;
   /** Immutable accepted task replaced by this versioned rework node. */
   supersedesTaskId?: string;
   executorBackendId?: string;
@@ -75,6 +81,13 @@ export interface MeetingPlanNode {
   contextSelection?: PlanMeetingTask['contextSelection'];
   workspaceMode?: PlanMeetingTask['workspaceMode'];
   authorityRequest?: PlanMeetingTask['authorityRequest'];
+  /** When dependents may start. Defaults to accepted. */
+  dependencyGate?: 'reviewed' | 'accepted';
+  /**
+   * Authoritative DAG readiness computed by WorkerScheduler.
+   * Renderer capacity must prefer this over status heuristics.
+   */
+  dependencyRelease?: 'none' | 'reviewed' | 'accepted';
   budget?: PlanMeetingTask['budget'];
   budgetState?: {
     attempts: number;
@@ -230,6 +243,8 @@ export interface WorkerHandle {
   approvalRecordedAt?: number;
   approvedPlanVersion?: number;
   acceptanceCriteria?: import('./worker-protocol.js').AcceptanceCriterion[];
+  /** When dependents of this task may start. Default accepted. */
+  dependencyGate: 'reviewed' | 'accepted';
   status: WorkerStatusKind;
   session: BackendSession | null;
   /** Last durable native conversation handle. Captured before interruption so
@@ -284,9 +299,15 @@ export interface WorkerHandle {
   /** One-shot alert latch for a parked stretch, mirroring stallNotified. */
   parkedNotified?: boolean;
   /** Consecutive identical authority hard-denies. After the streak limit the
-   *  attempt terminates as failed/blocked instead of burning the token budget. */
+   *  attempt terminates as failed/blocked instead of burning the token budget.
+   *  Keyed by reason + request fingerprint so only a worker re-issuing the
+   *  byte-identical request accumulates strikes. */
   authorityDenyStreak: number;
-  lastAuthorityDenyReason?: string;
+  lastAuthorityDenyFingerprint?: string;
+  /** One-shot task-level latch: a report-protocol failure already consumed its
+   *  automatic rework attempt. Never reset across attempts, so a task gets at
+   *  most one free "resubmit the report" attempt in its whole lifetime. */
+  reportRecoveryReworked?: boolean;
   /** Targets the user approved by hand during this attempt. Consulted only for
    *  remediable authority misses so the same directory/command/host stops
    *  asking; dropped whenever the attempt or its grant changes. */
@@ -294,6 +315,17 @@ export interface WorkerHandle {
   /** Canonical requests currently waiting on a user decision, keyed by native
    *  request id, so an approval can be folded into the addendum. */
   pendingAuthorityAsks?: Map<string, import('./backends/canonical-execution.js').CanonicalExecutionRequest>;
+  /** Fingerprints (toolName+input hash) of asks the user already allowed this
+   *  attempt, for requests the addendum cannot remember (non-normalizable or
+   *  opaque-shell/external high-risk). An identical repeat auto-allows instead
+   *  of raising another card. Survives a same-task rework; never crosses tasks. */
+  approvedAskFingerprints?: Set<string>;
+  /** Ask fingerprints currently waiting on a user decision, keyed by native
+   *  request id, so an allow can be promoted into approvedAskFingerprints. */
+  pendingAskFingerprints?: Map<string, string>;
+  /** One-shot latch: the addendum saturation briefing has been emitted for
+   *  this attempt. Reset on attempt/grant boundaries. */
+  addendumCapNotified?: boolean;
 }
 
 export interface RecentFileEdit {

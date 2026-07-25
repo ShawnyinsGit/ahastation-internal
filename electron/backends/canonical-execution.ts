@@ -158,6 +158,68 @@ function networkHosts(input: Record<string, unknown>): string[] {
   }));
 }
 
+/** Conservative shell tokenizer for single simple commands. Splits on
+ *  whitespace with single/double-quote grouping (no expansion inside quotes).
+ *  Any unquoted shell metacharacter, any `$`/backtick/backslash inside double
+ *  quotes, an unclosed quote, or an empty result returns null — those commands
+ *  stay opaque and keep escalating to the user. */
+export function tokenizeSimpleCommand(command: string): string[] | null {
+  const tokens: string[] = [];
+  let current = '';
+  let hasContent = false;
+  let index = 0;
+  const push = () => {
+    if (hasContent) tokens.push(current);
+    current = '';
+    hasContent = false;
+  };
+  while (index < command.length) {
+    const char = command[index]!;
+    if (char === ' ' || char === '\t') {
+      push();
+      index += 1;
+      continue;
+    }
+    if (char === "'") {
+      const end = command.indexOf("'", index + 1);
+      if (end === -1) return null; // unclosed quote
+      current += command.slice(index + 1, end);
+      hasContent = true;
+      index = end + 1;
+      continue;
+    }
+    if (char === '"') {
+      let cursor = index + 1;
+      let chunk = '';
+      for (;;) {
+        if (cursor >= command.length) return null; // unclosed quote
+        const inner = command[cursor]!;
+        if (inner === '"') break;
+        // Expansion or escaping inside double quotes → stay opaque.
+        if (inner === '$' || inner === '`' || inner === '\\') return null;
+        chunk += inner;
+        cursor += 1;
+      }
+      current += chunk;
+      hasContent = true;
+      index = cursor + 1;
+      continue;
+    }
+    if (
+      '|&;<>()$`\\*?~#'.includes(char)
+      || char === '\n'
+      || char === '\r'
+    ) {
+      return null;
+    }
+    current += char;
+    hasContent = true;
+    index += 1;
+  }
+  push();
+  return tokens.length > 0 ? tokens : null;
+}
+
 function exactCommand(
   input: Record<string, unknown>,
 ): { executable: string; argv: string[] } | 'opaque' | null {
@@ -185,7 +247,17 @@ function exactCommand(
       return executable?.trim() ? { executable: executable.trim(), argv } : null;
     }
   }
-  if (typeof input.command === 'string' && input.command.trim()) return 'opaque';
+  if (typeof input.command === 'string' && input.command.trim()) {
+    // String commands (Claude Code Bash, kimi, qoder) used to be uniformly
+    // opaque — every call escalated to the user. Simple commands tokenize to
+    // an exact argv boundary; anything with shell metacharacters stays opaque.
+    const tokens = tokenizeSimpleCommand(input.command.trim());
+    if (tokens) {
+      const [executable, ...argv] = tokens;
+      if (executable?.trim()) return { executable: executable.trim(), argv };
+    }
+    return 'opaque';
+  }
   return null;
 }
 

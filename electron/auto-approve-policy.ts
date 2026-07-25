@@ -84,3 +84,14 @@ export function classifyToolRisk(toolName: string): ToolRisk {
   // harmless tool than silently auto-allow something we haven't classified.
   return 'destructive';
 }
+
+/** In-proc tools that are safe regardless of auto-approve scope: the meeting
+ *  MCP servers only drive UI/orchestrator state, and `Task` merely delegates
+ *  to a subagent whose individual tool calls are independently gated (same
+ *  argument as SAFE_BUILTIN_TOOLS above). Consulted by the task-authority
+ *  bridge, where these otherwise classify as 'external' and would raise an
+ *  approval card on every meeting-worker report. */
+export function isInProcSafeTool(toolName: string): boolean {
+  if (toolName === 'Task') return true;
+  return SAFE_MCP_PREFIXES.some((prefix) => toolName.startsWith(prefix));
+}

@@ -134,13 +134,13 @@ export interface OrchestratorBridge {
 
   // Document tool (report mode — saves full response as a reviewable document)
   saveDocument(input: { title: string; content: string; spokenSummary: string }): Promise<{ ok: boolean; filename?: string; error?: string }>;
-  sendHostMessage(fromHostId: string, toHostId: string, text: string): { ok: boolean; error?: string };
+  sendHostMessage(fromHostId: string, toHostId: string, text: string): { ok: boolean; error?: string; truncated?: boolean };
   getCoordinatorHostId(): string;
 
   // Worker tools
-  markWorkerTaskDone(workerId: string, summary: string): void;
-  submitWorkerReport(workerId: string, report: WorkReport): void;
-  submitWorkerDelivery(workerId: string, files: string[]): void;
+  markWorkerTaskDone(workerId: string, summary: string, sourceAttempt?: number): void;
+  submitWorkerReport(workerId: string, report: WorkReport, sourceAttempt?: number): void;
+  submitWorkerDelivery(workerId: string, files: string[], sourceAttempt?: number): void;
   askCoordinator(
     workerId: string,
     question: string,
@@ -206,7 +206,9 @@ export function buildTalkerMcp(
         async ({ hostId: targetHostId, question }) => {
           if (!canCoordinate()) return denied();
           const result = bridge.sendHostMessage(hostId, targetHostId, `[expert request] ${question}`);
-          return { content: [{ type: 'text', text: result.ok ? `question sent to ${targetHostId}` : `error: ${result.error}` }] };
+          if (!result.ok) return { content: [{ type: 'text', text: `error: ${result.error}` }] };
+          const note = result.truncated ? ' (truncated to fit the host bus)' : '';
+          return { content: [{ type: 'text', text: `question sent to ${targetHostId}${note}` }] };
         },
       ),
       tool(
@@ -215,7 +217,9 @@ export function buildTalkerMcp(
         { text: z.string().min(1).max(20_000) },
         async ({ text }) => {
           const result = bridge.sendHostMessage(hostId, bridge.getCoordinatorHostId(), `[expert reply from ${hostId}] ${text}`);
-          return { content: [{ type: 'text', text: result.ok ? 'reply sent to coordinator' : `error: ${result.error}` }] };
+          if (!result.ok) return { content: [{ type: 'text', text: `error: ${result.error}` }] };
+          const note = result.truncated ? ' (truncated to fit the host bus)' : '';
+          return { content: [{ type: 'text', text: `reply sent to coordinator${note}` }] };
         },
       ),
       tool(
@@ -590,7 +594,7 @@ export function buildWorkerMcp(
         'Deprecated compatibility hint. This does not complete the task or release dependencies. Submit a full WorkReport with submit_work_report.',
         taskDoneArgsSchema,
         async ({ summary }) => {
-          bridge.markWorkerTaskDone(workerId, summary);
+          bridge.markWorkerTaskDone(workerId, summary, sourceAttempt);
           return { content: [{ type: 'text', text: 'summary recorded; submit_work_report is still required' }] };
         },
       ),
@@ -599,7 +603,7 @@ export function buildWorkerMcp(
         'Submit the authoritative WorkReport. The task will then be verified and reviewed; dependencies release only after user acceptance.',
         submitWorkReportArgsSchema,
         async ({ report }) => {
-          bridge.submitWorkerReport(workerId, report);
+          bridge.submitWorkerReport(workerId, report, sourceAttempt);
           return { content: [{ type: 'text', text: 'work report submitted for verification' }] };
         },
       ),
@@ -608,7 +612,7 @@ export function buildWorkerMcp(
         'Explicitly declare which files are the final deliverables for user acceptance. Use this when you have produced documents, code, or other artifacts that the user should review. Paths must be absolute. Call this before task_done if you want to override the automatic file tracking.',
         submitDeliveryArgsSchema,
         async ({ files }) => {
-          bridge.submitWorkerDelivery(workerId, files);
+          bridge.submitWorkerDelivery(workerId, files, sourceAttempt);
           return { content: [{ type: 'text', text: `submitted ${files.length} file(s) for delivery` }] };
         },
       ),

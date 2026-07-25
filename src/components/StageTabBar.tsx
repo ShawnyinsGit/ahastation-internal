@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { Activity, Globe, Terminal, FileText, X, Plus, SquareArrowOutUpRight } from 'lucide-react';
 import type { StageWindow, StageWindowType } from '../lib/stage-window-store';
-import { browserStore } from '../lib/browser-store';
+import { requestHideBrowser } from '../lib/browser-store';
 
 interface StageTabBarProps {
   windows: StageWindow[];
@@ -31,7 +31,6 @@ export function StageTabBar({
 }: StageTabBarProps) {
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
-  const [browserWasVisible, setBrowserWasVisible] = useState(false);
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -47,16 +46,8 @@ export function StageTabBar({
   // Hide browser WebContentsView when the "+" dropdown opens, because the
   // native OS view paints ON TOP of all renderer HTML (z-index is irrelevant).
   useEffect(() => {
-    if (menuOpen) {
-      const snap = browserStore.getSnapshot();
-      setBrowserWasVisible(snap.visible);
-      if (snap.visible) {
-        void browserStore.setVisible(false);
-      }
-    } else if (browserWasVisible) {
-      void browserStore.setVisible(true);
-      setBrowserWasVisible(false);
-    }
+    if (!menuOpen) return;
+    return requestHideBrowser();
   }, [menuOpen]);
 
   const handleCreate = (type: StageWindowType) => {

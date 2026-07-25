@@ -10,13 +10,14 @@ export const WORKER_STATUS_LABEL: Record<WorkerStatus, string> = {
   verifying: '校验中',
   reviewing: '评审中',
   'coordinator-reviewing': 'Coordinator 审查中',
-  'awaiting-acceptance': '等待验收',
+  'awaiting-acceptance': '待人手确认',
   'integration-queued': '等待集成',
   integrating: '集成中',
   'integration-conflict': '集成冲突',
   reworking: '需要返工',
   'budget-paused': '预算暂停',
-  accepted: '已接受',
+  /** On Meeting integration branch — not published to the user workspace. */
+  accepted: '已进 Meeting 分支',
   interrupted: '已中断',
   done: '已完成',
   failed: '失败',
@@ -33,8 +34,8 @@ export interface TaskColumnMeta {
 export const TASK_COLUMNS: readonly TaskColumnMeta[] = [
   { id: 'attention', title: '待批准', hint: '卡在你这里' },
   { id: 'active', title: '进行中', hint: 'Worker 正在推进' },
-  { id: 'review', title: '待验收', hint: '交付已就绪' },
-  { id: 'settled', title: '已完成', hint: '终态' },
+  { id: 'review', title: '待确认', hint: '需人手确认的交付' },
+  { id: 'settled', title: '已完成', hint: 'Meeting 分支或终态' },
 ];
 
 const SETTLED: ReadonlySet<WorkerStatus> = new Set<WorkerStatus>([

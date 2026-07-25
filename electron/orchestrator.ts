@@ -193,6 +193,11 @@ interface OrchestratorOpts {
   /** How long an active review may sit without Coordinator progress before the
    * stall budget is charged. Set to 0 to disable the watchdog in tests. */
   reviewStallTimeoutMs?: number;
+  /** How long a Coordinator -> expert `ask_host` may sit without any talker
+   *  reply from the target before the Coordinator is nudged to decide whether
+   *  to keep waiting or proceed. Host-to-host asks have no request/response
+   *  correlation otherwise. Set to 0 to disable the watchdog in tests. */
+  hostAskTimeoutMs?: number;
   /** Optional workspace allocator override. Production uses the Meeting-owned
    * manager created below; tests with stub sessions may inject one to exercise
    * the real managed-worktree delivery path without spawning a backend CLI. */
@@ -202,9 +207,15 @@ interface OrchestratorOpts {
 export class Orchestrator implements OrchestratorBridge {
   /** All host groups in this meeting. Always has at least 'default'. */
   private hostGroups = new Map<string, HostGroup>();
-  /** The single host allowed to coordinate user input and plan mutations. */
+  /**
+   * Host that owns talker coordination (plan chat, review turns, user routing).
+   * This can move via setCoordinator; execution stays on DEFAULT_HOST_ID.
+   */
   private coordinatorHostId = DEFAULT_HOST_ID;
-  /** Single authoritative task graph and worker pool for the whole Meeting. */
+  /**
+   * Single authoritative task graph and worker pool for the whole Meeting.
+   * Always bound to the default HostGroup — setCoordinator does not migrate it.
+   */
   private meetingScheduler!: WorkerScheduler;
   private emit: (e: OrchestratorEvent) => void;
   private cwd: string;
@@ -246,6 +257,13 @@ export class Orchestrator implements OrchestratorBridge {
   private reviewsAwaitingFirstTurn = new Set<string>();
   private reviewStallTimer: ReturnType<typeof setInterval> | null = null;
   private readonly reviewStallTimeoutMs: number;
+  /** Coordinator -> expert asks still awaiting any talker reply. Keyed by the
+   *  target host id (one outstanding ask per expert; a new ask replaces it and
+   *  re-arms the timer). Cleared when the expert emits any talker message. */
+  private pendingHostAsks = new Map<string, { question: string; timer: ReturnType<typeof setTimeout> }>();
+  private readonly hostAskTimeoutMs: number;
+  /** Cross-host messages that arrived before the target Host talker was ready. */
+  private pendingCrossHostMessages = new Map<string, Array<{ from: string; text: string }>>();
   // Active end-of-meeting recap, if any. Tracked so `interrupt()` can reach
   // into a closed orchestrator and abort the recap pass (B4) — otherwise
   // the user pressing the interrupt button after `end()` was a no-op while
@@ -351,6 +369,7 @@ export class Orchestrator implements OrchestratorBridge {
       flush: () => this.repository.flush(),
     });
     this.reviewStallTimeoutMs = opts.reviewStallTimeoutMs ?? 180_000;
+    this.hostAskTimeoutMs = opts.hostAskTimeoutMs ?? 120_000;
     this.coordinatorReviewDriver = new CoordinatorReviewDriver({
       append: async (type, payload) => {
         const projection = (payload as {
@@ -604,15 +623,38 @@ export class Orchestrator implements OrchestratorBridge {
       this.meetingScheduler.setTalkerProvider(() => this.defaultHost().getHost());
     }
 
-    // Subscribe to cross-host messages targeting this group
+    // Subscribe to cross-host messages targeting this group. Queue while the
+    // talker handshake is still in flight so early broadcasts are not dropped.
     this.crossHostBus.subscribe(id, (msg) => {
-      const host = hg.getHost();
-      if (host) {
-        host.sendUserText(`[cross-host from ${msg.from}] ${msg.text}`, 'normal');
-      }
+      this.deliverCrossHostMessage(id, msg.from, msg.text);
     });
 
     return hg;
+  }
+
+  private deliverCrossHostMessage(hostId: string, from: string, text: string): void {
+    const hg = this.hostGroups.get(hostId);
+    const host = hg?.getHost();
+    if (host) {
+      host.sendUserText(`[cross-host from ${from}] ${text}`, 'normal');
+      return;
+    }
+    const queue = this.pendingCrossHostMessages.get(hostId) ?? [];
+    queue.push({ from, text });
+    // Bound memory if a host never becomes ready.
+    if (queue.length > 100) queue.splice(0, queue.length - 100);
+    this.pendingCrossHostMessages.set(hostId, queue);
+  }
+
+  private flushPendingCrossHostMessages(hostId: string): void {
+    const pending = this.pendingCrossHostMessages.get(hostId);
+    if (!pending || pending.length === 0) return;
+    this.pendingCrossHostMessages.delete(hostId);
+    const host = this.hostGroups.get(hostId)?.getHost();
+    if (!host) return;
+    for (const msg of pending) {
+      host.sendUserText(`[cross-host from ${msg.from}] ${msg.text}`, 'normal');
+    }
   }
 
   /** Add a new host group to this meeting. Returns the host group id.
@@ -649,6 +691,7 @@ export class Orchestrator implements OrchestratorBridge {
       try {
         await hg.start();
         if (this.closed) return;
+        this.flushPendingCrossHostMessages(id);
         await this.snapshotActiveMeeting();
         if (!this.closed) {
           this.safeEmit({
@@ -693,6 +736,8 @@ export class Orchestrator implements OrchestratorBridge {
     hg.end();
     this.hostGroups.delete(hostId);
     this.crossHostBus.unsubscribeHost(hostId);
+    this.pendingCrossHostMessages.delete(hostId);
+    this.clearHostAsk(hostId);
     return { ok: true };
   }
 
@@ -711,7 +756,16 @@ export class Orchestrator implements OrchestratorBridge {
     }));
   }
 
-  setCoordinator(hostId: string): { ok: true; coordinatorHostId: string } | { ok: false; error: string } {
+  /**
+   * Talker-role handoff only. WorkerScheduler, workspaces, and Integration Queue
+   * stay on the default HostGroup — this is not an execution failover.
+   */
+  setCoordinator(hostId: string): {
+    ok: true;
+    coordinatorHostId: string;
+    executionHostId: typeof DEFAULT_HOST_ID;
+    handoff: 'talker-role-only';
+  } | { ok: false; error: string } {
     const hg = this.hostGroups.get(hostId);
     if (!hg) return { ok: false, error: `host group '${hostId}' not found` };
     if (!hg.isReady()) return { ok: false, error: `host group '${hostId}' is not ready` };
@@ -722,35 +776,113 @@ export class Orchestrator implements OrchestratorBridge {
     }
     const previous = this.coordinatorHostId;
     this.coordinatorHostId = hostId;
-    void this.repository.append('coordinator-changed', { previous, current: hostId });
-    this.meetingScheduler.setTalkerProvider(() => this.defaultHost().getHost());
+    void this.repository.append('coordinator-changed', {
+      previous,
+      current: hostId,
+      executionHostId: DEFAULT_HOST_ID,
+      handoff: 'talker-role-only',
+    });
+    // Talker provider follows the new coordinator; scheduler identity does not move.
+    this.meetingScheduler.setTalkerProvider(() => this.coordinatorTalkerHost().getHost());
     hg.getHost()?.sendUserText(
-      `[coordinator handoff] You are now the meeting coordinator. Previous coordinator: ${previous}. `
+      `[coordinator handoff] You are now the meeting talker/coordinator. Previous: ${previous}. `
+      + `Worker execution remains on host '${DEFAULT_HOST_ID}' — this handoff does not migrate the Scheduler. `
       + `Current worker state:\n${this.describeWorkers()}`,
       'high',
     );
     this.hostGroups.get(previous)?.getHost()?.sendUserText(
-      `[coordinator handoff] You are now an Expert Talker. ${hostId} is the sole Coordinator. `
+      `[coordinator handoff] You are now an Expert Talker. ${hostId} is the sole Coordinator talker. `
+      + `Worker scheduling still runs on '${DEFAULT_HOST_ID}'. `
       + 'Do not schedule or speak for the meeting; answer only direct mentions or coordinator requests.',
       'high',
     );
     // The incoming Coordinator inherits any review the previous one abandoned.
     this.coordinatorTurnActive = false;
     this.resumeDisconnectedReviews();
-    return { ok: true, coordinatorHostId: hostId };
+    void this.meetingScheduler.redeliverPendingWorkerQuestions();
+    return {
+      ok: true,
+      coordinatorHostId: hostId,
+      executionHostId: DEFAULT_HOST_ID,
+      handoff: 'talker-role-only',
+    };
   }
 
   getCoordinatorHostId(): string {
     return this.coordinatorHostId;
   }
 
-  sendHostMessage(fromHostId: string, toHostId: string, text: string): { ok: boolean; error?: string } {
+  sendHostMessage(fromHostId: string, toHostId: string, text: string): { ok: boolean; error?: string; truncated?: boolean } {
     if (!this.hostGroups.has(fromHostId)) return { ok: false, error: `source host '${fromHostId}' not found` };
     if (!this.hostGroups.has(toHostId)) return { ok: false, error: `target host '${toHostId}' not found` };
-    if (text.length === 0 || text.length > 20_000) return { ok: false, error: 'message length is invalid' };
-    this.crossHostBus.publish({ from: fromHostId, to: toHostId, text });
-    void this.repository.append('host-message', { fromHostId, toHostId, chars: text.length });
-    return { ok: true };
+    if (text.length === 0) return { ok: false, error: 'message length is invalid' };
+    // Truncate to fit the bus cap instead of rejecting. The auto-forwarded
+    // expert response path builds `[expert response from X] <text.slice>` and
+    // ignores the return value, so an over-length reply used to be silently
+    // dropped and the Coordinator never saw it. A marker keeps the cut visible.
+    const HOST_MESSAGE_MAX = 20_000;
+    const TRUNCATE_MARKER = '…[truncated]';
+    let payload = text;
+    let truncated = false;
+    if (text.length > HOST_MESSAGE_MAX) {
+      payload = text.slice(0, HOST_MESSAGE_MAX - TRUNCATE_MARKER.length) + TRUNCATE_MARKER;
+      truncated = true;
+    }
+    this.crossHostBus.publish({ from: fromHostId, to: toHostId, text: payload });
+    void this.repository.append('host-message', {
+      fromHostId,
+      toHostId,
+      chars: payload.length,
+      truncated,
+    });
+    // A Coordinator -> expert ask has no reply correlation; arm a watchdog so a
+    // silent expert doesn't leave the Coordinator blocking blind. Any talker
+    // message from the target clears it (see onHostGroupEvent).
+    if (fromHostId === this.coordinatorHostId && toHostId !== this.coordinatorHostId) {
+      this.trackHostAsk(toHostId, payload);
+    }
+    return { ok: true, truncated };
+  }
+
+  /** Arm (or re-arm) the host-ask watchdog for one expert target. Only the
+   *  latest ask per target is tracked; a new ask replaces the previous timer. */
+  private trackHostAsk(targetHostId: string, payload: string): void {
+    if (this.hostAskTimeoutMs <= 0) return;
+    const existing = this.pendingHostAsks.get(targetHostId);
+    if (existing) clearTimeout(existing.timer);
+    const question = payload.length > 400 ? `${payload.slice(0, 398)}…` : payload;
+    const timer = setTimeout(() => {
+      this.pendingHostAsks.delete(targetHostId);
+      if (this.closed) return;
+      this.notifyHostAskStalled(targetHostId, question);
+    }, this.hostAskTimeoutMs);
+    timer.unref?.();
+    this.pendingHostAsks.set(targetHostId, { question, timer });
+  }
+
+  /** Any talker message from the expert counts as a reply - disarm its timer. */
+  private clearHostAsk(targetHostId: string): void {
+    const entry = this.pendingHostAsks.get(targetHostId);
+    if (!entry) return;
+    clearTimeout(entry.timer);
+    this.pendingHostAsks.delete(targetHostId);
+  }
+
+  private clearAllHostAsks(): void {
+    for (const entry of this.pendingHostAsks.values()) {
+      clearTimeout(entry.timer);
+    }
+    this.pendingHostAsks.clear();
+  }
+
+  private notifyHostAskStalled(targetHostId: string, question: string): void {
+    this.meetingScheduler.briefCoordinator({
+      kind: 'stalled',
+      title: `Expert ${targetHostId} 长时间未回复`,
+      summary: `你向 ${targetHostId} 提出的问题已超过 ${Math.round(this.hostAskTimeoutMs / 1000)} 秒未收到回复：${question}\n可以继续等待，或自行推进 / 换一个专家 / 让用户决定；不要无限期阻塞。`,
+      blockers: ['host-ask-timeout'],
+      recommendedAction: 'request-user-decision',
+    });
   }
 
   async executeMeetingCommand(hostId: string, raw: unknown): Promise<MeetingCommandResult> {
@@ -877,9 +1009,25 @@ export class Orchestrator implements OrchestratorBridge {
   }
 
   /** Get the default host group (always present). */
-  private defaultHost(): HostGroup {
+  /** HostGroup that currently owns the Coordinator talker (may differ from execution). */
+  private coordinatorTalkerHost(): HostGroup {
     const hg = this.hostGroups.get(this.coordinatorHostId);
     if (!hg) throw new Error('coordinator host group missing — this is a bug');
+    return hg;
+  }
+
+  /**
+   * Historical name: returns the current Coordinator talker host, not necessarily
+   * the default execution HostGroup. Prefer executionHost() / coordinatorTalkerHost().
+   */
+  private defaultHost(): HostGroup {
+    return this.coordinatorTalkerHost();
+  }
+
+  /** HostGroup that owns WorkerScheduler / workspaces (always default). */
+  private executionHost(): HostGroup {
+    const hg = this.hostGroups.get(DEFAULT_HOST_ID);
+    if (!hg) throw new Error('default execution host group missing — this is a bug');
     return hg;
   }
 
@@ -891,12 +1039,16 @@ export class Orchestrator implements OrchestratorBridge {
       && e.source === 'talker'
       && e.event.kind === 'message'
     ) {
+      // Any talker message from an expert counts as a reply to an outstanding
+      // ask_host; disarm the watchdog so the Coordinator isn't falsely told it
+      // timed out.
+      this.clearHostAsk(hostId);
       const text = extractText(e.event.message);
       if (text) {
         this.sendHostMessage(
           hostId,
           this.coordinatorHostId,
-          `[expert response from ${hostId}] ${text.slice(0, 20_000)}`,
+          `[expert response from ${hostId}] ${text}`,
         );
       }
     }
@@ -938,8 +1090,12 @@ export class Orchestrator implements OrchestratorBridge {
     if (hg.getHost()) return { ok: false, error: `host '${hostId}' is already running` };
     try {
       await hg.start();
+      this.flushPendingCrossHostMessages(hostId);
       this.safeEmit({ source: 'system', hostId, event: { kind: 'session-ready' } });
-      if (hostId === this.coordinatorHostId) this.resumeDisconnectedReviews();
+      if (hostId === this.coordinatorHostId) {
+        this.resumeDisconnectedReviews();
+        await this.meetingScheduler.redeliverPendingWorkerQuestions();
+      }
       return { ok: true };
     } catch (err) {
       this.diagnostics.log('host-restart-failed', {
@@ -1028,6 +1184,10 @@ export class Orchestrator implements OrchestratorBridge {
     this.taskMailbox.restore(journal);
     this.taskProjection = projectMeetingTasks(journal);
     await this.defaultHost().start(greeting);
+    this.flushPendingCrossHostMessages(this.coordinatorHostId);
+    // A worker may have asked a question while the Coordinator host was still
+    // starting; those messages are durable but undelivered. Re-deliver now.
+    await this.meetingScheduler.redeliverPendingWorkerQuestions();
     if (this.recoveredTasks.length > 0) {
       this.meetingScheduler.emitRecoveredState();
       await this.autoResumeRecoveredReadOnlyTasks();
@@ -1286,11 +1446,16 @@ export class Orchestrator implements OrchestratorBridge {
     this.defaultHost().sendUserImage(content);
   }
 
-  resolvePermission(id: string, decision: 'allow' | 'deny', message?: string) {
+  resolvePermission(
+    id: string,
+    decision: 'allow' | 'deny',
+    message?: string,
+    scope: 'worker' | 'task-wide' = 'worker',
+  ) {
     // Try every active host group; only the one that issued the permission
     // request actually has a matching pending entry.
     for (const hg of this.hostGroups.values()) {
-      hg.resolvePermission(id, decision, message);
+      hg.resolvePermission(id, decision, message, scope);
     }
   }
 
@@ -1384,6 +1549,7 @@ export class Orchestrator implements OrchestratorBridge {
 
     this.closed = true;
     this.stopReviewStallWatchdog();
+    this.clearAllHostAsks();
 
     // End all host groups — wrap in try/finally so cleanup always runs.
     const errors: unknown[] = [];
@@ -2095,9 +2261,9 @@ export class Orchestrator implements OrchestratorBridge {
     }
   }
 
-  markWorkerTaskDone(workerId: string, summary: string): void {
+  markWorkerTaskDone(workerId: string, summary: string, sourceAttempt?: number): void {
     // Search across all host groups.
-    this.meetingScheduler.markTaskDone(workerId, summary);
+    this.meetingScheduler.markTaskDone(workerId, summary, sourceAttempt);
   }
 
   /** Build and durably expose the sole final Meeting delivery. Per-task
@@ -2510,8 +2676,8 @@ export class Orchestrator implements OrchestratorBridge {
     return safeCoordinatorReviewProjection(session);
   }
 
-  submitWorkerReport(workerId: string, report: import('./worker-protocol.js').WorkReport): void {
-    this.meetingScheduler.submitWorkerReport(workerId, report);
+  submitWorkerReport(workerId: string, report: import('./worker-protocol.js').WorkReport, sourceAttempt?: number): void {
+    this.meetingScheduler.submitWorkerReport(workerId, report, sourceAttempt);
   }
 
   // Test-only proxy: forward session events to the scheduler for simulation.
@@ -2522,8 +2688,8 @@ export class Orchestrator implements OrchestratorBridge {
     );
   }
 
-  submitWorkerDelivery(workerId: string, files: string[]): void {
-    this.meetingScheduler.submitWorkerDelivery(workerId, files);
+  submitWorkerDelivery(workerId: string, files: string[], sourceAttempt?: number): void {
+    this.meetingScheduler.submitWorkerDelivery(workerId, files, sourceAttempt);
   }
 
   private notifyCoordinatorReview(briefing: CoordinatorReviewBriefing): void {

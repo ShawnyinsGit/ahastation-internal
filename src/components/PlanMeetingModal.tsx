@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { BackendInfo, MeetingPlanBrief, PlanMeetingTaskInput } from '../types';
+import { requestHideBrowser } from '../lib/browser-store';
 import {
   isWorkerBackendReady,
   normalizePlanDraft,
@@ -94,6 +95,13 @@ export function PlanMeetingModal({
   const [draftBrief, setDraftBrief] = useState<MeetingPlanBrief>(() => cloneBrief(brief, tasks));
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // This modal is a full-screen decision point: the native browser view
+  // would paint over it if a browser stage tab happened to be active.
+  useEffect(() => {
+    if (!open) return;
+    return requestHideBrowser();
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
@@ -450,7 +458,10 @@ export function PlanMeetingModal({
                       />
                     </label>
                   </div>
-                  <small>默认不设预算（不因返工次数暂停）。只有你主动收紧上限时，达到上限才会暂停并等你批准继续。</small>
+                  <small>
+                    默认按近乎无限上限填写（不因返工次数暂停，与主进程一致）。
+                    只有你主动收紧上限时，达到上限才会暂停并等你批准继续。
+                  </small>
                 </fieldset>
 
                 <fieldset>
@@ -647,6 +658,23 @@ export function PlanMeetingModal({
                         <span>{candidate.title || candidate.id}</span>
                       </label>
                     ))}
+                  <label className="plan-dependency-gate">
+                    <span>下游启动门槛</span>
+                    <select
+                      value={task.dependencyGate ?? 'accepted'}
+                      onChange={(event) => patchTask(taskIndex, {
+                        dependencyGate: event.target.value === 'reviewed' ? 'reviewed' : 'accepted',
+                      })}
+                    >
+                      <option value="accepted">进入 Meeting 分支后</option>
+                      <option value="reviewed">验证与审查通过后即可</option>
+                    </select>
+                    <small>
+                      {(task.dependencyGate ?? 'accepted') === 'reviewed'
+                        ? '分析/只读任务默认此项：下游不必等进 Meeting 分支。'
+                        : '写代码任务默认此项：下游等交付进入 Meeting 集成分支后再启动（通常 Coordinator 审查后自动集成，不一定要点验收）。'}
+                    </small>
+                  </label>
                 </fieldset>
 
                 <label className="plan-decision-forecast">

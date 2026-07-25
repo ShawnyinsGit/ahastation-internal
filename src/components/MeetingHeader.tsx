@@ -1,12 +1,13 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
-import { formatElapsed } from '../hooks/useTimer';
+import { memo, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { ElapsedTime } from './ElapsedTime';
 import type { AutoApproveScope } from '../types';
 
 export type MeetingView = 'meeting' | 'tasks';
 
 interface MeetingHeaderProps {
   cwd: string | null;
-  elapsed: number;
+  /** 会议开始时间戳（ms）；计时 tick 由 ElapsedTime 自行驱动。 */
+  startedAt: number | null;
   autoApproveScope: AutoApproveScope;
   onChangeAutoApproveScope: (scope: AutoApproveScope) => void;
   multiAgent: boolean;
@@ -26,9 +27,9 @@ const SCOPE_LABELS: Record<AutoApproveScope, string> = {
   all: '全部',
 };
 
-export function MeetingHeader({
+export const MeetingHeader = memo(function MeetingHeader({
   cwd,
-  elapsed,
+  startedAt,
   autoApproveScope,
   onChangeAutoApproveScope,
   multiAgent,
@@ -117,7 +118,7 @@ export function MeetingHeader({
         </div>
         <div className="mtg-header-center">
           <span className="mtg-timer-dot" />
-          <span className="mtg-timer">{formatElapsed(elapsed)}</span>
+          <ElapsedTime startedAt={startedAt} className="mtg-timer" />
         </div>
       </div>
       <div className="mtg-header-right">
@@ -176,4 +177,4 @@ export function MeetingHeader({
       </div>
     </header>
   );
-}
+});

@@ -55,8 +55,56 @@ test('renderer normalizes legacy drafts with the visible default Backend and saf
   assert.equal(normalized.executorBackendId, 'opencode');
   assert.equal(normalized.executionProfile.backendId, 'opencode');
   assert.equal(normalized.workspaceMode, 'git-worktree');
+  assert.equal(normalized.dependencyGate, 'accepted');
   assert.deepEqual(normalized.authorityRequest.commands, []);
   assert.deepEqual(normalized.authorityRequest.networkHosts, []);
+});
+
+test('renderer default budget matches electron unlimited ceilings', async () => {
+  const { DEFAULT_TASK_BUDGET, isUnlimitedTaskBudget } = await import('../src/lib/task-budget.ts');
+  const [normalized] = normalizePlanDrafts([task()], [backend]);
+  assert.deepEqual(normalized.budget, DEFAULT_TASK_BUDGET);
+  assert.equal(isUnlimitedTaskBudget(normalized.budget), true);
+  assert.equal(normalized.budget.maxAttempts, 100);
+  assert.notEqual(normalized.budget.maxAttempts, 6);
+});
+
+test('renderer preserves an explicit reviewed dependency gate', () => {
+  const [normalized] = normalizePlanDrafts([task({
+    dependencyGate: 'reviewed',
+  })], [backend]);
+  assert.equal(normalized.dependencyGate, 'reviewed');
+});
+
+test('renderer defaults analysis drafts to reviewed and writers to accepted', () => {
+  const [analysis] = normalizePlanDrafts([task({
+    title: 'Explain auth',
+    prompt: '解释一下登录流程在干什么',
+    writePaths: undefined,
+    workspaceMode: undefined,
+  })], [backend]);
+  assert.equal(analysis.workspaceMode, 'read-only');
+  assert.equal(analysis.dependencyGate, 'reviewed');
+
+  const [writer] = normalizePlanDrafts([task({
+    title: 'Fix login',
+    prompt: '修复登录校验',
+    writePaths: ['src/auth.ts'],
+  })], [backend]);
+  assert.equal(writer.dependencyGate, 'accepted');
+});
+
+test('dependency gate labels describe Meeting integration, not host Accept click', async () => {
+  const {
+    dependencyGateShortLabel,
+    dependencyGateDetail,
+  } = await import('../src/lib/dependency-gate.ts');
+  assert.equal(dependencyGateShortLabel('reviewed'), '审查后放行');
+  assert.equal(dependencyGateShortLabel('accepted'), '集成后放行');
+  assert.equal(dependencyGateShortLabel(undefined), '集成后放行');
+  assert.match(dependencyGateDetail('accepted'), /Meeting 集成分支/);
+  assert.match(dependencyGateDetail('accepted'), /不能靠点确认放行/);
+  assert.match(dependencyGateDetail('reviewed'), /审查进行中|集成冲突不放行/);
 });
 
 test('renderer rejects mismatched current execution boundaries', () => {

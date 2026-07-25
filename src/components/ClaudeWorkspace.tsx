@@ -101,13 +101,13 @@ const taskStatusLabel: Record<CurrentTaskStatus, string> = {
   verifying: '校验中',
   reviewing: '评审中',
   'coordinator-reviewing': 'Coordinator 审查中',
-  'awaiting-acceptance': '等待验收',
+  'awaiting-acceptance': '待人手确认',
   'integration-queued': '等待集成',
   integrating: '集成中',
   'integration-conflict': '集成冲突',
   reworking: '需要返工',
   'budget-paused': '预算暂停',
-  accepted: '已接受',
+  accepted: '已进 Meeting 分支',
   done: '已完成',
   failed: '失败',
   speaking: '发言中',
@@ -425,29 +425,31 @@ export const ClaudeWorkspace = memo(function ClaudeWorkspace({
       {workerEvents && workerEvents.length > 0 && (
         <section className="workspace-feed workspace-worker-events">
           <div className="workspace-feed-label">事件时间线</div>
-          <ol className="worker-event-timeline">
-            {[...workerEvents].slice(-30).reverse().map((event) => {
-              const signal = event.payload;
-              const title = signal.kind === 'progress'
-                ? signal.message
-                : signal.kind === 'tool'
-                  ? `${signal.toolName} · ${signal.phase}`
-                  : signal.kind === 'delivery'
-                    ? 'WorkReport 已提交'
-                    : signal.kind === 'failed'
-                      ? `${signal.code} · ${signal.message}`
-                      : `执行结束 · ${signal.reason}`;
-              return (
-                <li key={event.eventId}>
-                  <span className={`worker-event-kind is-${signal.kind}`}>{signal.kind}</span>
-                  <div>
-                    <strong>{title}</strong>
-                    <small>seq {event.seq} · attempt {event.attempt} · {formatHistoryTime(event.timestamp)}</small>
-                  </div>
-                </li>
-              );
-            })}
-          </ol>
+          <div className="workspace-feed-list">
+            <ol className="worker-event-timeline">
+              {[...workerEvents].slice(-30).reverse().map((event) => {
+                const signal = event.payload;
+                const title = signal.kind === 'progress'
+                  ? signal.message
+                  : signal.kind === 'tool'
+                    ? `${signal.toolName} · ${signal.phase}`
+                    : signal.kind === 'delivery'
+                      ? 'WorkReport 已提交'
+                      : signal.kind === 'failed'
+                        ? `${signal.code} · ${signal.message}`
+                        : `执行结束 · ${signal.reason}`;
+                return (
+                  <li key={event.eventId}>
+                    <span className={`worker-event-kind is-${signal.kind}`}>{signal.kind}</span>
+                    <div>
+                      <strong>{title}</strong>
+                      <small>seq {event.seq} · attempt {event.attempt} · {formatHistoryTime(event.timestamp)}</small>
+                    </div>
+                  </li>
+                );
+              })}
+            </ol>
+          </div>
         </section>
       )}
 
@@ -552,7 +554,7 @@ export const ClaudeWorkspace = memo(function ClaudeWorkspace({
                 </header>
                 <p>{briefing.summary}</p>
                 <dl>
-                  <div><dt>已接受</dt><dd>{briefing.completedTasks}</dd></div>
+                  <div><dt>已进 Meeting 分支</dt><dd>{briefing.completedTasks}</dd></div>
                   <div><dt>失败</dt><dd>{briefing.failedTasks}</dd></div>
                   <div><dt>文件</dt><dd>{briefing.files}</dd></div>
                   <div><dt>测试</dt><dd>{briefing.testsPassed} / {briefing.testsFailed}</dd></div>
