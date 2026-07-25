@@ -12663,6 +12663,75 @@ html.ahabar-view #root {
   pointer-events: none;
 }
 
+.ahabar-observed-count {
+  font-size: 11px;
+  color: rgba(242, 242, 247, 0.45);
+  white-space: nowrap;
+}
+
+.ahabar-observed {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 4px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+.ahabar-observed-head {
+  font-size: 11px;
+  font-weight: 600;
+  color: rgba(242, 242, 247, 0.45);
+}
+.ahabar-observed-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+.ahabar-observed-chip {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: rgba(242, 242, 247, 0.75);
+  white-space: nowrap;
+}
+.ahabar-observed-body {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+.ahabar-observed-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ahabar-observed-meta {
+  font-size: 10px;
+  color: rgba(242, 242, 247, 0.45);
+  white-space: nowrap;
+}
+.ahabar-observed-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.ahabar-observed-btn {
+  font-size: 10px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(242, 242, 247, 0.8);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ahabar-observed-btn:hover { background: rgba(255, 255, 255, 0.12); color: #fff; }
+
 /* ---- Onboarding scan flow (first launch + cold-start splash) --------------
    Adapted from _design_docs/prototypes/ahastudio-ux-review-v3.html onto the
    app tokens: dim backdrop + centered card, scan-ring, progressive ✓ lines. */

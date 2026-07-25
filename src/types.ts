@@ -1532,6 +1532,18 @@ export interface AhaBarPending {
   arrivedAt: number;
 }
 
+/** Mirror of companion-feed's AhaBarObserved — a read-only observed session
+ *  row surfaced on the bar. */
+export interface AhaBarObserved {
+  id: string;
+  clientKind: 'claude-code' | 'codex' | 'kimi';
+  projectName: string;
+  title: string;
+  state: 'active' | 'waiting' | 'idle' | 'done' | 'unknown';
+  activity: 'thinking' | 'executing' | 'waiting' | 'unknown';
+  lastActiveAt: number;
+}
+
 export interface AhaBarState {
   sessionId: string | null;
   cwd: string | null;
@@ -1540,6 +1552,7 @@ export interface AhaBarState {
   pending: AhaBarPending[];
   topPending: AhaBarPending | null;
   hardwareTakenOver: boolean;
+  observed: AhaBarObserved[];
 }
 
 export interface AhaBarApi {
@@ -1551,6 +1564,7 @@ export interface AhaBarApi {
     scope?: 'worker' | 'task-wide',
   ) => Promise<{ ok: boolean; error?: string }>;
   focusMain: () => Promise<{ ok: boolean }>;
+  copyResume: (id: string) => Promise<{ ok: boolean; error?: string }>;
   setExpanded: (expanded: boolean) => Promise<{ ok: boolean }>;
   setGhost: (ghost: boolean) => Promise<{ ok: boolean }>;
 }

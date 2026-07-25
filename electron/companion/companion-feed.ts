@@ -6,10 +6,17 @@
 // so the virtual keyboard can resolve them without round-tripping through
 // the main renderer.
 
-import { ipcMain } from 'electron';
+import { clipboard, ipcMain } from 'electron';
 import { z } from 'zod';
 import type { IpcContext, IpcEmittedEvent } from '../ipc/context.js';
 import { getSettings, updateSettings } from '../store.js';
+import { boardableObservedSessions } from '../observe/board-visibility.js';
+import type {
+  ClientKind,
+  ObservedActivity,
+  ObservedSnapshot,
+  ObservedState,
+} from '../observe/types.js';
 import {
   classifyApprovalGesture,
   compareApprovalPriority,
@@ -42,6 +49,19 @@ export interface AhaBarPending {
   arrivedAt: number;
 }
 
+/** One externally-launched CLI session surfaced on the bar. Read-only: the
+ *  only action is copying the client's own resume command (S0 observation
+ *  layer has no approve/input path). */
+export interface AhaBarObserved {
+  id: string;
+  clientKind: ClientKind;
+  projectName: string;
+  title: string;
+  state: ObservedState;
+  activity: ObservedActivity;
+  lastActiveAt: number;
+}
+
 export interface AhaBarState {
   sessionId: string | null;
   cwd: string | null;
@@ -51,6 +71,28 @@ export interface AhaBarState {
   /** Highest-priority pending — the virtual keyboard's sole target. */
   topPending: AhaBarPending | null;
   hardwareTakenOver: boolean;
+  /** Top boardable observed sessions (waiting first, then recency). */
+  observed: AhaBarObserved[];
+}
+
+/** Observed rows the bar has room for. */
+const AHABAR_OBSERVED_MAX = 3;
+
+/** The client's own terminal command to resume an observed session. Kimi
+ *  multi-turn resume is `--session <id>` (see backends/kimi-adapter.ts
+ *  buildKimiCommandArgs), not a `resume` subcommand. */
+export function buildObservedResumeCommand(
+  clientKind: ClientKind,
+  nativeSessionId: string,
+): string {
+  switch (clientKind) {
+    case 'claude-code':
+      return `claude --resume ${nativeSessionId}`;
+    case 'codex':
+      return `codex resume ${nativeSessionId}`;
+    case 'kimi':
+      return `kimi --session ${nativeSessionId}`;
+  }
 }
 
 function projectNameFromCwd(cwd: string | null): string | null {
@@ -64,6 +106,10 @@ export class CompanionFeed {
   private activeSessionId: string | null = null;
   private pendingById = new Map<string, AhaBarPending>();
   private runningCount = 0;
+  private observedTop: AhaBarObserved[] = [];
+  /** Resume command per surfaced observed id — looked up on copy so the
+   *  nativeSessionId never has to ride the AhaBar wire shape. */
+  private resumeCommandById = new Map<string, string>();
 
   constructor(private readonly ctx: IpcContext) {}
 
@@ -97,6 +143,34 @@ export class CompanionFeed {
   onTtsState(active: boolean): void {
     this.model.setTtsActive(active);
     this.push(Date.now());
+  }
+
+  /** Tap point — called from main.ts for every ObserveService snapshot. */
+  onObservedSnapshot(snapshot: ObservedSnapshot): void {
+    const now = Date.now();
+    const top = boardableObservedSessions(snapshot.sessions, now)
+      .slice(0, AHABAR_OBSERVED_MAX);
+    this.observedTop = top.map((s) => ({
+      id: s.id,
+      clientKind: s.clientKind,
+      projectName: s.projectName,
+      title: s.title,
+      state: s.state,
+      activity: s.activity,
+      lastActiveAt: s.lastActiveAt,
+    }));
+    this.resumeCommandById = new Map(
+      top.map((s) => [s.id, buildObservedResumeCommand(s.clientKind, s.nativeSessionId)]),
+    );
+    this.push(now);
+  }
+
+  /** Copy the observed session's client resume command to the clipboard. */
+  copyResumeCommand(id: string): { ok: boolean; error?: string } {
+    const command = this.resumeCommandById.get(id);
+    if (!command) return { ok: false, error: 'Unknown observed session' };
+    clipboard.writeText(command);
+    return { ok: true };
   }
 
   getState(): CompanionState {
@@ -168,6 +242,7 @@ export class CompanionFeed {
       pending,
       topPending: pending[0] ?? null,
       hardwareTakenOver: false,
+      observed: this.observedTop,
     };
   }
 
@@ -294,6 +369,15 @@ export function registerCompanionIpc(ctx: IpcContext): void {
     authorize: companionWindowOnly,
     authorizeError: 'Sender is not the companion window',
     handler: () => ({ ok: focusMainWindow(() => ctx.liveWindow()) }),
+  });
+
+  handleSecure('ahabar:copy-resume', {
+    schema: z.object({
+      id: z.string().min(1),
+    }).strict(),
+    authorize: companionWindowOnly,
+    authorizeError: 'Sender is not the companion window',
+    handler: (payload) => feed!.copyResumeCommand(payload.id),
   });
 
   handleSecure('ahabar:set-expanded', {
