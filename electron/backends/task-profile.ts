@@ -186,6 +186,21 @@ export function compileOpenCodeTaskProfile(
   });
 }
 
+export function compilePocketVibeTaskProfile(
+  requested: TaskExecutionProfile,
+  runtime: BackendRuntime,
+  defaultModel: string,
+): BackendEffectiveProfile {
+  return compileBackendTaskProfile(requested, runtime, {
+    backendId: 'pocket-vibe',
+    defaultModel,
+    // The "model" slot doubles as the hub's target_agent_id — any id the
+    // hub knows is valid, so no fixed model list is enforced.
+    unsupported: () => ['workMode'],
+    downgraded: (profile) => [`workMode:${profile.workMode}->backend-default`],
+  });
+}
+
 export function compileKimiTaskProfile(
   requested: TaskExecutionProfile,
   runtime: BackendRuntime,

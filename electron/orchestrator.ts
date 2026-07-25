@@ -463,7 +463,10 @@ export class Orchestrator implements OrchestratorBridge {
       } else if (so.systemPrompt && typeof so.systemPrompt === 'object' && 'append' in so.systemPrompt) {
         systemPrompt = (so.systemPrompt as { append?: string }).append;
       }
-      if (backendId === 'codex') {
+      // MCP-less backends speak the meeting protocol through fenced
+      // ```meeting-command frames in their reply text instead of native
+      // tools; teach them the portable command vocabulary.
+      if (backendId === 'codex' || backendId === 'pocket-vibe') {
         systemPrompt = `${systemPrompt ?? ''}${PORTABLE_MEETING_COMMAND_PROMPT}`;
       }
       const authEntry = getBackendAuth(backendId);
