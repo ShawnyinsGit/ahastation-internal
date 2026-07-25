@@ -212,7 +212,15 @@ interface PickCwdRequest {
 
 /** Mode-aware cwd picker: handheld → in-app DirPickerModal, desktop → the
  *  native dialog. The returned promise resolves with the picked path or
- *  null (cancelled), exactly like window.vibeMeet.pickCwd(). */
+ *  null (cancelled), exactly like window.vibeMeet.pickCwd().
+ *
+ *  Small screens also take the in-app picker: the native GTK file chooser
+ *  (Electron dialog.showOpenDialog) offers no size control and renders
+ *  ~1124x822, so on an 800px-high display the Open/Cancel buttons land
+ *  off-screen (rk3588 1280x800 report). Electron gives us no API to clamp
+ *  it, so we route to the in-app picker instead. */
+const NATIVE_DIALOG_MIN_HEIGHT = 900;
+
 export function usePickCwd(): {
   pickCwd: (initialPath?: string) => Promise<string | null>;
   pickerModal: ReactNode;
@@ -224,7 +232,12 @@ export function usePickCwd(): {
 
   const pickCwd = useCallback(
     (initialPath?: string): Promise<string | null> => {
-      if (mode !== 'handheld') return window.vibeMeet.pickCwd();
+      const screenTooShort =
+        typeof window !== 'undefined'
+        && typeof window.screen?.availHeight === 'number'
+        && window.screen.availHeight > 0
+        && window.screen.availHeight < NATIVE_DIALOG_MIN_HEIGHT;
+      if (mode !== 'handheld' && !screenTooShort) return window.vibeMeet.pickCwd();
       // Only one picker at a time; a second call resolves the first as
       // cancelled rather than stacking modals.
       requestRef.current?.resolve(null);

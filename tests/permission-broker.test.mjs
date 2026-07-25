@@ -266,7 +266,7 @@ test('canonical decisions use only a valid bounded task grant', () => {
   );
   assert.deepEqual(
     decideTaskPermission(normalized, undefined, approvedAt + 1).decision,
-    { kind: 'deny', reason: 'task-authority-missing' },
+    { kind: 'ask-user', reason: 'authority-miss:task-authority-missing' },
   );
   assert.equal(
     decideTaskPermission({
@@ -385,10 +385,11 @@ test('non-whitelisted external tools keep the previous behavior', () => {
     decideTaskPermission(externalNormalized(root), grant, approvedAt + 1, identity).decision.kind,
     'ask-user',
   );
-  // Without a grant: fail closed as before.
+  // Without a grant: escalate to an approval card instead of stranding the
+  // Worker with a hard deny the user can never act on.
   assert.deepEqual(
     decideTaskPermission(externalNormalized(root), undefined, approvedAt + 1, identity).decision,
-    { kind: 'deny', reason: 'task-authority-missing' },
+    { kind: 'ask-user', reason: 'authority-miss:task-authority-missing' },
   );
   // Whitelist never applies to non-external kinds: a workspace write from a
   // meeting-prefixed tool name still goes through the grant.
@@ -406,6 +407,6 @@ test('non-whitelisted external tools keep the previous behavior', () => {
       ...identity,
       toolName: 'mcp__meeting-worker__submit_report',
     }).decision,
-    { kind: 'deny', reason: 'task-authority-missing' },
+    { kind: 'ask-user', reason: 'authority-miss:task-authority-missing' },
   );
 });
