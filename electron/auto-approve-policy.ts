@@ -45,6 +45,15 @@ const SAFE_MCP_PREFIXES: ReadonlyArray<string> = [
   'mcp__meeting-worker__',
 ];
 
+// Meeting-MCP tools that reach OUTSIDE the app — focusing another app's
+// window or typing into another process's terminal. They must ALWAYS surface
+// as approval requests (permission card / native confirm), never auto-allow,
+// regardless of scope. The carve-out sits ahead of the mcp__meeting__ prefix.
+const NEVER_SAFE_MCP_TOOLS: ReadonlySet<string> = new Set([
+  'mcp__meeting__observed_session_focus',
+  'mcp__meeting__observed_session_send_text',
+]);
+
 // Computer Use MCP tools with individual risk classification. screenshot,
 // mouse_move, and scroll are read-only / low-risk; click and keyboard actions
 // are destructive (they modify external application state).
@@ -75,6 +84,9 @@ export function classifyToolRisk(toolName: string): ToolRisk {
   for (const prefix of ALWAYS_DESTRUCTIVE_PREFIXES) {
     if (toolName === prefix || toolName.startsWith(prefix + '_')) return 'destructive';
   }
+  // Observed-session actions: external side effects on other apps' windows —
+  // approval-gated in every scope (checked before the meeting safe prefix).
+  if (NEVER_SAFE_MCP_TOOLS.has(toolName)) return 'destructive';
   if (SAFE_BUILTIN_TOOLS.has(toolName)) return 'safe';
   if (SAFE_COMPUTER_USE_TOOLS.has(toolName)) return 'safe';
   for (const prefix of SAFE_MCP_PREFIXES) {
@@ -92,6 +104,7 @@ export function classifyToolRisk(toolName: string): ToolRisk {
  *  bridge, where these otherwise classify as 'external' and would raise an
  *  approval card on every meeting-worker report. */
 export function isInProcSafeTool(toolName: string): boolean {
+  if (NEVER_SAFE_MCP_TOOLS.has(toolName)) return false;
   if (toolName === 'Task') return true;
   return SAFE_MCP_PREFIXES.some((prefix) => toolName.startsWith(prefix));
 }

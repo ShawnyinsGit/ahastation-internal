@@ -26,6 +26,9 @@ export const MEETING_TOOLS = {
   REQUEST_DECISION: 'request_user_decision',
   ASK_HOST: 'ask_host',
   REPLY_COORDINATOR: 'reply_to_coordinator',
+  OBSERVED_SESSIONS_LIST: 'observed_sessions_list',
+  OBSERVED_SESSION_FOCUS: 'observed_session_focus',
+  OBSERVED_SESSION_SEND_TEXT: 'observed_session_send_text',
 } as const;
 
 export type MeetingToolName = (typeof MEETING_TOOLS)[keyof typeof MEETING_TOOLS];

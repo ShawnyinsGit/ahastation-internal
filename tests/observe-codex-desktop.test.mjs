@@ -181,6 +181,7 @@ test('correlate desktop: live chat pid → active; dead chat pids + live host �
   assert.equal(live.state, 'active');
   assert.equal(live.activity, 'executing');
   assert.equal(live.pid, CHAT_PID);
+  assert.equal(live.tty, undefined); // chat processes have no controlling terminal ('??')
   assert.equal(live.title, 'Review the desktop onboarding flow');
   assert.equal(live.isNoise, false);
   assert.ok(live.evidence.includes(`chat-process pid ${CHAT_PID} alive`));
@@ -190,6 +191,7 @@ test('correlate desktop: live chat pid → active; dead chat pids + live host �
   const idle = byId.get(DESK_IDLE);
   assert.equal(idle.state, 'idle');
   assert.equal(idle.pid, HOST_PID); // host-backed idle → board-visible
+  assert.equal(idle.tty, undefined); // the app-server host has no tty either
   assert.equal(idle.title, '整理发布前检查清单');
   assert.ok(idle.evidence.includes('badge:unread'));
 

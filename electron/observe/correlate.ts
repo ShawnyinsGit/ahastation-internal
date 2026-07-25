@@ -48,6 +48,15 @@ function projectNameOf(cwd: string): string {
   return segments.length > 0 ? segments[segments.length - 1] : 'unknown-project';
 }
 
+/** The session's usable controlling terminal, if the owning pid has one.
+ * '??' (no controlling terminal) degrades to undefined so Host session
+ * actions only ever see a tty they can actually write to. */
+function sessionTty(snapshot: ProcessSnapshot, pid: number | undefined): string | undefined {
+  if (pid === undefined) return undefined;
+  const tty = snapshot.byPid.get(pid)?.tty;
+  return tty && tty !== '??' ? tty : undefined;
+}
+
 function fallbackTitle(projectName: string, mtimeMs: number): string {
   const date = new Date(mtimeMs);
   const hh = String(date.getHours()).padStart(2, '0');
@@ -262,6 +271,7 @@ function correlateOne(input: CorrelateInput, signal: ObservedFileSignal): Observ
       model: signal.model,
       lastActiveAt,
       pid: sessionPid,
+      tty: sessionTty(input.snapshot, sessionPid),
       titleSource: source,
       isNoise,
       evidence,

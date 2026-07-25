@@ -24,6 +24,8 @@ import {
   submitDeliveryChunkReviewArgsSchema,
   completeDeliveryReviewArgsSchema,
   requestDeliveryReworkArgsSchema,
+  observedSessionActionArgsSchema,
+  observedSessionSendTextArgsSchema,
   type AppliedTaskDefaults,
   type MeetingPlanBriefInput,
   type PlanMeetingTaskInput,
@@ -35,6 +37,10 @@ import type { MemoryCategory } from './memory.js';
 import type { WorkerSpecialtyKind } from './orchestrator-types.js';
 import type { CoordinatorReviewFinding } from './coordinator-review.js';
 import { listAssets } from './attachments/assets.js';
+import type {
+  ObservedActionOutcome,
+  ObservedSessionToolRow,
+} from './observe/session-actions.js';
 
 export interface DecisionCreationResult {
   id: string;
@@ -130,6 +136,13 @@ export interface OrchestratorBridge {
   narrateAssistantLine(text: string): void;
   createDecision(payload: CreateDecisionPayload): Promise<DecisionCreationResult>;
 
+  // Observed-session tools (Host voice-intent routing to external windows).
+  // The action tools are approval-gated by the auto-approve policy carve-out
+  // (NEVER_SAFE_MCP_TOOLS) — reaching them means the user already approved.
+  listObservedSessions(): ObservedSessionToolRow[];
+  focusObservedSessionById(id: string): Promise<ObservedActionOutcome>;
+  sendTextToObservedSessionById(id: string, text: string): Promise<ObservedActionOutcome>;
+
   // Memory tool (exposed to both talker and workers)
   saveMemory(input: { category: MemoryCategory; content: string; tags: string[] }): Promise<SaveMemoryResult>;
 
@@ -158,6 +171,72 @@ const REVIEW_MODE_TOOLS: ReadonlySet<string> = new Set<string>([
 ]);
 
 type ToolHandler = (...args: never[]) => Promise<unknown>;
+
+interface ToolTextResult {
+  // The SDK tool-handler return type requires a string index signature.
+  [x: string]: unknown;
+  content: Array<{ type: 'text'; text: string }>;
+  isError?: boolean;
+}
+
+function observedToolText(text: string, isError = false): ToolTextResult {
+  return { content: [{ type: 'text', text }], ...(isError ? { isError: true } : {}) };
+}
+
+/** Render an observed-session action outcome for the Host. Resolution
+ *  failures are phrased so the model asks the user instead of guessing. */
+export function formatObservedActionOutcome(
+  outcome: ObservedActionOutcome,
+  targetDescription?: string,
+): ToolTextResult {
+  const target = targetDescription?.trim() || 'the observed window';
+  if (outcome.kind === 'ambiguous') {
+    const lines = outcome.candidates.map(
+      (candidate) => `- ${candidate.id.slice(0, 8)}… ${candidate.projectName} · ${candidate.clientKind} · "${candidate.title}" (${candidate.state}/${candidate.activity})`,
+    );
+    return observedToolText(
+      `ambiguous: ${outcome.candidates.length} observed sessions match "${outcome.id}". `
+      + 'Ask the user which one they mean — do NOT guess:\n'
+      + lines.join('\n'),
+      true,
+    );
+  }
+  if (outcome.kind === 'not-found') {
+    return observedToolText(
+      `error: no actionable observed session matches "${outcome.id}". `
+      + 'Call observed_sessions_list for the current ids (only waiting/active/recent sessions are actionable).',
+      true,
+    );
+  }
+  if (outcome.kind === 'focus') {
+    const result = outcome.result;
+    if (result.ok) {
+      return observedToolText(result.via === 'frontmost'
+        ? `focused ${target} (owning terminal brought to front)`
+        : `focused ${target} by opening the ChatGPT app (desktop thread has no terminal of its own)`);
+    }
+    const why = {
+      'no-pid': 'the session has no live process to focus',
+      'frontmost-failed': `could not bring the terminal to front${result.detail ? `: ${result.detail}` : ''}`,
+      'open-failed': `could not open the ChatGPT app${result.detail ? `: ${result.detail}` : ''}`,
+      unsupported: 'this session has no terminal and is not a Codex Desktop thread — focus is unsupported there',
+    }[result.reason];
+    return observedToolText(`error: ${why}`, true);
+  }
+  const result = outcome.result;
+  if (result.ok) {
+    return observedToolText(`typed ${result.bytes} bytes into ${target} and pressed Return once`);
+  }
+  const why = {
+    'no-pid': 'the session has no live process to type into',
+    'no-tty': 'this session has no terminal (tty) — direct input is not supported there; use observed_session_focus and tell the user input is not possible in that window',
+    'invalid-tty': 'the session reports an unexpected tty value — refusing to write',
+    'empty-text': 'nothing sendable remains after control-character stripping',
+    'rate-limited': `rate limited — wait ${result.retryAfterMs ?? 0}ms before sending more text to this session`,
+    'write-failed': `could not write to the terminal${result.detail ? `: ${result.detail}` : ''}`,
+  }[result.reason];
+  return observedToolText(`error: ${why}`, true);
+}
 
 /**
  * A frozen candidate waiting on the Coordinator must not compete with new
@@ -498,6 +577,38 @@ export function buildTalkerMcp(
         async ({ workerId }) => ({
           content: [{ type: 'text', text: bridge.describeWorkers(workerId) }],
         }),
+      ),
+      tool(
+        MEETING_TOOLS.OBSERVED_SESSIONS_LIST,
+        'List the observed external AI windows the user may refer to (Claude/Codex/Kimi terminal sessions and Codex Desktop threads) with id/clientKind/projectName/title/state/activity/tty. ALWAYS call this first to resolve which window the user means before observed_session_focus / observed_session_send_text. Sessions with a tty accept direct terminal input; sessions without one (desktop threads) can only be focused.',
+        {},
+        async () => {
+          const rows = bridge.listObservedSessions();
+          if (rows.length === 0) {
+            return observedToolText('no observed sessions are currently actionable (only waiting/active/recently-done sessions are listed)');
+          }
+          return observedToolText(JSON.stringify(rows));
+        },
+      ),
+      tool(
+        MEETING_TOOLS.OBSERVED_SESSION_FOCUS,
+        'Bring the window owning an observed session to the front. Resolve the id with observed_sessions_list first. Terminal sessions focus their own window; Codex Desktop threads (no tty) fall back to opening the ChatGPT app. Requires user approval.',
+        observedSessionActionArgsSchema,
+        async ({ id, targetDescription }) => {
+          if (!canCoordinate()) return denied();
+          const outcome = await bridge.focusObservedSessionById(id);
+          return formatObservedActionOutcome(outcome, targetDescription);
+        },
+      ),
+      tool(
+        MEETING_TOOLS.OBSERVED_SESSION_SEND_TEXT,
+        'Type text into an observed session\'s terminal and press Return once — use it to dispatch a prompt to a CLI window, or to approve a waiting permission prompt by sending "y" or "1". Resolve the id with observed_sessions_list first; sessions without a tty (Codex Desktop) cannot receive input — offer observed_session_focus instead. Requires user approval.',
+        observedSessionSendTextArgsSchema,
+        async ({ id, text, targetDescription }) => {
+          if (!canCoordinate()) return denied();
+          const outcome = await bridge.sendTextToObservedSessionById(id, text);
+          return formatObservedActionOutcome(outcome, targetDescription);
+        },
       ),
       tool(
         'save_memory',

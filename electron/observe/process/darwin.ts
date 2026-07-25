@@ -1,6 +1,6 @@
 // process/darwin.ts — macOS process scanning for the observation layer.
 //
-// One `ps -axo pid,ppid,%cpu,rss,comm,args` per tick builds a snapshot
+// One `ps -axo pid,ppid,tt,%cpu,rss,comm,args` per tick builds a snapshot
 // shared by every observer (no per-client respawns). A single batched
 // `lsof -Fn -p <pids>` resolves cwd / open files only for pids that matched
 // a client binary. All subprocess calls are async off-loop with timeout +
@@ -15,6 +15,9 @@ export interface ProcessInfo {
   comm: string;
   cpuPct: number;
   rssKb: number;
+  /** Controlling terminal exactly as ps reports it ('s003', or '??' when the
+   *  process has none). Session actions treat '??' as "no tty". */
+  tty: string;
 }
 
 export interface ProcessSnapshot {
@@ -27,7 +30,7 @@ const PS_TIMEOUT_MS = 5_000;
 const LSOF_TIMEOUT_MS = 10_000;
 const PS_MAX_BUFFER = 16 * 1024 * 1024;
 
-/** Parse `ps -axo pid,ppid,%cpu,rss,comm,args` output. The comm column is
+/** Parse `ps -axo pid,ppid,tt,%cpu,rss,comm,args` output. The comm column is
  * truncated to a fixed width by ps, so the args column is located via the
  * header's ARGS offset instead of token splitting (comm may contain
  * spaces, e.g. "Electron Helper (Renderer)"). */
@@ -41,13 +44,14 @@ export function parsePsOutput(text: string, capturedAt = Date.now()): ProcessSna
   for (let i = 1; i < lines.length; i += 1) {
     const line = lines[i];
     if (!line.trim()) continue;
-    const match = /^\s*(\d+)\s+(\d+)\s+(\d+(?:\.\d+)?)\s+(\d+)\s+(.*)$/.exec(line);
+    const match = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(\d+(?:\.\d+)?)\s+(\d+)\s+(.*)$/.exec(line);
     if (!match) continue;
     const pid = Number(match[1]);
     const ppid = Number(match[2]);
-    const cpuPct = Number(match[3]);
-    const rssKb = Number(match[4]);
-    const rest = match[5];
+    const tty = match[3];
+    const cpuPct = Number(match[4]);
+    const rssKb = Number(match[5]);
+    const rest = match[6];
     let comm: string;
     let command: string;
     if (argsStart > 0 && line.length > argsStart) {
@@ -60,7 +64,7 @@ export function parsePsOutput(text: string, capturedAt = Date.now()): ProcessSna
       command = spaceIdx === -1 ? rest : rest.slice(spaceIdx).trim();
     }
     if (!command) command = comm;
-    byPid.set(pid, { pid, ppid, command, comm, cpuPct, rssKb });
+    byPid.set(pid, { pid, ppid, command, comm, cpuPct, rssKb, tty });
     const siblings = childrenOf.get(ppid);
     if (siblings) siblings.push(pid);
     else childrenOf.set(ppid, [pid]);
@@ -74,7 +78,7 @@ export async function captureProcessSnapshot(
 ): Promise<ProcessSnapshot> {
   const { stdout } = await execImpl(
     'ps',
-    ['-axo', 'pid,ppid,%cpu,rss,comm,args'],
+    ['-axo', 'pid,ppid,tt,%cpu,rss,comm,args'],
     { timeoutMs: PS_TIMEOUT_MS, maxBuffer: PS_MAX_BUFFER },
   );
   return parsePsOutput(stdout);

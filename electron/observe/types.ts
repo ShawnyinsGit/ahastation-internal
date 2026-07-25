@@ -17,6 +17,8 @@ export interface ObservedProcessSignal {
   cpuPct: number;
   rssKb: number;
   cwd?: string;
+  /** Controlling terminal ('s003') when the process has one. */
+  tty?: string;
 }
 
 /** Claude-specific signals extracted from the transcript tail window. */
@@ -154,6 +156,10 @@ export interface ObservedSession {
   model?: string;
   lastActiveAt: number;
   pid?: number;
+  /** Controlling terminal of `pid` (e.g. 's003') when the owning process has
+   *  one — absent for desktop/app-server-owned rows and '??' processes. Host
+   *  session actions require it for direct terminal input. */
+  tty?: string;
   titleSource: ObservedTitleSource;
   isNoise: boolean;
   /** Human-readable provenance notes (which signals produced this row). */

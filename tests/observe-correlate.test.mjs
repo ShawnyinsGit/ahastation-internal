@@ -91,6 +91,7 @@ test('correlate: full pipeline over the fixture tree', async () => {
   assert.equal(idle.state, 'waiting');
   assert.equal(idle.activity, 'waiting');
   assert.equal(idle.pid, 4201);
+  assert.equal(idle.tty, 's003'); // tty propagated from the ps snapshot
   assert.equal(idle.title, 'use key [REDACTED] to fetch the build log');
   assert.equal(idle.titleSource, 'first-prompt');
   assert.equal(idle.projectName, 'project-alpha');
@@ -102,6 +103,7 @@ test('correlate: full pipeline over the fixture tree', async () => {
   assert.equal(executing.state, 'active');
   assert.equal(executing.activity, 'executing');
   assert.equal(executing.pid, 4210);
+  assert.equal(executing.tty, 's005');
   assert.equal(executing.title, 'run the full test suite and fix whatever fails');
 
   // tmp session without a live process → unknown + noise.

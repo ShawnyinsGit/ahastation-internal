@@ -43,6 +43,19 @@ test('ps parsing: full args survive spaces and truncation of comm', () => {
   assert.equal(snapshot.byPid.get(4202).cpuPct, 12.5);
 });
 
+test('ps parsing: tt column (tty vs ?? for terminal-less processes)', () => {
+  assert.equal(snapshot.byPid.get(4201).tty, 's003');
+  assert.equal(snapshot.byPid.get(4210).tty, 's005');
+  assert.equal(snapshot.byPid.get(5102).tty, 's015');
+  assert.equal(snapshot.byPid.get(1).tty, '??');
+  // Codex Desktop host + chat-spawned processes have no controlling terminal.
+  assert.equal(snapshot.byPid.get(86693).tty, '??');
+  assert.equal(snapshot.byPid.get(97611).tty, '??');
+  // The tty column must not leak into comm/args.
+  assert.equal(snapshot.byPid.get(97611).command, '/opt/homebrew/bin/node --test tests/onnx-session-init.test.mjs');
+  assert.equal(snapshot.byPid.get(5101).comm, 'kimi-code');
+});
+
 // ---------------------------------------------------------------------------
 // cmdHasBinary
 // ---------------------------------------------------------------------------

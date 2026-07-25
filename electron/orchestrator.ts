@@ -124,6 +124,13 @@ import type {
   WorkerStatusKind,
 } from './orchestrator-types.js';
 import type { SDKMessage, SDKUserMessage } from './claude-cli/types.js';
+import type { ObservedSnapshot } from './observe/types.js';
+import {
+  listBoardableObservedSessionRows,
+  runObservedSessionAction,
+  type ObservedActionOutcome,
+  type ObservedSessionToolRow,
+} from './observe/session-actions.js';
 import type {
   AuthorizedMeetingContextSource,
   ContextSelection,
@@ -203,6 +210,11 @@ interface OrchestratorOpts {
    * manager created below; tests with stub sessions may inject one to exercise
    * the real managed-worktree delivery path without spawning a backend CLI. */
   workspaceManager?: TaskWorkspaceManager;
+  /** Live observed-session snapshot provider (main.ts's ObserveService cache).
+   *  Feeds the Host observed_session_* MCP tools; defaults to an empty
+   *  snapshot so tests and non-observed contexts degrade to "nothing
+   *  actionable". */
+  getObservedSnapshot?: () => ObservedSnapshot;
 }
 
 export class Orchestrator implements OrchestratorBridge {
@@ -242,6 +254,7 @@ export class Orchestrator implements OrchestratorBridge {
   private finalDeliveryBuild?: Promise<MeetingDelivery | null>;
   private workspaceManager: TaskWorkspaceManager;
   private customWorkspaceManager: boolean;
+  private readonly getObservedSnapshot: () => ObservedSnapshot;
   private diagnostics: DiagnosticLogger;
   private resumeBackendSessions: Record<string, BackendSessionSnapshot>;
   private recoveredTasks: Array<Record<string, unknown>>;
@@ -333,6 +346,8 @@ export class Orchestrator implements OrchestratorBridge {
     this.customWorkspaceManager = opts.workspaceManager !== undefined;
     this.workspaceManager = opts.workspaceManager
       ?? new TaskWorkspaceManager(this.meetingId, this.cwd);
+    this.getObservedSnapshot = opts.getObservedSnapshot
+      ?? (() => ({ sessions: [], scannedAt: 0 }));
     const baseline = this.workspaceManager.inspectBaseline();
     const deliveryVerifier = new CommandDeliveryVerifier();
     this.deliveryVerifier = deliveryVerifier;
@@ -2032,6 +2047,23 @@ export class Orchestrator implements OrchestratorBridge {
 
   describeWorkers(workerId?: string): string {
     return this.meetingScheduler.describeWorkers(workerId);
+  }
+
+  // ---- Observed-session tools (Host voice-intent routing) ------------------
+  // Thin bridge wrappers: resolution + action semantics live in
+  // observe/session-actions.ts (electron-free, unit-tested with injected
+  // exec/fs); the orchestrator only supplies the live snapshot.
+
+  listObservedSessions(): ObservedSessionToolRow[] {
+    return listBoardableObservedSessionRows(this.getObservedSnapshot(), Date.now());
+  }
+
+  focusObservedSessionById(id: string): Promise<ObservedActionOutcome> {
+    return runObservedSessionAction(this.getObservedSnapshot(), { kind: 'focus', id });
+  }
+
+  sendTextToObservedSessionById(id: string, text: string): Promise<ObservedActionOutcome> {
+    return runObservedSessionAction(this.getObservedSnapshot(), { kind: 'send-text', id, text });
   }
 
   narrateAssistantLine(text: string): void {

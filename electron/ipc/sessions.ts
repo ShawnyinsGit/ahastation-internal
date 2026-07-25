@@ -170,6 +170,7 @@ export function registerSessionsIpc(ctx: IpcContext): void {
         talkerModel,
         confirmDestructive: ctx.nativeConfirmDestructive,
         browserTabManager: ctx.browserTabManager,
+        getObservedSnapshot: ctx.getObservedSnapshot,
         defaultBackendId: selectedBackendId,
         meetingId: recovery?.meetingId,
         recoverySeq: recovery?.seq,

@@ -17,6 +17,7 @@ import type { AutoApproveScope } from '../auto-approve-policy.js';
 import type { Orchestrator, OrchestratorEvent } from '../orchestrator.js';
 import type { SessionRegistry, SessionSlot } from '../sessions.js';
 import type { BrowserTabManager } from '../browser-tab-manager.js';
+import type { ObservedSnapshot } from '../observe/types.js';
 
 /** OrchestratorEvent annotated with the sessionId of the slot that emitted
  *  it. The renderer uses this to route the event to the right MeetingState
@@ -55,4 +56,7 @@ export interface IpcContext {
   /** Embedded browser tab manager for MCP browser tools. Optional — when
    *  provided, all workers get browser_navigate/screenshot/click/type tools. */
   browserTabManager?: BrowserTabManager;
+  /** Latest observed-session snapshot (main.ts's ObserveService cache).
+   *  Threaded into each Orchestrator for the Host observed_session_* tools. */
+  getObservedSnapshot: () => ObservedSnapshot;
 }
