@@ -40,7 +40,7 @@ export interface TaskWorkspaceManagerOptions {
 }
 
 export interface WorkspaceBlockedDiagnostic {
-  code: 'dirty-workspace-write-blocked';
+  code: 'dirty-workspace-write-blocked' | 'git-worktree-requires-repository';
   message: string;
   baseline: WorkspaceBaseline;
   actions: Array<'handle-outside-ahastation' | 'revise-to-shared-locked' | 'cancel-task'>;
@@ -208,14 +208,26 @@ export class TaskWorkspaceManager {
   preparationBlock(input: PrepareTaskWorkspaceInput): WorkspaceBlockedDiagnostic | null {
     if (input.mode !== 'git-worktree') return null;
     const baseline = this.inspectBaseline();
-    if (baseline.kind !== 'git-dirty') return null;
-    const error = new DirtyWorkspaceWriteBlockedError(baseline);
-    return {
-      code: error.code,
-      message: error.message,
-      baseline,
-      actions: ['handle-outside-ahastation', 'revise-to-shared-locked', 'cancel-task'],
-    };
+    if (baseline.kind === 'git-dirty') {
+      const error = new DirtyWorkspaceWriteBlockedError(baseline);
+      return {
+        code: error.code,
+        message: error.message,
+        baseline,
+        actions: ['handle-outside-ahastation', 'revise-to-shared-locked', 'cancel-task'],
+      };
+    }
+    if (baseline.kind === 'non-git') {
+      return {
+        code: 'git-worktree-requires-repository',
+        message:
+          'git-worktree mode requires a Git repository. Revise the task to shared-locked '
+          + 'compatibility mode, or initialize a repository outside AhaStation.',
+        baseline,
+        actions: ['revise-to-shared-locked', 'cancel-task'],
+      };
+    }
+    return null;
   }
 
   prepare(taskId: string, input: PrepareTaskWorkspaceInput): TaskWorkspace {

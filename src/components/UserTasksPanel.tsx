@@ -17,6 +17,8 @@ interface UserTasksPanelProps {
   workers: WorkerState[];
   plan?: MeetingPlan | null;
   sessionId?: string | null;
+  /** Open the docked Task Inspector for a meeting-local task row. */
+  onOpenTask?: (taskId: string) => void;
 }
 
 interface TaskRow {
@@ -35,6 +37,7 @@ const STATUS_LABEL: Record<TaskRow['status'], string> = {
   running: '执行中',
   verifying: '校验中',
   reviewing: '评审中',
+  'coordinator-reviewing': 'Coordinator 审查中',
   'awaiting-acceptance': '等待验收',
   'integration-queued': '等待集成',
   integrating: '集成中',
@@ -53,6 +56,7 @@ const STATUS_TONE: Record<TaskRow['status'], string> = {
   running: 'task-status-running',
   verifying: 'task-status-running',
   reviewing: 'task-status-running',
+  'coordinator-reviewing': 'task-status-running',
   'awaiting-acceptance': 'task-status-pending',
   'integration-queued': 'task-status-pending',
   integrating: 'task-status-running',
@@ -89,7 +93,7 @@ function buildRows(workers: WorkerState[], plan?: MeetingPlan | null): TaskRow[]
   return rows;
 }
 
-export function UserTasksPanel({ workers, plan, sessionId }: UserTasksPanelProps) {
+export function UserTasksPanel({ workers, plan, sessionId, onOpenTask }: UserTasksPanelProps) {
   const rows = buildRows(workers, plan);
   const [pendingRecovery, setPendingRecovery] = useState<{
     taskId: string;
@@ -137,7 +141,19 @@ export function UserTasksPanel({ workers, plan, sessionId }: UserTasksPanelProps
             </thead>
             <tbody>
               {rows.map((row) => (
-                <tr key={row.id}>
+                <tr
+                  key={row.id}
+                  className={onOpenTask ? 'user-tasks-row-openable' : undefined}
+                  onClick={onOpenTask ? () => onOpenTask(row.id) : undefined}
+                  role={onOpenTask ? 'button' : undefined}
+                  tabIndex={onOpenTask ? 0 : undefined}
+                  onKeyDown={onOpenTask ? (event) => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault();
+                      onOpenTask(row.id);
+                    }
+                  } : undefined}
+                >
                   <td className="user-tasks-col-title">
                     <div className="user-tasks-title">{row.title}</div>
                     {row.detail && (
@@ -152,7 +168,7 @@ export function UserTasksPanel({ workers, plan, sessionId }: UserTasksPanelProps
                     </span>
                     {row.status === 'interrupted' && (
                       <>
-                        <div className="user-tasks-recovery-actions">
+                        <div className="user-tasks-recovery-actions" onClick={(event) => event.stopPropagation()}>
                           {row.recovery?.allowedActions.includes('continue-side-effecting') && (
                             <button type="button" onClick={() => setPendingRecovery({ taskId: row.id, action: 'continue-side-effecting' })}>继续</button>
                           )}
@@ -174,7 +190,11 @@ export function UserTasksPanel({ workers, plan, sessionId }: UserTasksPanelProps
                           <button type="button" onClick={() => { void resolveInterrupted(row.id, 'abandon-task'); }}>放弃</button>
                         </div>
                         {pendingRecovery?.taskId === row.id && (
-                          <div className="user-tasks-recovery-confirm" role="alert">
+                          <div
+                            className="user-tasks-recovery-confirm"
+                            role="alert"
+                            onClick={(event) => event.stopPropagation()}
+                          >
                             <strong>{pendingRecovery.action === 'continue-side-effecting' ? '从现有工作区继续' : '创建新的重跑 attempt'}</strong>
                             <p>这是显式的用户恢复决定。系统不会在确认前发送 Backend prompt，也不会重放命令、网络或外部副作用。</p>
                             <div>
@@ -194,7 +214,7 @@ export function UserTasksPanel({ workers, plan, sessionId }: UserTasksPanelProps
                       </>
                     )}
                     {row.status === 'integration-conflict' && (
-                      <div className="user-tasks-recovery-actions">
+                      <div className="user-tasks-recovery-actions" onClick={(event) => event.stopPropagation()}>
                         <button
                           type="button"
                           onClick={() => { void resolveInterrupted(row.id, 'resolve-integration-conflict'); }}

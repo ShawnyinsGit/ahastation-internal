@@ -81,7 +81,12 @@ const api = {
   relaunchApp: () => ipcRenderer.invoke('app:relaunch'),
   asrAvailable: () => ipcRenderer.invoke('asr:available'),
   deviceDiagnostics: () => ipcRenderer.invoke('device:diagnostics'),
-  transcribePcm: (pcmBuffer, lang) => ipcRenderer.invoke('asr:transcribe', pcmBuffer, lang),
+  startAsrStream: (lang, includePreRoll) =>
+    ipcRenderer.invoke('asr:stream-start', { lang, includePreRoll }),
+  sendAsrStreamFrame: (pcmBuffer, live) =>
+    ipcRenderer.send('asr:stream-frame', pcmBuffer, live),
+  finishAsrStream: (sessionId) => ipcRenderer.invoke('asr:stream-finish', sessionId),
+  cancelAsrStream: (sessionId) => ipcRenderer.invoke('asr:stream-cancel', sessionId),
   polishAsrText: (text) => ipcRenderer.invoke('asr:polish-text', text),
   auth: {
     getConfig: () => ipcRenderer.invoke('auth:get-config'),

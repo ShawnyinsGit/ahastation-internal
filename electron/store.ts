@@ -65,17 +65,15 @@ export interface CustomBackendEntry {
   createdAt: number;
 }
 
-export type AsrProvider = 'local' | 'cloud';
-
-export interface CloudAsrSettings {
-  /** OpenAI-compatible API root, e.g. https://api.openai.com/v1 or
-   *  https://api.groq.com/openai/v1. Empty = built-in default (OpenAI). */
-  baseUrl?: string;
-  /** Bearer key for the cloud endpoint. Never logged; persisted in
-   *  settings.json like other non-Anthropic credentials. */
+export interface XfyunAsrCredentials {
+  /** iFlytek application ID (XFYUN_APPID). Non-secret application identifier. */
+  appId?: string;
+  /** iFlytek API key. Persisted in settings.json (file mode 0o600); a future
+   *  pass should move this to safeStorage like the Anthropic key. */
   apiKey?: string;
-  /** Model name sent in the multipart form. Empty = 'whisper-1'. */
-  model?: string;
+  /** iFlytek API secret used to sign the WebSocket auth URL. Same persistence
+   *  caveat as apiKey. */
+  apiSecret?: string;
 }
 
 export interface Settings {
@@ -122,13 +120,11 @@ export interface Settings {
   // sending to the Talker. Uses the same API credentials as the rest of the
   // app. Persists via settings:get/set-voice-pref.
   voicePolishEnabled?: boolean;
-  // ASR provider: 'local' (default) runs the bundled whisper.cpp binary;
-  // 'cloud' POSTs segments to an OpenAI-compatible /audio/transcriptions
-  // endpoint instead — for hosts that can't run local inference (RK3588 /
-  // glibc 2.31) or users who want a hosted model. Persisted via
-  // settings:get/set-voice-pref.
-  asrProvider?: AsrProvider;
-  cloudAsr?: CloudAsrSettings;
+  // ASR provider: Xunfei (讯飞) IAT streaming speech-to-text. Credentials are
+  // persisted via settings:get/set-voice-pref. When any field is missing the
+  // ASR layer reports unavailable and surfaces an error - there is no local
+  // fallback.
+  xfyunAsr?: XfyunAsrCredentials;
   // Claude authentication: 'apikey' uses a manually-entered API key;
   // 'subscription' relies on the claude CLI's own OAuth credentials.
   authMode?: 'apikey' | 'subscription';

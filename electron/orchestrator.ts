@@ -25,7 +25,12 @@ import type { BackendSession, BackendSessionSnapshot } from './backends/cli-back
 import { getBackendRegistry } from './backends/registry.js';
 import type { AutoApproveScope } from './auto-approve-policy.js';
 import {
+  coerceWorkspaceModeForBaseline,
+  normalizeMeetingPlanBrief,
   normalizePlanMeetingTasks,
+  type AppliedTaskDefaults,
+  type MeetingPlanBrief,
+  type MeetingPlanBriefInput,
   type PlanMeetingTask,
   type PlanMeetingTaskInput,
 } from './meeting-tools.js';
@@ -45,6 +50,8 @@ import { homedir } from 'node:os';
 import {
   SAVE_MEMORY_PER_SESSION_LIMIT,
   extractText,
+  inferSpecialty,
+  titleFromDescription,
 } from './orchestrator-helpers.js';
 import {
   type ActiveReviewGate,
@@ -230,6 +237,7 @@ export class Orchestrator implements OrchestratorBridge {
   private saveMemoryCallsThisSession = 0;
   private autoOrchestration = false;
   private pendingPlan: PlanMeetingTask[] | null = null;
+  private pendingPlanBrief: MeetingPlanBrief | null = null;
   /** True while the Coordinator host is mid-turn. A briefing queued during a live
    *  turn is only read by the *next* turn, so the turn already in flight must not
    *  be charged against the review stall budget. */
@@ -751,13 +759,22 @@ export class Orchestrator implements OrchestratorBridge {
     const authorized = authorizeMeetingCommand(raw, {
       hostId,
       role: hostId === this.coordinatorHostId ? 'coordinator' : 'expert',
-    }, { defaultBackendId: this.defaultHost().backendId });
+    }, {
+      defaultBackendId: this.defaultHost().backendId,
+      ...this.normalizePlanOptions(),
+    });
     if (!authorized.ok) return authorized;
     const command = authorized.command;
     try {
       switch (command.kind) {
         case 'propose-plan': {
-          const result = await this.proposePlan(command.tasks);
+          const result = await this.proposePlan(command.tasks, {
+            goal: command.goal,
+            approach: command.approach,
+            steps: command.steps,
+            risks: command.risks,
+            openQuestions: command.openQuestions,
+          });
           return result.ok
             ? { ok: true, value: { tasks: command.tasks.length } }
             : { ok: false, code: 'execution-failed', error: result.error };
@@ -1130,7 +1147,11 @@ export class Orchestrator implements OrchestratorBridge {
     };
     let task: PlanMeetingTask;
     try {
-      task = normalizePlanMeetingTasks([recoveredTask], this.defaultHost().backendId).tasks[0];
+      task = normalizePlanMeetingTasks(
+        [recoveredTask],
+        this.defaultHost().backendId,
+        this.normalizePlanOptions(),
+      ).tasks[0];
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) };
     }
@@ -1399,10 +1420,15 @@ export class Orchestrator implements OrchestratorBridge {
   async installPlan(tasks: PlanMeetingTaskInput[]): Promise<{ ok: true } | { ok: false; error: string }> {
     let normalized: PlanMeetingTask[];
     try {
-      normalized = normalizePlanMeetingTasks(tasks, this.defaultHost().backendId).tasks;
+      normalized = normalizePlanMeetingTasks(
+        tasks,
+        this.defaultHost().backendId,
+        this.normalizePlanOptions(),
+      ).tasks;
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) };
     }
+    normalized = this.adaptPlanForWorkspaceBaseline(normalized);
     const backendError = await this.validateExecutionBackends(normalized);
     if (backendError) return { ok: false, error: backendError };
     return this.installApprovedPlan(normalized, 'manual-install');
@@ -1464,22 +1490,59 @@ export class Orchestrator implements OrchestratorBridge {
     return this.repository.subscribe(listener);
   }
 
-  async proposePlan(tasks: PlanMeetingTaskInput[]): Promise<{ ok: true } | { ok: false; error: string }> {
+  private normalizePlanOptions(): {
+    cwd: string;
+    baselineKind: 'git-clean' | 'git-dirty' | 'non-git';
+  } {
+    return {
+      cwd: this.cwd,
+      baselineKind: this.workspaceManager.inspectBaseline().kind,
+    };
+  }
+
+  async proposePlan(
+    tasks: PlanMeetingTaskInput[],
+    briefInput?: MeetingPlanBriefInput,
+  ): Promise<{ ok: true; appliedDefaults?: AppliedTaskDefaults[] } | { ok: false; error: string }> {
     let normalized: PlanMeetingTask[];
+    let appliedDefaults: AppliedTaskDefaults[];
     try {
-      normalized = normalizePlanMeetingTasks(tasks, this.defaultHost().backendId).tasks;
+      const result = normalizePlanMeetingTasks(
+        tasks,
+        this.defaultHost().backendId,
+        this.normalizePlanOptions(),
+      );
+      normalized = result.tasks;
+      appliedDefaults = result.appliedDefaults;
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) };
     }
+    normalized = this.adaptPlanForWorkspaceBaseline(normalized);
     const backendError = await this.validateExecutionBackends(normalized);
     if (backendError) return { ok: false, error: backendError };
+    const brief = normalizeMeetingPlanBrief(briefInput, normalized);
+    const applied = appliedDefaults.length > 0 ? { appliedDefaults } : {};
     if (!this.autoOrchestration) {
       this.pendingPlan = normalized.map((task) => ({ ...task, deps: [...(task.deps ?? [])] }));
-      this.safeEmit({ source: 'system', event: { kind: 'plan-proposed', tasks: this.pendingPlan } });
-      void this.repository.append('plan-proposed', { tasks: this.pendingPlan });
-      return { ok: true };
+      this.pendingPlanBrief = brief;
+      this.safeEmit({
+        source: 'system',
+        event: { kind: 'plan-proposed', tasks: this.pendingPlan, brief },
+      });
+      void this.repository.append('plan-proposed', { tasks: this.pendingPlan, brief });
+      return { ok: true, ...applied };
     }
-    return this.installApprovedPlan(normalized, 'auto-orchestration');
+    const installed = await this.installApprovedPlan(normalized, 'auto-orchestration');
+    return installed.ok ? { ok: true, ...applied } : installed;
+  }
+
+  private adaptPlanForWorkspaceBaseline(tasks: PlanMeetingTask[]): PlanMeetingTask[] {
+    const kind = this.workspaceManager.inspectBaseline().kind;
+    if (kind === 'git-clean') return tasks;
+    return tasks.map((task) => {
+      const workspaceMode = coerceWorkspaceModeForBaseline(task.workspaceMode, kind);
+      return workspaceMode === task.workspaceMode ? task : { ...task, workspaceMode };
+    });
   }
 
   setAutoOrchestration(enabled: boolean): void {
@@ -1494,14 +1557,20 @@ export class Orchestrator implements OrchestratorBridge {
     let tasks: PlanMeetingTask[] | null = this.pendingPlan;
     if (revisedTasks) {
       try {
-        tasks = normalizePlanMeetingTasks(revisedTasks, this.defaultHost().backendId).tasks;
+        tasks = normalizePlanMeetingTasks(
+          revisedTasks,
+          this.defaultHost().backendId,
+          this.normalizePlanOptions(),
+        ).tasks;
       } catch (error) {
         return { ok: false, error: error instanceof Error ? error.message : String(error) };
       }
+      tasks = this.adaptPlanForWorkspaceBaseline(tasks);
       const backendError = await this.validateExecutionBackends(tasks);
       if (backendError) return { ok: false, error: backendError };
     }
     this.pendingPlan = null;
+    this.pendingPlanBrief = null;
     if (!tasks) return { ok: false, error: 'no pending plan' };
     if (!approved) return { ok: true };
     return this.installApprovedPlan(tasks, 'plan-meeting-confirmation');
@@ -1579,14 +1648,84 @@ export class Orchestrator implements OrchestratorBridge {
   // multi-host setup, the bridge would be hostId-aware; for now the default
   // host handles all MCP tool callbacks.
 
-  delegateSingleTask(description: string): { workerId: string; specialty: WorkerSpecialtyKind; reused: boolean } {
+  async delegateSingleTask(input: string | {
+    description: string;
+    writePaths?: string[];
+    workspaceMode?: PlanMeetingTaskInput['workspaceMode'];
+    commands?: string[][];
+    networkHosts?: string[];
+    toolKinds?: string[];
+  }): Promise<
+    | {
+        ok: true;
+        workerId: string;
+        specialty: WorkerSpecialtyKind;
+        reused: boolean;
+        status: 'spawned' | 'proposed' | 'installed';
+        appliedDefaults?: string[];
+      }
+    | { ok: false; error: string }
+  > {
+    const request = typeof input === 'string' ? { description: input } : input;
+    const description = request.description.trim();
+    if (!description) return { ok: false, error: 'description is required' };
+
     const backendId = this.defaultHost().backendId;
     const backend = getBackendRegistry().get(backendId);
-    if (!backend) throw new Error(`backend '${backendId}' is not registered`);
+    if (!backend) return { ok: false, error: `backend '${backendId}' is not registered` };
     if (!backend.capabilities.executeTasks) {
-      throw new Error(`backend '${backendId}' cannot execute delivery tasks`);
+      return { ok: false, error: `backend '${backendId}' cannot execute delivery tasks` };
     }
-    return this.meetingScheduler.delegateSingleTask(description);
+
+    const title = titleFromDescription(description);
+    const specialty = inferSpecialty(`${title} ${description}`);
+
+    // Production Claude meetings require an approved authority grant. Route the
+    // single-task shorthand through proposePlan so it gets the same envelope
+    // and user-approval path as plan_meeting — bare registerHandle would throw
+    // in ensureTaskAuthority and leave the Talker thinking the task spawned.
+    if (this.sessionFactory === Orchestrator.defaultClaudeFactory) {
+      const writePaths = request.writePaths ?? [];
+      const workerId = `delegate-${randomUUID().slice(0, 8)}`;
+      // Intent defaults (sandbox write path / test commands / workspace mode)
+      // are applied inside normalizePlanMeetingTask via proposePlan.
+      const task: PlanMeetingTaskInput = {
+        id: workerId,
+        title,
+        prompt: description,
+        deps: [],
+        ...(writePaths.length > 0 ? { writePaths } : {}),
+        ...(request.workspaceMode ? { workspaceMode: request.workspaceMode } : {}),
+        ...(request.commands || request.networkHosts || request.toolKinds
+          ? {
+              authorityRequest: {
+                writePaths,
+                toolKinds: request.toolKinds
+                  ?? (writePaths.length > 0 ? ['read', 'write'] : ['read']),
+                workingDirectories: ['.'],
+                commands: request.commands ?? [],
+                environmentKeys: [],
+                maxCommandTimeoutMs: 1_800_000,
+                networkHosts: request.networkHosts ?? [],
+              },
+            }
+          : {}),
+      };
+      const proposed = await this.proposePlan([task]);
+      if (!proposed.ok) return proposed;
+      const notes = proposed.appliedDefaults?.find((entry) => entry.taskId === workerId)?.notes;
+      return {
+        ok: true,
+        workerId,
+        specialty,
+        reused: false,
+        status: this.autoOrchestration ? 'installed' : 'proposed',
+        ...(notes?.length ? { appliedDefaults: notes } : {}),
+      };
+    }
+
+    const delegated = this.meetingScheduler.delegateSingleTask(description);
+    return { ok: true, ...delegated, status: 'spawned' };
   }
 
   steerWorker(workerId: string, addendum: string): Promise<SteerResult> {

@@ -17,66 +17,37 @@ async function loadStateModule() {
   return import(`data:text/javascript;base64,${Buffer.from(output).toString('base64')}`);
 }
 
-test('Whisper initialization never presents the microphone as unsupported', async () => {
+test('Xunfei initialization never presents the microphone as unsupported', async () => {
   const { deriveMicrophoneUiState } = await loadStateModule();
   assert.deepEqual(
-    deriveMicrophoneUiState({
-      mode: 'whisper',
-      captureStatus: 'initializing',
-      browserSupported: false,
-      browserFailed: false,
-    }),
+    deriveMicrophoneUiState({ mode: 'xfyun', captureStatus: 'initializing' }),
     { supported: true, retryable: false },
   );
 });
 
-test('Whisper failures keep the microphone control available for retry', async () => {
+test('Xunfei failures keep the microphone control available for retry', async () => {
   const { deriveMicrophoneUiState } = await loadStateModule();
   for (const captureStatus of ['permission-denied', 'failed']) {
     assert.deepEqual(
-      deriveMicrophoneUiState({
-        mode: 'whisper',
-        captureStatus,
-        browserSupported: false,
-        browserFailed: false,
-      }),
+      deriveMicrophoneUiState({ mode: 'xfyun', captureStatus }),
       { supported: true, retryable: true },
     );
   }
 });
 
-test('browser fallback is unsupported only after capability probing completes', async () => {
+test('unavailable mode (credentials missing) reports unsupported and non-retryable', async () => {
   const { deriveMicrophoneUiState } = await loadStateModule();
   assert.deepEqual(
-    deriveMicrophoneUiState({
-      mode: 'browser',
-      captureStatus: 'idle',
-      browserSupported: null,
-      browserFailed: false,
-    }),
-    { supported: true, retryable: false },
-  );
-  assert.deepEqual(
-    deriveMicrophoneUiState({
-      mode: 'browser',
-      captureStatus: 'idle',
-      browserSupported: false,
-      browserFailed: false,
-    }),
+    deriveMicrophoneUiState({ mode: 'unavailable', captureStatus: 'idle' }),
     { supported: false, retryable: false },
   );
 });
 
-test('browser recognition failures remain retryable', async () => {
+test('probing mode stays supported while the ASR probe is in flight', async () => {
   const { deriveMicrophoneUiState } = await loadStateModule();
   assert.deepEqual(
-    deriveMicrophoneUiState({
-      mode: 'browser',
-      captureStatus: 'idle',
-      browserSupported: true,
-      browserFailed: true,
-    }),
-    { supported: true, retryable: true },
+    deriveMicrophoneUiState({ mode: 'probing', captureStatus: 'initializing' }),
+    { supported: true, retryable: false },
   );
 });
 

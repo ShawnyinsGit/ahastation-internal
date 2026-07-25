@@ -6,6 +6,7 @@ import type {
   FinalMeetingDecision,
   MeetingDelivery,
   MeetingPlan,
+  MeetingPlanBrief,
   PlanMeetingTaskInput,
   StagedAttachment,
 } from '../types';
@@ -17,6 +18,7 @@ export interface UseWorkersResult {
   coordinatorHostId: string;
   plan: MeetingPlan | null;
   pendingPlan: PlanMeetingTaskInput[] | null;
+  pendingPlanBrief: MeetingPlanBrief | null;
   running: boolean;
   cwd: string | null;
   lastError: string | null;
@@ -27,9 +29,13 @@ export interface UseWorkersResult {
   coordinatorBriefings: CoordinatorBriefing[];
   savedDocuments: string[];
   restartSession: () => Promise<void>;
-  sendText: (text: string) => Promise<void>;
+  sendText: (text: string, options?: { displayText?: string }) => Promise<void>;
   sendImage: (dataUrl: string, caption: string) => Promise<void>;
-  sendAttachments: (staged: StagedAttachment[], text: string) => Promise<{ ok: boolean; error?: string }>;
+  sendAttachments: (
+    staged: StagedAttachment[],
+    text: string,
+    options?: { displayText?: string },
+  ) => Promise<{ ok: boolean; error?: string }>;
   publishDroppedFiles: (files: File[]) => void;
   onDroppedFiles: (cb: (files: File[]) => void) => () => void;
   resolvePermission: (id: string, decision: 'allow' | 'deny') => Promise<{ ok: true } | { ok: false; error: string }>;
@@ -69,10 +75,17 @@ export function useWorkers(): UseWorkersResult {
   }, []);
 
   const restartSession = useCallback(() => meetingStore.restartSession(), []);
-  const sendText = useCallback((text: string) => meetingStore.sendText(text), []);
+  const sendText = useCallback(
+    (text: string, options?: { displayText?: string }) => meetingStore.sendText(text, options),
+    [],
+  );
   const sendImage = useCallback((dataUrl: string, caption: string) => meetingStore.sendImage(dataUrl, caption), []);
   const sendAttachments = useCallback(
-    (staged: StagedAttachment[], text: string) => meetingStore.sendAttachments(staged, text),
+    (
+      staged: StagedAttachment[],
+      text: string,
+      options?: { displayText?: string },
+    ) => meetingStore.sendAttachments(staged, text, options),
     [],
   );
   const publishDroppedFiles = useCallback((files: File[]) => meetingStore.publishDroppedFiles(files), []);
@@ -130,6 +143,7 @@ export function useWorkers(): UseWorkersResult {
     coordinatorHostId: state.coordinatorHostId,
     plan: state.plan,
     pendingPlan: state.pendingPlan,
+    pendingPlanBrief: state.pendingPlanBrief,
     running: state.running,
     cwd,
     lastError: state.lastError,

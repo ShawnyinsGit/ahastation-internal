@@ -522,14 +522,21 @@ export function App() {
       await sendText(trimmed);
       return;
     }
-    const directive = `请把下面这段需求当作"多 Agent 并行"模式处理：先评估各子任务之间的依赖关系，再拆成多个相互独立（或按依赖排序）的子任务，**立即调用 plan_meeting 工具**一次性派发给多个 worker 并行执行。
-- 仔细判断哪些任务可以并行、哪些有依赖（用 deps 字段标注）。
-- 每个 task 给一个稳定的 kebab-case id、一句话标题、给 worker 看的完整 prompt。
-- 拆完直接调工具，不要先问我确认。
+    const directive = `请把下面这段需求当作"多 Agent 并行 / Plan Mode"处理：先写出一份宿主能审阅的**详细计划**，再拆成可并行（或按依赖排序）的 worker 任务，**立即调用 plan_meeting**（不要先问我确认）。
+
+计划必须包含：
+1. goal — 成功标准（一段话）
+2. approach — 做法、取舍、为何这样拆
+3. steps — 有序步骤（每步 title + detail；能对应任务时填 taskId）
+4. risks / openQuestions — 风险与未决问题（没有就空数组）
+5. tasks — 每个 task：kebab-case id、短标题、给 worker 的完整 brief（目标/上下文/步骤/触及范围/验收），deps 标注依赖
+
+不要只交一张空任务清单。任务 prompt 禁止一句话敷衍。
 
 需求：
 ${trimmed}`;
-    await sendText(directive);
+    // Chat shows only the user's words; the model still gets the full directive.
+    await sendText(directive, { displayText: trimmed });
   }, [multiAgent, sendText]);
 
   sendWithModeRef.current = sendWithMode;
@@ -541,12 +548,14 @@ ${trimmed}`;
         return sendAttachments(staged, trimmed);
       }
       const directive = trimmed.length > 0
-        ? `请把下面这段需求和附带文档一起当作"多 Agent 并行"模式处理：评估依赖，拆任务，**调用 plan_meeting 工具**派发多个 worker 并行执行。
+        ? `请阅读附带文档，并按"多 Agent 并行 / Plan Mode"写出详细计划（goal、approach、steps、risks、openQuestions）再拆 tasks，**调用 plan_meeting**。
 
 需求：
 ${trimmed}`
-        : '请阅读附带的文档，按"多 Agent 并行"模式拆解：评估依赖，调用 plan_meeting 派发 worker。';
-      return sendAttachments(staged, directive);
+        : '请阅读附带文档，按"多 Agent 并行 / Plan Mode"写出详细计划（goal、approach、steps、risks）并调用 plan_meeting。';
+      return sendAttachments(staged, directive, {
+        displayText: trimmed.length > 0 ? trimmed : undefined,
+      });
     },
     [multiAgent, sendAttachments],
   );
@@ -773,6 +782,7 @@ ${trimmed}`
 
       <PlanMeetingModal
         open={Boolean(workers.pendingPlan)}
+        brief={workers.pendingPlanBrief}
         tasks={workers.pendingPlan ?? []}
         backends={backends}
         onReject={() => workers.decidePendingPlan(false)}

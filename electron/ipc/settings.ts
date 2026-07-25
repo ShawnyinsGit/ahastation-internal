@@ -1,6 +1,5 @@
 import { ipcMain, shell } from 'electron';
-import { getSettings, updateSettings, clearVoicePrint, type AsrProvider, type CloudAsrSettings, type Settings, type VoicePrint } from '../store.js';
-import { DEFAULT_CLOUD_ASR_MODEL } from '../cloud-asr.js';
+import { getSettings, updateSettings, clearVoicePrint, type Settings, type VoicePrint, type XfyunAsrCredentials } from '../store.js';
 
 export interface VoicePrefPatch {
   selectedVoiceName?: string | null;
@@ -9,8 +8,7 @@ export interface VoicePrefPatch {
   voicePolishEnabled?: boolean;
   reportModeEnabled?: boolean;
   handheldMode?: 'auto' | 'handheld' | 'desktop';
-  asrProvider?: AsrProvider;
-  cloudAsr?: CloudAsrSettings;
+  xfyunAsr?: XfyunAsrCredentials;
 }
 
 // Pure validation/mapping for the settings:set-voice-pref payload. Exported
@@ -61,27 +59,21 @@ export function buildVoicePrefUpdate(
     }
     next.handheldMode = patch.handheldMode;
   }
-  if (Object.prototype.hasOwnProperty.call(patch, 'asrProvider')) {
-    if (patch.asrProvider !== 'local' && patch.asrProvider !== 'cloud') {
-      return { ok: false, error: `invalid asrProvider: ${String(patch.asrProvider)}` };
-    }
-    next.asrProvider = patch.asrProvider;
-  }
-  if (Object.prototype.hasOwnProperty.call(patch, 'cloudAsr')) {
-    const c = patch.cloudAsr;
+  if (Object.prototype.hasOwnProperty.call(patch, 'xfyunAsr')) {
+    const c = patch.xfyunAsr;
     if (typeof c !== 'object' || c === null) {
-      return { ok: false, error: 'cloudAsr must be an object' };
+      return { ok: false, error: 'xfyunAsr must be an object' };
     }
-    for (const key of ['baseUrl', 'apiKey', 'model'] as const) {
+    for (const key of ['appId', 'apiKey', 'apiSecret'] as const) {
       if (c[key] !== undefined && typeof c[key] !== 'string') {
-        return { ok: false, error: `cloudAsr.${key} must be a string` };
+        return { ok: false, error: `xfyunAsr.${key} must be a string` };
       }
     }
-    const cleaned: CloudAsrSettings = {};
-    if (typeof c.baseUrl === 'string') cleaned.baseUrl = c.baseUrl.trim();
+    const cleaned: XfyunAsrCredentials = {};
+    if (typeof c.appId === 'string') cleaned.appId = c.appId.trim();
     if (typeof c.apiKey === 'string') cleaned.apiKey = c.apiKey.trim();
-    if (typeof c.model === 'string') cleaned.model = c.model.trim();
-    next.cloudAsr = cleaned;
+    if (typeof c.apiSecret === 'string') cleaned.apiSecret = c.apiSecret.trim();
+    next.xfyunAsr = cleaned;
   }
   return { ok: true, next };
 }
@@ -118,11 +110,10 @@ export function registerSettingsIpc(): void {
       voicePolishEnabled: Boolean(s.voicePolishEnabled),
       reportModeEnabled: Boolean(s.reportModeEnabled),
       handheldMode: s.handheldMode ?? 'auto',
-      asrProvider: s.asrProvider ?? 'local',
-      cloudAsr: {
-        baseUrl: s.cloudAsr?.baseUrl ?? '',
-        apiKey: s.cloudAsr?.apiKey ?? '',
-        model: s.cloudAsr?.model ?? DEFAULT_CLOUD_ASR_MODEL,
+      xfyunAsr: {
+        appId: s.xfyunAsr?.appId ?? '',
+        apiKey: s.xfyunAsr?.apiKey ?? '',
+        apiSecret: s.xfyunAsr?.apiSecret ?? '',
       },
     };
   });
@@ -131,10 +122,10 @@ export function registerSettingsIpc(): void {
     const result = buildVoicePrefUpdate(patch);
     if (!result.ok) return { ok: false, error: result.error };
     const next = result.next;
-    // cloudAsr arrives as a partial — merge onto the stored entry so the
-    // renderer can update one field without resending the apiKey.
-    if (next.cloudAsr) {
-      next.cloudAsr = { ...(getSettings().cloudAsr ?? {}), ...next.cloudAsr };
+    // xfyunAsr arrives as a partial — merge onto the stored entry so the
+    // renderer can update one field without resending secrets.
+    if (next.xfyunAsr) {
+      next.xfyunAsr = { ...(getSettings().xfyunAsr ?? {}), ...next.xfyunAsr };
     }
     await updateSettings(next);
     return { ok: true };

@@ -25,7 +25,7 @@ interface BottomToolbarProps {
   micSupported: boolean;
   listening: boolean;
   speechLevel?: number;
-  asrMode?: 'whisper' | 'browser' | 'probing';
+  asrMode?: 'xfyun' | 'probing' | 'unavailable';
   micStatus: MicrophoneCaptureStatus;
   micRetryable: boolean;
   onRetryMic: () => void;
@@ -104,7 +104,7 @@ export function BottomToolbar({
   onOpenPermission,
 }: BottomToolbarProps) {
   const meterWidth = Math.max(0, Math.min(1, speechLevel)) * 100;
-  const asrBadge = asrMode === 'whisper' ? 'Whisper' : asrMode === 'browser' ? 'Browser SR' : '…';
+  const asrBadge = asrMode === 'xfyun' ? '讯飞' : asrMode === 'unavailable' ? '未配置' : '…';
   const micBusy = micStatus === 'requesting-permission' || micStatus === 'initializing';
   const [moreOpen, setMoreOpen] = useState(false);
   const micIcon = micRetryable

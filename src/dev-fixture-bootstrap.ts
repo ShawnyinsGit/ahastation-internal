@@ -559,7 +559,7 @@ function installFixture(fixture: string): void {
         electronVersion: '42.0.0',
         sessionType: 'x11',
         gpu: { available: true, status: {} },
-        audio: { microphone: 'available', speaker: 'available', whisper: true },
+        audio: { microphone: 'available', speaker: 'available', xfyun: true },
         workspace: { git: true, worktree: true, version: '2.48.1' },
         capacity: { hosts: 3, workers: 4 },
       },

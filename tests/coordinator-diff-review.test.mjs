@@ -157,6 +157,32 @@ test('candidate preparation refuses unreported or unchanged paths', async () => 
   assert.equal(git(cwd, ['rev-parse', 'HEAD']), base);
 });
 
+test('report-only candidates freeze despite unrelated dirty files', async () => {
+  const { cwd, base } = makeRepository();
+  writeFileSync(join(cwd, 'package.json'), '{"name":"dirty"}\n');
+  writeFileSync(join(cwd, '.gitignore'), 'node_modules/\n');
+
+  const frozen = await prepareFrozenDeliveryCandidate({
+    order: {
+      deliveryId: 'delivery-report-only',
+      taskId: 'explore',
+      attempt: 1,
+      meetingId: 'meeting-1',
+      goal: 'explore tests',
+      acceptanceCriteria: [],
+      workspace: cwd,
+      sourceRevision: base,
+    },
+    report: report([]),
+    verification: verification(),
+  });
+
+  assert.deepEqual(frozen.reportedPaths, []);
+  assert.notEqual(frozen.commit, base);
+  // Unrelated dirty files stay in the worktree; freeze used an empty commit.
+  assert.match(readFileSync(join(cwd, 'package.json'), 'utf8'), /dirty/);
+});
+
 test('candidate preparation ignores ephemeral vibe runtime paths and gitignore housekeeping', async () => {
   const { cwd, base } = makeRepository();
   writeFileSync(join(cwd, '.gitignore'), 'node_modules/\n');

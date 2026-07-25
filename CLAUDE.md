@@ -42,7 +42,7 @@ break without the other noticing.
 ## Build / package
 
 - `npm run build` — vite + tsc, no installer.
-- `npm run dist:dmg` — full release flow: downloads whisper, bundles Claude
+- `npm run dist:dmg` — full release flow: downloads the speaker model, bundles Claude
   defaults, builds, then runs `electron-builder --mac --arm64 --publish never`.
   Output lands in `release/` as `Vibe Meet-<version>-arm64.dmg` (unsigned;
   `identity` is explicitly null in `electron-builder.json`).

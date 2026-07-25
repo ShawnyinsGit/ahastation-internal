@@ -153,7 +153,7 @@ function createWindow() {
   // DevTools toggle: Cmd+Option+I (mac) / Ctrl+Shift+I (others). Packaged
   // builds otherwise have no UI to open DevTools, which leaves the user
   // stuck if they need to read renderer logs (e.g. the [asr] probe line
-  // that reports whether whisper or browser ASR is live).
+  // that reports whether Xunfei ASR is live).
   const wc = mainWindow.webContents;
   wc.on('before-input-event', (_e, input) => {
     if (!isDev && !process.env.VIBE_MEET_DEVTOOLS) return;
@@ -454,7 +454,7 @@ if (!hasSingleInstanceLock) {
 if (hasSingleInstanceLock) app.whenReady().then(async () => {
   registerAppProtocol();
   // Dynamic-import IPC modules so their transitive deps (orchestrator,
-  // claude-session, whisper, etc.) don't block the app-ready event.
+  // claude-session, ASR, etc.) don't block the app-ready event.
   // IPC handlers must be registered before createWindow() so the renderer
   // can call them as soon as it loads — but the dynamic import resolves in
   // <50ms (all local files, no network) which is faster than the original
@@ -586,24 +586,8 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
     }
   }
 
-  // Kick the whisper.cpp HTTP server off the launch critical path.
-  import('./whisper-server.js').then(({ startWhisperServer }) => {
-    void startWhisperServer().then((r) => {
-      if (!r.ok) console.warn('[whisper-server] disabled:', r.reason);
-    });
-  }).catch((err) => {
-    console.error('[main] whisper-server import failed:', err);
-  });
-
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
-    import('./whisper-server.js').then(({ startWhisperServer }) => {
-      void startWhisperServer().then((r) => {
-        if (!r.ok) console.warn('[whisper-server] activate restart skipped:', r.reason);
-      });
-    }).catch((err) => {
-      console.error('[main] whisper-server activate import failed:', err);
-    });
   });
 });
 
@@ -633,19 +617,14 @@ function shutdownAllSlots(): Promise<void> {
 
 app.on('window-all-closed', () => {
   void shutdownAllSlots();
-  import('./whisper.js').then(({ disposeWhisper }) => {
-    if (process.platform === 'darwin') {
-      void disposeWhisper(false);
-    } else {
-      void disposeWhisper();
-      app.quit();
-    }
-  });
+  if (process.platform !== 'darwin') {
+    app.quit();
+  }
 });
 
 // Final safety net: even on cmd-Q with the dock alive (macOS) the window-all-
-// closed handler doesn't fire. before-quit covers that path so whisper-cli
-// always gets SIGTERM'd.
+// closed handler doesn't fire. before-quit covers that path so slots and
+// pending settings writes always drain before exit.
 //
 // v0.7.3: Electron used to terminate this process the moment the handler
 // returned, killing recap + SDK subprocess teardown mid-flight and leaving
@@ -672,8 +651,6 @@ app.on('before-quit', (event) => {
     try {
       await Promise.race([shutdownAllSlots(), sleepMs(5000)]);
     } finally {
-      const { disposeWhisper } = await import('./whisper.js');
-      await Promise.race([disposeWhisper(), sleepMs(1500)]);
       if (_flushOpenTabsNow) _flushOpenTabsNow(ipcCtx);
       await flushSettingsWrites();
       app.exit(0);

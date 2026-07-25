@@ -89,6 +89,19 @@ test('canPrepare returns false for escaping write paths instead of throwing', as
   assert.equal(manager.validateWritePaths(['output/report.md']), null);
 });
 
+test('preparationBlock surfaces non-git git-worktree as a revisable diagnostic', async (t) => {
+  const cwd = await mkdtemp(join(tmpdir(), 'ahastation-nongit-'));
+  t.after(() => rm(cwd, { recursive: true, force: true }));
+  const manager = new TaskWorkspaceManager('meeting', cwd);
+  const block = manager.preparationBlock({
+    mode: 'git-worktree',
+    writePaths: ['output/report.md'],
+  });
+  assert.equal(block?.code, 'git-worktree-requires-repository');
+  assert.equal(block?.baseline.kind, 'non-git');
+  assert.ok(block?.actions.includes('revise-to-shared-locked'));
+});
+
 test('clean git tasks receive isolated worktrees', async (t) => {
   const cwd = await mkdtemp(join(tmpdir(), 'ahastation-git-'));
   const meetingId = `meeting-${Date.now()}-${Math.random().toString(16).slice(2)}`;

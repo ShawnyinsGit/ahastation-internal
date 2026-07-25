@@ -1,4 +1,4 @@
-export type AsrMode = 'whisper' | 'browser' | 'probing';
+export type AsrMode = 'xfyun' | 'probing' | 'unavailable';
 
 export type MicrophoneCaptureStatus =
   | 'idle'
@@ -12,23 +12,14 @@ export type MicrophoneCaptureStatus =
 interface MicrophoneUiStateOptions {
   mode: AsrMode;
   captureStatus: MicrophoneCaptureStatus;
-  browserSupported: boolean | null;
-  browserFailed: boolean;
 }
 
 export function deriveMicrophoneUiState({
   mode,
   captureStatus,
-  browserSupported,
-  browserFailed,
 }: MicrophoneUiStateOptions): { supported: boolean; retryable: boolean } {
   if (mode === 'probing') return { supported: true, retryable: false };
-  if (mode === 'browser') {
-    return {
-      supported: browserSupported !== false,
-      retryable: browserSupported === true && browserFailed,
-    };
-  }
+  if (mode === 'unavailable') return { supported: false, retryable: false };
   return {
     supported: true,
     retryable: captureStatus === 'permission-denied' || captureStatus === 'failed',

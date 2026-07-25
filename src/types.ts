@@ -155,6 +155,7 @@ export type WorkerStatus =
   | 'running'
   | 'verifying'
   | 'reviewing'
+  | 'coordinator-reviewing'
   | 'awaiting-acceptance'
   | 'integration-queued'
   | 'integrating'
@@ -483,7 +484,7 @@ export interface MeetingPlanNode {
     reason?: string;
   };
   workspaceDiagnostic?: {
-    code: 'dirty-workspace-write-blocked';
+    code: 'dirty-workspace-write-blocked' | 'git-worktree-requires-repository';
     message: string;
     baseline: {
       kind: 'git-clean' | 'git-dirty' | 'non-git';
@@ -785,7 +786,14 @@ export type RendererEvent =
   | { kind: 'meeting-delivery-updated'; delivery: MeetingDelivery | null; decision: FinalMeetingDecision | null; source?: AgentSource; sessionId?: string; hostId?: string }
   | { kind: 'coordinator-briefing'; briefing: CoordinatorBriefing; source?: AgentSource; sessionId?: string; hostId?: string }
   | { kind: 'plan-updated'; plan: MeetingPlan; source?: AgentSource; sessionId?: string; hostId?: string }
-  | { kind: 'plan-proposed'; tasks: PlanMeetingTaskInput[]; source?: AgentSource; sessionId?: string; hostId?: string }
+  | {
+    kind: 'plan-proposed';
+    tasks: PlanMeetingTaskInput[];
+    brief?: MeetingPlanBrief;
+    source?: AgentSource;
+    sessionId?: string;
+    hostId?: string;
+  }
   | { kind: 'coordinator-failed'; hostId: string; candidateHostId: string | null; error?: string; source?: AgentSource; sessionId?: string }
   | { kind: 'decision-pending'; decisionId: string; question: string; path: string; recommendedTitle: string; calendarOk: boolean; remindersOk: boolean; source?: AgentSource; sessionId?: string; hostId?: string }
   | { kind: 'decision-resolved'; decisionId: string; question: string; path: string; conclusion: string; source?: AgentSource; sessionId?: string; hostId?: string }
@@ -1107,12 +1115,10 @@ export type ListDirResult =
   | { ok: true; path: string; parent: string | null; entries: DirListEntry[] }
   | { ok: false; error: string };
 
-export type AsrProvider = 'local' | 'cloud';
-
-export interface CloudAsrSettings {
-  baseUrl: string;
+export interface XfyunAsrCredentials {
+  appId: string;
   apiKey: string;
-  model: string;
+  apiSecret: string;
 }
 
 export interface VibeMeetApi {
@@ -1168,8 +1174,8 @@ export interface VibeMeetApi {
   getVoiceConfig: () => Promise<{ enabled: boolean; voicePrint: VoicePrint | null }>;
   setVoiceLockEnabled: (on: boolean) => Promise<{ ok: boolean }>;
   setVoicePrint: (vp: VoicePrint | null) => Promise<{ ok: boolean }>;
-  getVoicePref: () => Promise<{ selectedVoiceName: string | null; guidanceDismissed: boolean; speechFilterMode: 'strict' | 'off'; voicePolishEnabled: boolean; reportModeEnabled: boolean; handheldMode: 'auto' | 'handheld' | 'desktop'; asrProvider: AsrProvider; cloudAsr: CloudAsrSettings }>;
-  setVoicePref: (patch: { selectedVoiceName?: string | null; guidanceDismissed?: boolean; speechFilterMode?: 'strict' | 'off'; voicePolishEnabled?: boolean; reportModeEnabled?: boolean; handheldMode?: 'auto' | 'handheld' | 'desktop'; asrProvider?: AsrProvider; cloudAsr?: Partial<CloudAsrSettings> }) => Promise<{ ok: boolean; error?: string }>;
+  getVoicePref: () => Promise<{ selectedVoiceName: string | null; guidanceDismissed: boolean; speechFilterMode: 'strict' | 'off'; voicePolishEnabled: boolean; reportModeEnabled: boolean; handheldMode: 'auto' | 'handheld' | 'desktop'; xfyunAsr: XfyunAsrCredentials }>;
+  setVoicePref: (patch: { selectedVoiceName?: string | null; guidanceDismissed?: boolean; speechFilterMode?: 'strict' | 'off'; voicePolishEnabled?: boolean; reportModeEnabled?: boolean; handheldMode?: 'auto' | 'handheld' | 'desktop'; xfyunAsr?: Partial<XfyunAsrCredentials> }) => Promise<{ ok: boolean; error?: string }>;
   openVoiceSettings: () => Promise<{ ok: boolean }>;
   useSystemPicker: () => Promise<boolean>;
   getDesktopSources: () => Promise<
@@ -1196,7 +1202,7 @@ export interface VibeMeetApi {
           audio: {
             microphone: 'granted' | 'denied' | 'available' | 'unavailable' | 'unknown';
             speaker: 'available' | 'unknown';
-            whisper: boolean;
+            xfyun: boolean;
           };
           workspace: { git: boolean; worktree: boolean; version: string | null };
           capacity: { hosts: number; workers: number };
@@ -1204,10 +1210,15 @@ export interface VibeMeetApi {
       }
     | { ok: false; error: string }
   >;
-  transcribePcm: (
-    pcm: ArrayBuffer,
+  startAsrStream: (
     lang?: 'auto' | 'zh' | 'en',
+    includePreRoll?: boolean,
+  ) => Promise<{ ok: true; sessionId: string } | { ok: false; error: string }>;
+  sendAsrStreamFrame: (pcm: ArrayBuffer, live: boolean) => void;
+  finishAsrStream: (
+    sessionId: string,
   ) => Promise<{ ok: true; text: string } | { ok: false; error: string }>;
+  cancelAsrStream: (sessionId?: string) => Promise<{ ok: boolean }>;
   polishAsrText: (
     text: string,
   ) => Promise<{ ok: true; text: string } | { ok: false; error: string; text: string }>;
@@ -1453,6 +1464,21 @@ export interface ActivityEntry {
   source?: AgentSource;
   /** Absolute path to a decision markdown doc; renderer shows an "Open" button when set. */
   actionPath?: string;
+}
+
+/** Human-readable plan document accompanying a worker DAG. */
+export interface MeetingPlanStep {
+  title: string;
+  detail: string;
+  taskId?: string;
+}
+
+export interface MeetingPlanBrief {
+  goal: string;
+  approach?: string;
+  steps: MeetingPlanStep[];
+  risks: string[];
+  openQuestions: string[];
 }
 
 /** Renderer-side input for the manual Plan Meeting flow. The main process

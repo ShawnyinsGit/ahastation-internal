@@ -1,7 +1,6 @@
-// Shared vocabulary for anything that renders a task's state — the in-meeting
-// TaskRail and the cross-project TasksView both read from here so a status
-// never gets two different Chinese labels depending on which surface you're
-// looking at.
+// Shared vocabulary for anything that renders a task's state — the
+// cross-project TasksView (and any future surfaces) read from here so a
+// status never gets two different Chinese labels.
 
 import type { WorkerStatus } from '../types';
 
@@ -10,6 +9,7 @@ export const WORKER_STATUS_LABEL: Record<WorkerStatus, string> = {
   running: '执行中',
   verifying: '校验中',
   reviewing: '评审中',
+  'coordinator-reviewing': 'Coordinator 审查中',
   'awaiting-acceptance': '等待验收',
   'integration-queued': '等待集成',
   integrating: '集成中',

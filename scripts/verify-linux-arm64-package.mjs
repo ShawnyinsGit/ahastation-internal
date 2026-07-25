@@ -36,9 +36,6 @@ try {
   const appRoot = join(unpacked, 'opt', 'AhaStation');
   const resources = join(appRoot, 'resources');
   requireExecutable(join(appRoot, 'ahastation'), 'Electron launcher');
-  requireExecutable(join(resources, 'whisper', 'whisper-cli'), 'whisper-cli');
-  requireExecutable(join(resources, 'whisper', 'whisper-server'), 'whisper-server');
-  requireFile(join(resources, 'whisper', 'ggml-small-q5_1.bin'), 'Whisper model');
   requireMatch(resources, /app\.asar\.unpacked[\\/]node_modules[\\/]@openai[\\/]codex-linux-arm64[\\/].*[\\/]codex$/);
   requireMatch(resources, /app\.asar\.unpacked[\\/]node_modules[\\/]opencode-linux-arm64[\\/]bin[\\/]opencode$/);
   requireMatch(resources, /app\.asar\.unpacked[\\/]node_modules[\\/]@anthropic-ai[\\/]claude-agent-sdk-linux-arm64[\\/]claude$/);
@@ -69,7 +66,7 @@ try {
     throw new Error(`Debian 11 compatibility failure:\n${incompatible.join('\n')}`);
   }
   process.stdout.write(`[verify-linux-arm64] PASS ${deb}\n`);
-  process.stdout.write('[verify-linux-arm64] architecture=arm64 glibc<=2.31 runtimes=Claude,Codex,OpenCode whisper=present\n');
+  process.stdout.write('[verify-linux-arm64] architecture=arm64 glibc<=2.31 runtimes=Claude,Codex,OpenCode\n');
 } finally {
   rmSync(unpacked, { recursive: true, force: true });
 }

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import type { BackendInfo, PlanMeetingTaskInput } from '../types';
+import type { BackendInfo, MeetingPlanBrief, PlanMeetingTaskInput } from '../types';
 import {
   isWorkerBackendReady,
   normalizePlanDraft,
@@ -9,10 +9,35 @@ import {
 
 interface PlanMeetingModalProps {
   open: boolean;
+  brief: MeetingPlanBrief | null;
   tasks: PlanMeetingTaskInput[];
   backends: BackendInfo[];
   onReject: () => Promise<{ ok: boolean; error?: string }>;
   onSubmit: (tasks: PlanMeetingTaskInput[]) => Promise<{ ok: boolean; error?: string }>;
+}
+
+function cloneBrief(brief: MeetingPlanBrief | null, tasks: PlanMeetingTaskInput[]): MeetingPlanBrief {
+  if (brief) {
+    return {
+      goal: brief.goal,
+      approach: brief.approach,
+      steps: brief.steps.map((step) => ({ ...step })),
+      risks: [...brief.risks],
+      openQuestions: [...brief.openQuestions],
+    };
+  }
+  return {
+    goal: tasks.length === 1
+      ? (tasks[0]?.title || '执行任务')
+      : `完成 ${tasks.length} 项协作任务`,
+    steps: tasks.map((task) => ({
+      title: task.title,
+      detail: task.prompt,
+      taskId: task.id,
+    })),
+    risks: [],
+    openQuestions: [],
+  };
 }
 
 type Criterion = NonNullable<PlanMeetingTaskInput['acceptanceCriteria']>[number];
@@ -59,20 +84,23 @@ function lines(value: string): string[] {
 
 export function PlanMeetingModal({
   open,
+  brief,
   tasks,
   backends,
   onReject,
   onSubmit,
 }: PlanMeetingModalProps) {
   const [draft, setDraft] = useState<PlanMeetingTaskInput[]>([]);
+  const [draftBrief, setDraftBrief] = useState<MeetingPlanBrief>(() => cloneBrief(brief, tasks));
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!open) return;
     setDraft(cloneTasks(tasks, backends));
+    setDraftBrief(cloneBrief(brief, tasks));
     setError(null);
-  }, [backends, open, tasks]);
+  }, [backends, brief, open, tasks]);
 
   const validation = useMemo(() => {
     return validatePlanDraft(draft, backends);
@@ -127,13 +155,17 @@ export function PlanMeetingModal({
   const startsImmediately = Math.min(runnable, workerCapacity);
   const waitsForCapacity = Math.max(0, runnable - workerCapacity);
 
+  const patchBrief = (patch: Partial<MeetingPlanBrief>) => {
+    setDraftBrief((current) => ({ ...current, ...patch }));
+  };
+
   return (
     <div className="plan-modal-backdrop">
       <section className="plan-modal plan-modal-structured" role="dialog" aria-modal="true" aria-labelledby="plan-title">
         <header className="plan-modal-header">
           <div>
-            <span className="plan-modal-kicker">Coordinator 建议</span>
-            <h2 id="plan-title">确认结构化执行计划</h2>
+            <span className="plan-modal-kicker">Plan Mode</span>
+            <h2 id="plan-title">审阅执行计划</h2>
           </div>
           <div className="plan-capacity">
             立即 {startsImmediately} 项 · 等容量 {waitsForCapacity} 项 · 上限 {workerCapacity}
@@ -142,11 +174,111 @@ export function PlanMeetingModal({
 
         {changedCount > 0 && (
           <div className="plan-diff-note" aria-live="polite">
-            你已修改 {changedCount} 项 Coordinator 建议；提交后以此版本为准。
+            你已修改 {changedCount} 项任务配置；提交后以此版本为准。
           </div>
         )}
 
+        <section className="plan-brief-doc" aria-label="计划正文">
+          <label className="plan-brief-goal">
+            <span>目标</span>
+            <textarea
+              rows={2}
+              value={draftBrief.goal}
+              onChange={(event) => patchBrief({ goal: event.target.value })}
+              placeholder="成功标准：做完之后用户应看到什么"
+            />
+          </label>
+          <label className="plan-brief-approach">
+            <span>做法与取舍</span>
+            <textarea
+              rows={4}
+              value={draftBrief.approach ?? ''}
+              onChange={(event) => patchBrief({ approach: event.target.value || undefined })}
+              placeholder="架构、顺序、为何这样拆、明确不做的事"
+            />
+          </label>
+          <div className="plan-brief-steps">
+            <div className="plan-section-head">
+              <strong>步骤</strong>
+              <button
+                type="button"
+                onClick={() => patchBrief({
+                  steps: [...draftBrief.steps, { title: '', detail: '' }],
+                })}
+              >
+                添加步骤
+              </button>
+            </div>
+            {draftBrief.steps.length === 0 ? (
+              <p className="plan-muted">尚未拆出步骤；下方任务会作为默认步骤。</p>
+            ) : (
+              <ol className="plan-brief-step-list">
+                {draftBrief.steps.map((step, stepIndex) => (
+                  <li key={`step-${stepIndex}`}>
+                    <div className="plan-brief-step-head">
+                      <span>步骤 {stepIndex + 1}</span>
+                      <button
+                        type="button"
+                        aria-label="删除步骤"
+                        onClick={() => patchBrief({
+                          steps: draftBrief.steps.filter((_, index) => index !== stepIndex),
+                        })}
+                      >
+                        ×
+                      </button>
+                    </div>
+                    <input
+                      aria-label="步骤标题"
+                      value={step.title}
+                      placeholder="这一步做什么"
+                      onChange={(event) => {
+                        const steps = draftBrief.steps.map((entry, index) => (
+                          index === stepIndex ? { ...entry, title: event.target.value } : entry
+                        ));
+                        patchBrief({ steps });
+                      }}
+                    />
+                    <textarea
+                      rows={3}
+                      aria-label="步骤说明"
+                      value={step.detail}
+                      placeholder="为什么、改哪里、如何验收"
+                      onChange={(event) => {
+                        const steps = draftBrief.steps.map((entry, index) => (
+                          index === stepIndex ? { ...entry, detail: event.target.value } : entry
+                        ));
+                        patchBrief({ steps });
+                      }}
+                    />
+                  </li>
+                ))}
+              </ol>
+            )}
+          </div>
+          <div className="plan-brief-side-by-side">
+            <label>
+              <span>风险</span>
+              <textarea
+                rows={3}
+                value={draftBrief.risks.join('\n')}
+                onChange={(event) => patchBrief({ risks: lines(event.target.value) })}
+                placeholder="每行一条风险或 blast radius"
+              />
+            </label>
+            <label>
+              <span>未决问题</span>
+              <textarea
+                rows={3}
+                value={draftBrief.openQuestions.join('\n')}
+                onChange={(event) => patchBrief({ openQuestions: lines(event.target.value) })}
+                placeholder="不阻塞开干、但宿主应知情的问题"
+              />
+            </label>
+          </div>
+        </section>
+
         <div className="plan-task-list">
+          <h3 className="plan-task-list-title">Worker 任务（{draft.length}）</h3>
           {draft.map((task, taskIndex) => {
             const selectedBackend = backends.find((backend) => backend.id === task.executorBackendId);
             const profile = task.executionProfile!;
@@ -192,7 +324,18 @@ export function PlanMeetingModal({
                   <span>标题</span>
                   <input value={task.title} onChange={(event) => patchTask(taskIndex, { title: event.target.value })} />
                 </label>
+                <label>
+                  <span>Worker brief</span>
+                  <textarea
+                    rows={6}
+                    value={task.prompt}
+                    onChange={(event) => patchTask(taskIndex, { prompt: event.target.value })}
+                    placeholder="目标、上下文、步骤、触及范围、验收标准"
+                  />
+                </label>
 
+                <details className="plan-task-ops">
+                  <summary>执行与权限配置（可选）</summary>
                 <fieldset>
                   <legend>执行配置</legend>
                   <div className="plan-field-grid">
@@ -307,7 +450,7 @@ export function PlanMeetingModal({
                       />
                     </label>
                   </div>
-                  <small>达到任一上限会暂停任务；只有用户批准新版本预算后才会继续。</small>
+                  <small>默认不设预算（不因返工次数暂停）。只有你主动收紧上限时，达到上限才会暂停并等你批准继续。</small>
                 </fieldset>
 
                 <fieldset>
@@ -317,9 +460,46 @@ export function PlanMeetingModal({
                       <span>Workspace 模式</span>
                       <select
                         value={task.workspaceMode}
-                        onChange={(event) => patchTask(taskIndex, {
-                          workspaceMode: event.target.value as NonNullable<PlanMeetingTaskInput['workspaceMode']>,
-                        })}
+                        onChange={(event) => {
+                          const workspaceMode = event.target.value as NonNullable<
+                            PlanMeetingTaskInput['workspaceMode']
+                          >;
+                          if (workspaceMode === 'read-only') {
+                            patchTask(taskIndex, {
+                              workspaceMode,
+                              writePaths: [],
+                              authorityRequest: {
+                                ...authority,
+                                writePaths: [],
+                                toolKinds: Array.from(new Set([
+                                  ...authority.toolKinds.filter((kind) => (
+                                    !['write', 'command', 'bash', 'execute', 'exec', 'shell', 'terminal', 'network', 'fetch', 'web']
+                                      .includes(kind.toLowerCase())
+                                  )),
+                                  'read',
+                                ])),
+                                commands: [],
+                                networkHosts: [],
+                                environmentKeys: [],
+                              },
+                            });
+                            return;
+                          }
+                          const writePaths = authority.writePaths.length > 0
+                            ? authority.writePaths
+                            : (task.writePaths ?? []);
+                          patchTask(taskIndex, {
+                            workspaceMode,
+                            writePaths,
+                            authorityRequest: {
+                              ...authority,
+                              writePaths,
+                              toolKinds: writePaths.length > 0
+                                ? Array.from(new Set([...authority.toolKinds, 'read', 'write']))
+                                : Array.from(new Set([...authority.toolKinds, 'read'])),
+                            },
+                          });
+                        }}
                       >
                         <option value="read-only">只读</option>
                         <option value="git-worktree">Git Worktree</option>
@@ -387,13 +567,23 @@ export function PlanMeetingModal({
                       <textarea
                         rows={3}
                         value={authority.commands.map((argv) => argv.join(' ')).join('\n')}
-                        onChange={(event) => patchTask(taskIndex, {
-                          authorityRequest: {
-                            ...authority,
-                            commands: lines(event.target.value)
-                              .map((command) => command.split(/\s+/).filter(Boolean)),
-                          },
-                        })}
+                        onChange={(event) => {
+                          const commands = lines(event.target.value)
+                            .map((command) => command.split(/\s+/).filter(Boolean));
+                          const withoutCommand = authority.toolKinds.filter((kind) => (
+                            !['command', 'bash', 'execute', 'exec', 'shell', 'terminal']
+                              .includes(kind.toLowerCase())
+                          ));
+                          patchTask(taskIndex, {
+                            authorityRequest: {
+                              ...authority,
+                              commands,
+                              toolKinds: commands.length > 0
+                                ? Array.from(new Set([...withoutCommand, 'command']))
+                                : withoutCommand,
+                            },
+                          });
+                        }}
                       />
                     </label>
                     <label>
@@ -414,12 +604,21 @@ export function PlanMeetingModal({
                       <textarea
                         rows={3}
                         value={authority.networkHosts.join('\n')}
-                        onChange={(event) => patchTask(taskIndex, {
-                          authorityRequest: {
-                            ...authority,
-                            networkHosts: lines(event.target.value),
-                          },
-                        })}
+                        onChange={(event) => {
+                          const networkHosts = lines(event.target.value);
+                          const withoutNetwork = authority.toolKinds.filter((kind) => (
+                            !['network', 'fetch', 'web'].includes(kind.toLowerCase())
+                          ));
+                          patchTask(taskIndex, {
+                            authorityRequest: {
+                              ...authority,
+                              networkHosts,
+                              toolKinds: networkHosts.length > 0
+                                ? Array.from(new Set([...withoutNetwork, 'network']))
+                                : withoutNetwork,
+                            },
+                          });
+                        }}
                       />
                     </label>
                   </div>
@@ -428,10 +627,7 @@ export function PlanMeetingModal({
                     命令、网络、凭据与破坏性操作始终需要高风险确认。
                   </div>
                 </fieldset>
-                <label>
-                  <span>完整任务说明</span>
-                  <textarea rows={4} value={task.prompt} onChange={(event) => patchTask(taskIndex, { prompt: event.target.value })} />
-                </label>
+                </details>
 
                 <fieldset className="plan-dependencies">
                   <legend>前置依赖</legend>

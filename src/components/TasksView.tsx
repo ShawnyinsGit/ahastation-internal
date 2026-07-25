@@ -31,6 +31,7 @@ function StatusIcon({ status, blocked }: { status: WorkerStatus; blocked: boolea
   if (status === 'budget-paused' || status === 'interrupted') return <Clock3 size={13} />;
   if (
     status === 'reviewing'
+    || status === 'coordinator-reviewing'
     || status === 'awaiting-acceptance'
     || status === 'integration-queued'
   ) return <GitMerge size={13} />;

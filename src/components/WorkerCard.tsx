@@ -26,6 +26,7 @@ const statusTone: Record<WorkerState['status'], 'idle' | 'waiting' | 'working' |
   running: 'working',
   verifying: 'working',
   reviewing: 'working',
+  'coordinator-reviewing': 'working',
   'awaiting-acceptance': 'waiting',
   'integration-queued': 'waiting',
   integrating: 'working',
@@ -61,6 +62,7 @@ function statusLabel(worker: WorkerState, speaking: boolean): string {
     case 'running': return '执行中';
     case 'verifying': return '校验中';
     case 'reviewing': return '评审中';
+    case 'coordinator-reviewing': return 'Coordinator 审查中';
     case 'awaiting-acceptance': return '等待验收';
     case 'integration-queued': return '等待集成';
     case 'integrating': return '集成中';

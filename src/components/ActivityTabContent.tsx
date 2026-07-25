@@ -22,6 +22,8 @@ interface ActivityTabContentProps {
   /** Map of iconId → custom avatar data URL */
   customAvatars?: Map<string, string | null>;
   sessionId?: string | null;
+  /** Open the docked Task Inspector for a meeting-local task. */
+  onOpenTask?: (taskId: string) => void;
 }
 
 export function ActivityTabContent({
@@ -37,6 +39,7 @@ export function ActivityTabContent({
   onOpenInTerminal,
   customAvatars,
   sessionId,
+  onOpenTask,
 }: ActivityTabContentProps) {
   const sortedWorkers = useMemo(() => {
     const statusPriority = (w: WorkerState): number => {
@@ -92,7 +95,12 @@ export function ActivityTabContent({
   return (
     <div className="activity-detail">
       {isUserSelected ? (
-        <UserTasksPanel workers={workers} plan={plan} sessionId={sessionId} />
+        <UserTasksPanel
+          workers={workers}
+          plan={plan}
+          sessionId={sessionId}
+          onOpenTask={onOpenTask}
+        />
       ) : selectedWorker && (
         <ClaudeWorkspace
           key={selectedWorker.id}

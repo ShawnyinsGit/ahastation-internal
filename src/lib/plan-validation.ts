@@ -121,6 +121,28 @@ export function validatePlanDraft(
     ) {
       return `任务 ${task.id} 的只读 Workspace 不能申请写权限。`;
     }
+    if (
+      (task.workspaceMode === 'git-worktree' || task.workspaceMode === 'shared-locked')
+      && task.authorityRequest.writePaths.length === 0
+    ) {
+      return `任务 ${task.id} 的 ${task.workspaceMode} 模式必须声明可写路径。`;
+    }
+    if (
+      task.authorityRequest.toolKinds.some((kind) => (
+        ['command', 'bash', 'execute', 'exec', 'shell', 'terminal'].includes(kind.toLowerCase())
+      ))
+      && task.authorityRequest.commands.length === 0
+    ) {
+      return `任务 ${task.id} 授予了命令权限，但未声明允许命令。`;
+    }
+    if (
+      task.authorityRequest.toolKinds.some((kind) => (
+        ['network', 'fetch', 'web'].includes(kind.toLowerCase())
+      ))
+      && task.authorityRequest.networkHosts.length === 0
+    ) {
+      return `任务 ${task.id} 授予了网络权限，但未声明允许主机。`;
+    }
     if (task.authorityRequest.commands.some((argv) => argv.length === 0)) {
       return `任务 ${task.id} 的允许命令不能为空。`;
     }

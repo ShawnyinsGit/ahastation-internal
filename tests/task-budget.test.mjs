@@ -12,7 +12,18 @@ import {
   buildFailureFingerprint,
   DEFAULT_TASK_BUDGET,
   evaluateTaskBudget,
+  isUnlimitedTaskBudget,
+  UNLIMITED_TASK_BUDGET,
 } from '../dist-electron/task-budget.js';
+
+/** Explicit hard cap used by tests that still exercise the pause paths. */
+const BOUNDED_BUDGET = Object.freeze({
+  schemaVersion: 1,
+  maxAttempts: 6,
+  maxTotalTokens: 600_000,
+  maxTotalDurationMs: 14_400_000,
+  maxStagnantAttempts: 3,
+});
 
 const attempt = (number, overrides = {}) => ({
   attempt: number,
@@ -22,18 +33,32 @@ const attempt = (number, overrides = {}) => ({
   ...overrides,
 });
 
+test('default budget is unlimited and never pauses', () => {
+  assert.equal(DEFAULT_TASK_BUDGET, UNLIMITED_TASK_BUDGET);
+  assert.equal(isUnlimitedTaskBudget(DEFAULT_TASK_BUDGET), true);
+  assert.equal(evaluateTaskBudget(DEFAULT_TASK_BUDGET, [
+    attempt(1),
+    attempt(2),
+    attempt(3),
+    attempt(4),
+    attempt(5),
+    attempt(6),
+    attempt(7, { tokenCost: null, reservedTokenCost: undefined }),
+  ]), 'continue');
+});
+
 test('ordinary failures continue while token, time, and attempt totals remain bounded', () => {
-  assert.equal(evaluateTaskBudget(DEFAULT_TASK_BUDGET, [attempt(1)]), 'continue');
+  assert.equal(evaluateTaskBudget(BOUNDED_BUDGET, [attempt(1)]), 'continue');
   assert.equal(evaluateTaskBudget(
-    { ...DEFAULT_TASK_BUDGET, maxAttempts: 2 },
+    { ...BOUNDED_BUDGET, maxAttempts: 2 },
     [attempt(1), attempt(2)],
   ), 'budget-paused');
   assert.equal(evaluateTaskBudget(
-    { ...DEFAULT_TASK_BUDGET, maxTotalTokens: 20_000 },
+    { ...BOUNDED_BUDGET, maxTotalTokens: 20_000 },
     [attempt(1), attempt(2)],
   ), 'budget-paused');
   assert.equal(evaluateTaskBudget(
-    { ...DEFAULT_TASK_BUDGET, maxTotalDurationMs: 2_000 },
+    { ...BOUNDED_BUDGET, maxTotalDurationMs: 2_000 },
     [attempt(1), attempt(2)],
   ), 'budget-paused');
 });
@@ -45,12 +70,12 @@ test('three equivalent failures without evidence change are non-converging', () 
     relevantFiles: ['src/login.ts'],
     evidenceHash: 'a'.repeat(64),
   });
-  assert.equal(evaluateTaskBudget(DEFAULT_TASK_BUDGET, [
+  assert.equal(evaluateTaskBudget(BOUNDED_BUDGET, [
     attempt(1, { failureFingerprint: fingerprint }),
     attempt(2, { failureFingerprint: fingerprint }),
     attempt(3, { failureFingerprint: fingerprint }),
   ]), 'non-converging');
-  assert.equal(evaluateTaskBudget(DEFAULT_TASK_BUDGET, [
+  assert.equal(evaluateTaskBudget(BOUNDED_BUDGET, [
     attempt(1, { failureFingerprint: fingerprint }),
     attempt(2, { failureFingerprint: fingerprint }),
     attempt(3, { failureFingerprint: buildFailureFingerprint({
@@ -78,10 +103,10 @@ test('failure fingerprints include evidence facts and redact secrets', () => {
 });
 
 test('missing Backend token accounting is never treated as zero', () => {
-  assert.equal(evaluateTaskBudget(DEFAULT_TASK_BUDGET, [
+  assert.equal(evaluateTaskBudget(BOUNDED_BUDGET, [
     attempt(1, { tokenCost: null, reservedTokenCost: undefined }),
   ]), 'budget-paused');
-  assert.equal(evaluateTaskBudget(DEFAULT_TASK_BUDGET, [
+  assert.equal(evaluateTaskBudget(BOUNDED_BUDGET, [
     attempt(1, { tokenCost: null, reservedTokenCost: 200_000 }),
   ]), 'continue');
 });
@@ -92,7 +117,7 @@ test('a bounded attempt may succeed without rewriting previous attempts', () => 
     attempt(2, { succeeded: true, failureFingerprint: null }),
   ];
   const before = structuredClone(attempts);
-  assert.equal(evaluateTaskBudget(DEFAULT_TASK_BUDGET, attempts), 'continue');
+  assert.equal(evaluateTaskBudget(BOUNDED_BUDGET, attempts), 'continue');
   assert.deepEqual(attempts, before);
 });
 
@@ -186,7 +211,7 @@ test('verification failures create fresh bounded attempts and user extension pre
     },
     authorityRequest,
     budget: {
-      ...DEFAULT_TASK_BUDGET,
+      ...BOUNDED_BUDGET,
       maxTotalTokens: 1_000_000,
     },
     acceptanceCriteria: [{

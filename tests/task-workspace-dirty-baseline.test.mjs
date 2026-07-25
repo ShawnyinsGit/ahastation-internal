@@ -128,13 +128,12 @@ test('source revision is honored for clean worktrees and invalid revisions fail 
   manager.release('good-source', true);
 });
 
-test('scheduler leaves dirty isolated writer pending with a visible revision diagnostic', async (t) => {
+test('scheduler downgrades dirty git-worktree writers to shared-locked instead of parking them', async (t) => {
   const cwd = await gitFixture(t);
   await writeFile(join(cwd, 'dirty.txt'), 'user work\n');
-  const events = [];
   let sessionCount = 0;
   const scheduler = new WorkerScheduler({
-    emit(event) { events.push(event); },
+    emit() {},
     cwd,
     autoApproveScope: 'off',
     workspaceManager: new TaskWorkspaceManager('meeting', cwd, {
@@ -142,7 +141,14 @@ test('scheduler leaves dirty isolated writer pending with a visible revision dia
     }),
     sessionFactory() {
       sessionCount += 1;
-      throw new Error('blocked task must not construct a backend session');
+      return {
+        async start() {},
+        sendUserText() {},
+        sendUserContent() {},
+        resolvePermission() {},
+        async interrupt() {},
+        end() {},
+      };
     },
     buildWorkerMcp() { return {}; },
     getTalker() { return null; },
@@ -158,16 +164,12 @@ test('scheduler leaves dirty isolated writer pending with a visible revision dia
     writePaths: ['tracked.txt'],
     workspaceMode: 'git-worktree',
   }]), { ok: true });
+  await new Promise((resolve) => setImmediate(resolve));
 
-  assert.equal(sessionCount, 0);
   const snapshot = scheduler.snapshot().find((task) => task.id === 'dirty-writer');
-  assert.equal(snapshot.status, 'pending');
-  assert.equal(snapshot.workspaceDiagnostic.code, 'dirty-workspace-write-blocked');
-  assert.ok(snapshot.workspaceDiagnostic.actions.includes('revise-to-shared-locked'));
-  const briefing = events
-    .map((entry) => entry.event)
-    .find((event) => event.kind === 'coordinator-briefing');
-  assert.equal(briefing.briefing.kind, 'workspace-blocked');
-  assert.match(briefing.briefing.summary, /uncommitted changes/i);
+  assert.equal(snapshot.workspaceMode, 'shared-locked');
+  assert.equal(snapshot.status, 'running');
+  assert.equal(snapshot.workspaceDiagnostic, undefined);
+  assert.equal(sessionCount, 1);
   assert.equal(existsSync(join(cwd, '.test-worktrees')), false);
 });

@@ -117,10 +117,13 @@ test('agent completion cannot produce a delivery candidate when verification fai
   assert.equal(scheduled.status, 'reworking');
   assert.equal(scheduled.attempts[0].feedback, 'fix the failing unit test');
   assert.match(scheduled.spec.objective, /fix the failing unit test/);
-  await assert.rejects(
-    harness.decide(proposed.id, { kind: 'accept-delivery', candidateId: 'missing' }),
-    /not ready for acceptance/,
-  );
+  // Host can still Accept the current report instead of forcing another attempt.
+  const accepted = await harness.decide(proposed.id, {
+    kind: 'accept-delivery',
+    candidateId: `accept-last-${proposed.id}`,
+  });
+  assert.equal(accepted.status, 'accepted');
+  assert.equal(accepted.integration?.kind, 'report-only');
 });
 
 test('delivery observers continue from a cursor and receive later state changes in order', async () => {
@@ -154,7 +157,11 @@ test('delivery observers continue from a cursor and receive later state changes 
 test('integration failures are terminal and accepted deliveries cannot be cancelled', async () => {
   const makeHarness = (integrate) => new DeliveryHarness({
     runtime: { execute: async () => ({
-      status: 'completed', summary: 'done', files: [], tests: [], unresolved: [],
+      status: 'completed',
+      summary: 'done',
+      files: [{ path: 'src/a.ts', action: 'modified' }],
+      tests: [],
+      unresolved: [],
     }) },
     verifier: { verify: async () => ({ passed: true, checks: ['ok'] }) },
     reviewer: { review: async () => ({ passed: true, findings: [] }) },
@@ -264,4 +271,154 @@ test('journaled delivery evidence restores as interrupted and resumes only by us
   assert.equal(second.attempt, 2);
   assert.equal(second.attempts.length, 2);
   assert.equal(second.attempts[0].report.summary, 'first attempt evidence');
+});
+
+test('report-only completed delivery skips freeze and reaches host acceptance', async () => {
+  let freezeCalls = 0;
+  let reviewDriverCalls = 0;
+  const harness = new DeliveryHarness({
+    executionMode: 'external',
+    verifier: { verify: async () => ({ passed: true, checks: ['ok'] }) },
+    reviewer: { review: async () => ({ passed: true, findings: [] }) },
+    integrator: { integrate: async () => ({ integrated: true }) },
+    candidatePreparer: {
+      prepare: async () => {
+        freezeCalls += 1;
+        throw new Error('freeze must not run for report-only');
+      },
+    },
+    reviewDriver: {
+      request: async () => {
+        reviewDriverCalls += 1;
+        throw new Error('coordinator must not run for report-only');
+      },
+    },
+  });
+  const proposal = await harness.propose({
+    meetingId: 'meeting-report-only',
+    objective: 'explore only',
+    workspace: '/repo',
+    sourceRevision: 'abc123',
+    acceptanceCriteria: [{ id: 'manual', description: 'review', verification: { kind: 'manual' } }],
+  });
+  await harness.decide(proposal.id, { kind: 'approve-spec', specVersion: 1 });
+  const ready = await harness.submitExternalReport(proposal.id, {
+    status: 'completed',
+    summary: 'findings only',
+    files: [],
+    tests: [{ command: 'rg TODO', status: 'not-run' }],
+    unresolved: [],
+  });
+  assert.equal(ready.status, 'awaiting-delivery-acceptance');
+  assert.equal(ready.candidate?.reportOnly, true);
+  assert.equal(freezeCalls, 0);
+  assert.equal(reviewDriverCalls, 0);
+});
+
+test('report-only partial delivery hands off to host instead of auto-rework', async () => {
+  const harness = new DeliveryHarness({
+    executionMode: 'external',
+    verifier: { verify: async () => ({ passed: true, checks: [] }) },
+    reviewer: { review: async () => ({ passed: true, findings: [] }) },
+    integrator: { integrate: async () => ({ integrated: true }) },
+  });
+  const proposal = await harness.propose({
+    meetingId: 'meeting-partial',
+    objective: 'explore',
+    workspace: '/repo',
+    sourceRevision: 'abc123',
+    acceptanceCriteria: [{ id: 'manual', description: 'review', verification: { kind: 'manual' } }],
+  });
+  await harness.decide(proposal.id, { kind: 'approve-spec', specVersion: 1 });
+  const ready = await harness.submitExternalReport(proposal.id, {
+    status: 'partial',
+    summary: 'partial findings',
+    files: [],
+    tests: [],
+    unresolved: [{ code: 'needs-host', message: 'confirm direction', blocking: false }],
+  });
+  assert.equal(ready.status, 'awaiting-delivery-acceptance');
+  assert.equal(ready.candidate?.reportOnly, true);
+  assert.match(ready.error ?? '', /partial/);
+});
+
+test('host can accept the last report while delivery is parked in reworking', async () => {
+  const harness = new DeliveryHarness({
+    executionMode: 'external',
+    verifier: {
+      verify: async () => ({ passed: false, checks: [], error: 'needs host' }),
+    },
+    reviewer: { review: async () => ({ passed: true, findings: [] }) },
+    integrator: { integrate: async () => ({ integrated: true }) },
+  });
+  const proposal = await harness.propose({
+    meetingId: 'meeting-rework-accept',
+    objective: 'code change',
+    workspace: '/repo',
+    sourceRevision: 'abc123',
+    acceptanceCriteria: [{ id: 'manual', description: 'review', verification: { kind: 'manual' } }],
+  });
+  await harness.decide(proposal.id, { kind: 'approve-spec', specVersion: 1 });
+  const parked = await harness.submitExternalReport(proposal.id, {
+    status: 'completed',
+    summary: 'good enough for host',
+    files: [{ path: 'src/a.ts', action: 'modified' }],
+    tests: [],
+    unresolved: [],
+  });
+  assert.equal(parked.status, 'reworking');
+  assert.equal(parked.candidate, undefined);
+
+  const accepted = await harness.decide(proposal.id, {
+    kind: 'accept-delivery',
+    candidateId: `accept-last-${proposal.id}`,
+  });
+  assert.equal(accepted.status, 'accepted');
+  assert.equal(accepted.integration?.kind, 'report-only');
+});
+
+test('candidate freeze failure hands the report to the host instead of auto-rework', async () => {
+  const harness = new DeliveryHarness({
+    executionMode: 'external',
+    verifier: { verify: async () => ({ passed: true, checks: ['ok'] }) },
+    reviewer: { review: async () => ({ passed: true, findings: [] }) },
+    integrator: { integrate: async () => ({ integrated: true }) },
+    candidatePreparer: {
+      prepare: async () => {
+        throw new Error('worktree contains unreported changes: package.json');
+      },
+    },
+    reviewDriver: {
+      request: async () => {
+        throw new Error('review driver must not run when freeze fails');
+      },
+    },
+  });
+  const proposal = await harness.propose({
+    meetingId: 'meeting-freeze',
+    objective: 'explore only',
+    workspace: '/repo',
+    sourceRevision: 'abc123',
+    acceptanceCriteria: [{ id: 'manual', description: 'review', verification: { kind: 'manual' } }],
+  });
+  await harness.decide(proposal.id, { kind: 'approve-spec', specVersion: 1 });
+  const ready = await harness.submitExternalReport(proposal.id, {
+    status: 'completed',
+    summary: 'changed one file; freeze should still hand off to host',
+    files: [{ path: 'src/feature.ts', action: 'modified' }],
+    tests: [{ command: 'grep', status: 'passed' }],
+    unresolved: [],
+  });
+  assert.equal(ready.status, 'awaiting-delivery-acceptance');
+  assert.match(ready.error ?? '', /unreported changes/);
+  assert.equal(ready.candidate?.reportOnly, true);
+  assert.equal(ready.candidate?.frozen, undefined);
+  assert.match(ready.attempts.at(-1)?.feedback ?? '', /candidate freeze deferred/);
+
+  const accepted = await harness.decide(proposal.id, {
+    kind: 'accept-delivery',
+    candidateId: ready.candidate.id,
+  });
+  assert.equal(accepted.status, 'accepted');
+  assert.equal(accepted.integration?.kind, 'report-only');
 });

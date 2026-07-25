@@ -27,6 +27,7 @@ import {
   evaluateTaskAuthority,
   summarizeCanonicalRequest,
   type AuthorityDecision,
+  type TaskAuthorityAddendum,
 } from './task-authority.js';
 
 export interface CanonicalPermissionDecision {
@@ -47,6 +48,7 @@ export function decideTaskPermission(
   grant: TaskAuthorityGrant | undefined,
   now = Date.now(),
   identity?: PermissionDecisionIdentity,
+  addendum?: TaskAuthorityAddendum,
 ): CanonicalPermissionDecision {
   if (!normalized.ok) {
     return {
@@ -77,7 +79,7 @@ export function decideTaskPermission(
     };
   }
   return {
-    decision: evaluateTaskAuthority(grant, normalized.request, now),
+    decision: evaluateTaskAuthority(grant, normalized.request, now, addendum),
     safeInput: summarizeCanonicalRequest(normalized.request),
   };
 }

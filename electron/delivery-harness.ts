@@ -68,6 +68,8 @@ export interface DeliveryCandidate {
   verification: VerificationEvidence;
   review: ReviewVerdict;
   frozen?: FrozenDeliveryCandidate;
+  /** Set when freeze failed and the host is asked to accept the report as-is. */
+  reportOnly?: boolean;
   reviewSession?: {
     id: string;
     reviewHash: string;
@@ -257,10 +259,35 @@ export class DeliveryHarness {
         this.append(record, 'delivery.spec-revised', { specVersion: record.view.spec.version });
         break;
       case 'accept-delivery': {
-        if (record.view.status !== 'awaiting-delivery-acceptance' || !record.view.candidate) {
+        if (
+          record.view.status === 'reworking'
+          && !record.view.candidate
+        ) {
+          // Host chose "接受当前报告" while the harness had already parked the
+          // delivery in reworking — revive the last usable WorkReport.
+          const last = [...record.view.attempts].reverse().find((item) => (
+            item.report.status === 'completed'
+            || item.report.status === 'partial'
+            || item.report.status === 'blocked'
+          ));
+          if (!last) throw new Error('delivery is not ready for acceptance');
+          record.view.candidate = {
+            id: decision.candidateId,
+            attempt: last.attempt,
+            report: structuredClone(last.report),
+            verification: structuredClone(last.verification ?? { passed: true, checks: [] }),
+            review: structuredClone(last.review ?? { passed: true, findings: [] }),
+            reportOnly: true,
+          };
+          record.view.attempt = last.attempt;
+        } else if (
+          record.view.status !== 'awaiting-delivery-acceptance'
+          || !record.view.candidate
+        ) {
           throw new Error('delivery is not ready for acceptance');
+        } else if (record.view.candidate.id !== decision.candidateId) {
+          throw new Error('candidate mismatch');
         }
-        if (record.view.candidate.id !== decision.candidateId) throw new Error('candidate mismatch');
         await this.integrateCandidate(record);
         break;
       }
@@ -485,7 +512,32 @@ export class DeliveryHarness {
       updatedAt: this.now(),
     };
     record.view.attempts.push(attempt);
+    const reportOnly = report.files.length === 0;
+
+    // Explore / verbal findings: hand partial reports to the host instead of
+    // burning automatic rework — the Worker already said what it found.
     if (report.status !== 'completed') {
+      if (reportOnly && (report.status === 'partial' || report.status === 'blocked')) {
+        this.handReportToHost(record, attempt, report, {
+          passed: true,
+          checks: [{
+            criterionId: 'manual-acceptance',
+            description: 'Host review of a report-only delivery',
+            status: 'manual-pending',
+          }],
+        }, {
+          passed: true,
+          findings: report.unresolved.map((item) => ({
+            severity: item.blocking ? 'error' : 'warning',
+            code: item.code,
+            message: item.message,
+          })),
+        }, {
+          reportOnly: true,
+          error: `worker reported ${report.status}`,
+        });
+        return;
+      }
       record.view.error = `worker reported ${report.status}`;
       attempt.outcome = 'worker-incomplete';
       attempt.updatedAt = this.now();
@@ -538,6 +590,15 @@ export class DeliveryHarness {
       return;
     }
 
+    // Report-only deliveries skip freeze + Coordinator review: there is no
+    // code diff to freeze, and the host should Accept/return immediately.
+    if (reportOnly) {
+      this.handReportToHost(record, attempt, report, verification, review, {
+        reportOnly: true,
+      });
+      return;
+    }
+
     if (
       this.deps.candidatePreparer
       && this.deps.reviewDriver
@@ -547,12 +608,13 @@ export class DeliveryHarness {
       try {
         frozen = await this.deps.candidatePreparer.prepare(order, report, verification);
       } catch (error) {
-        record.view.error = error instanceof Error ? error.message : String(error);
-        attempt.outcome = 'review-failed';
-        attempt.updatedAt = this.now();
-        this.transition(record, 'reworking', 'delivery.status-changed', {
-          reason: record.view.error,
-          stage: 'candidate-freeze',
+        // Freeze is infrastructure (dirty unrelated files, HEAD drift). The
+        // Worker already passed verification/review — auto-rework just burns
+        // attempts. Hand the report to the host instead.
+        const message = error instanceof Error ? error.message : String(error);
+        this.handReportToHost(record, attempt, report, verification, review, {
+          reportOnly: true,
+          error: `candidate freeze deferred: ${message}`,
         });
         return;
       }
@@ -572,22 +634,59 @@ export class DeliveryHarness {
       return;
     }
 
-    record.view.error = undefined;
+    this.handReportToHost(record, attempt, report, verification, review, {
+      reportOnly: false,
+    });
+  }
+
+  /** Park a verified (or report-only) WorkReport for host Accept / return. */
+  private handReportToHost(
+    record: DeliveryRecord,
+    attempt: DeliveryAttempt,
+    report: WorkReport,
+    verification: VerificationEvidence,
+    review: ReviewVerdict,
+    options: { reportOnly: boolean; error?: string },
+  ): void {
+    record.view.error = options.error;
     record.view.candidate = {
       id: this.id(),
       attempt: record.view.attempt,
       report: structuredClone(report),
       verification: structuredClone(verification),
       review: structuredClone(review),
+      ...(options.reportOnly ? { reportOnly: true } : {}),
     };
+    attempt.verification = structuredClone(verification);
+    attempt.review = structuredClone(review);
     attempt.outcome = 'awaiting-acceptance';
+    if (options.error) attempt.feedback = options.error;
     attempt.updatedAt = this.now();
-    this.transition(record, 'awaiting-delivery-acceptance');
+    this.transition(record, 'awaiting-delivery-acceptance', 'delivery.status-changed', {
+      hostReview: true,
+      ...(options.error ? { reason: options.error } : {}),
+    });
   }
 
   private async integrateCandidate(record: DeliveryRecord): Promise<void> {
     const candidate = record.view.candidate;
     if (!candidate) throw new Error('delivery candidate is missing');
+    // Freeze-deferred report-only candidates have no git commit to merge.
+    // Accepting them means the host signed off on the WorkReport itself.
+    if (candidate.reportOnly && !candidate.frozen) {
+      const attempt = record.view.attempts.find((item) => item.attempt === candidate.attempt);
+      if (attempt) {
+        attempt.outcome = 'accepted';
+        attempt.updatedAt = this.now();
+      }
+      record.view.error = undefined;
+      record.view.integration = {
+        kind: 'report-only',
+        reason: 'accepted without frozen candidate',
+      };
+      this.transition(record, 'accepted', 'delivery.accepted');
+      return;
+    }
     this.transition(record, 'integrating');
     try {
       record.view.integration = await this.deps.integrator.integrate(

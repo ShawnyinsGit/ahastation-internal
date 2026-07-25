@@ -61,6 +61,87 @@ test('installPlan rejects writePaths that escape the workspace', async (t) => {
   assert.equal(scheduler.snapshot().length, 0);
 });
 
+test('installPlan downgrades git-worktree to shared-locked on non-git baselines', async (t) => {
+  const cwd = await mkdtemp(join(tmpdir(), 'ahastation-poison-'));
+  t.after(() => rm(cwd, { recursive: true, force: true }));
+  const { scheduler, sessions } = createScheduler(cwd);
+
+  assert.deepEqual(scheduler.installPlan([{
+    id: 'writer',
+    title: 'Writer',
+    prompt: 'Write a note',
+    deps: [],
+    writePaths: ['notes/hello.txt'],
+    workspaceMode: 'git-worktree',
+  }]), { ok: true });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const node = scheduler.snapshot().find((task) => task.id === 'writer');
+  assert.equal(node?.workspaceMode, 'shared-locked');
+  assert.equal(node?.status, 'running');
+  assert.equal(sessions.length, 1);
+});
+
+test('installPlan suffixes terminal task ids on reuse', async (t) => {
+  const cwd = await mkdtemp(join(tmpdir(), 'ahastation-poison-'));
+  t.after(() => rm(cwd, { recursive: true, force: true }));
+  const { scheduler } = createScheduler(cwd);
+
+  assert.deepEqual(scheduler.installPlan([writerTask('base', ['base.md'])]), { ok: true });
+  await new Promise((resolve) => setImmediate(resolve));
+  const liveBase = scheduler.workers.get('base');
+  assert.ok(liveBase);
+  liveBase.status = 'accepted';
+  liveBase.session = null;
+  scheduler.opts.workspaceManager.release('base', false);
+
+  assert.deepEqual(scheduler.installPlan([writerTask('base', ['base-again.md'])]), { ok: true });
+  assert.ok(scheduler.snapshot().some((task) => task.id === 'base-2'));
+  assert.ok(scheduler.snapshot().some((task) => task.id === 'base' && task.status === 'accepted'));
+});
+
+test('installPlan allows deps on accepted tasks from a prior plan', async (t) => {
+  const cwd = await mkdtemp(join(tmpdir(), 'ahastation-poison-'));
+  t.after(() => rm(cwd, { recursive: true, force: true }));
+  const { scheduler } = createScheduler(cwd);
+
+  assert.deepEqual(scheduler.installPlan([writerTask('alpha', ['alpha.md'])]), { ok: true });
+  await new Promise((resolve) => setImmediate(resolve));
+  const alpha = scheduler.workers.get('alpha');
+  assert.ok(alpha);
+  alpha.status = 'accepted';
+  alpha.session = null;
+  scheduler.opts.workspaceManager.release('alpha', false);
+  alpha.workspace = null;
+
+  assert.deepEqual(scheduler.installPlan([
+    writerTask('beta', ['beta.md'], { deps: ['alpha'] }),
+  ]), { ok: true });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const beta = scheduler.snapshot().find((task) => task.id === 'beta');
+  assert.deepEqual(beta?.deps, ['alpha']);
+  assert.equal(beta?.status, 'running');
+});
+
+test('steer unknown task reports available task ids', async (t) => {
+  const cwd = await mkdtemp(join(tmpdir(), 'ahastation-poison-'));
+  t.after(() => rm(cwd, { recursive: true, force: true }));
+  const { scheduler } = createScheduler(cwd);
+  assert.deepEqual(scheduler.installPlan([writerTask('alive', ['alive.md'])]), { ok: true });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const steered = await scheduler.steerTask('missing', 'nudge');
+  assert.equal(steered.ok, false);
+  assert.equal(steered.reason, 'unknown');
+  assert.deepEqual(steered.availableTaskIds, ['alive']);
+
+  await assert.rejects(
+    () => scheduler.queueFollowUp('missing', 'later'),
+    /unknown task: missing; available: alive/,
+  );
+});
+
 test('escaping writePaths on a pending task fail that task without blocking siblings', async (t) => {
   const cwd = await mkdtemp(join(tmpdir(), 'ahastation-poison-'));
   t.after(() => rm(cwd, { recursive: true, force: true }));

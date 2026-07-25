@@ -11,13 +11,26 @@ export const taskBudgetSchema = z.object({
 
 export type TaskBudget = z.infer<typeof taskBudgetSchema>;
 
-export const DEFAULT_TASK_BUDGET: TaskBudget = Object.freeze({
+/** Schema ceilings — used as the product default so ordinary dispatches are
+ *  not paused by rework budgeting. Callers that want a hard cap still pass an
+ *  explicit narrower budget. */
+export const UNLIMITED_TASK_BUDGET: TaskBudget = Object.freeze({
   schemaVersion: 1,
-  maxAttempts: 6,
-  maxTotalTokens: 600_000,
-  maxTotalDurationMs: 14_400_000,
-  maxStagnantAttempts: 3,
+  maxAttempts: 100,
+  maxTotalTokens: 100_000_000,
+  maxTotalDurationMs: 7 * 24 * 60 * 60 * 1_000,
+  maxStagnantAttempts: 20,
 });
+
+/** Default for plan normalization / delegate: no practical rework pause. */
+export const DEFAULT_TASK_BUDGET: TaskBudget = UNLIMITED_TASK_BUDGET;
+
+export function isUnlimitedTaskBudget(budget: TaskBudget): boolean {
+  return budget.maxAttempts >= UNLIMITED_TASK_BUDGET.maxAttempts
+    && budget.maxTotalTokens >= UNLIMITED_TASK_BUDGET.maxTotalTokens
+    && budget.maxTotalDurationMs >= UNLIMITED_TASK_BUDGET.maxTotalDurationMs
+    && budget.maxStagnantAttempts >= UNLIMITED_TASK_BUDGET.maxStagnantAttempts;
+}
 
 export interface TaskBudgetAttempt {
   attempt: number;
@@ -37,6 +50,8 @@ export function evaluateTaskBudget(
   attempts: readonly TaskBudgetAttempt[],
 ): TaskBudgetEvaluation {
   const budget = taskBudgetSchema.parse(rawBudget);
+  // Product default is "no budget": never pause / never mark non-converging.
+  if (isUnlimitedTaskBudget(budget)) return 'continue';
   if (attempts.some((attempt) => attempt.succeeded)) return 'continue';
   if (attempts.length >= budget.maxAttempts) return 'budget-paused';
 

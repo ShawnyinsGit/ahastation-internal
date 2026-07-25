@@ -13,7 +13,7 @@
 - **员工独立编辑器窗口** — 每个数字员工一扇：文件树、代码查看（shiki 高亮）与编辑保存、Diff/Todo/活动实时面板、PTY 终端（xterm.js）
 - **权限桥** — 工具调用的审批统一走会议 UI，destructive 操作落 macOS 原生确认框（防 renderer 伪造）；fail-closed 超时
 - **陪伴屏** — 像素风虚拟会议室悬浮窗：每个员工一个角色一个工位，状态动画 + NPC 气泡 + 吉祥物聚合提醒（"3 人工作中 · 1 人卡住 · 1 条待审批"）
-- **语音链路** — 本地 whisper.cpp ASR（Apple Silicon 实测）+ 系统 TTS；VAD barge-in 打断、声纹锁
+- **语音链路** — 讯飞 IAT 流式 ASR + 系统 TTS；VAD barge-in 打断、声纹锁
 - **掌机模式** — 小屏布局（chip 条/底部抽屉/审批模态卡）、编辑器 App 内 overlay（语音不断）、双屏热插拔迁移（外接显示器 = 桌面模式，内置屏 = 陪伴屏）
 - **会话恢复** — append-only journal，重启后会议与员工会话可恢复（只读再激活）
 

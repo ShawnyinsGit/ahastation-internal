@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  coerceWorkspaceModeForBaseline,
   normalizePlanMeetingTask,
   normalizePlanMeetingTasks,
   planMeetingTaskSchema,
@@ -150,4 +151,164 @@ test('managed writer plans cannot mix with shared-locked compatibility writers',
     ], 'codex').tasks.length,
     2,
   );
+});
+
+test('shared-locked without writePaths gets a sandbox when the prompt wants to write', () => {
+  const { task } = normalizePlanMeetingTask({
+    id: 'ping',
+    title: 'Ping',
+    prompt: 'Write ping.txt',
+    deps: [],
+    workspaceMode: 'shared-locked',
+  }, 'claude-code');
+  assert.deepEqual(task.writePaths, ['.vibe-assets/tasks/ping']);
+  assert.equal(task.workspaceMode, 'shared-locked');
+});
+
+test('explicit writer mode without writePaths still fails for non-write prompts', () => {
+  assert.throws(
+    () => normalizePlanMeetingTask({
+      id: 'inspect',
+      title: 'Inspect',
+      prompt: 'Explain the architecture',
+      deps: [],
+      workspaceMode: 'shared-locked',
+    }, 'claude-code'),
+    /must declare writePaths/,
+  );
+});
+
+test('shared-locked with writePaths coerces toolKinds to include write', () => {
+  const { task } = normalizePlanMeetingTask({
+    id: 'ping',
+    title: 'Ping',
+    prompt: 'Write .vibe-assets/ping.txt',
+    deps: [],
+    writePaths: ['.vibe-assets/ping.txt'],
+    workspaceMode: 'shared-locked',
+    authorityRequest: {
+      writePaths: ['.vibe-assets/ping.txt'],
+      toolKinds: ['read'],
+      workingDirectories: ['.'],
+      commands: [],
+      environmentKeys: [],
+      maxCommandTimeoutMs: 1_800_000,
+      networkHosts: [],
+    },
+  }, 'claude-code');
+  assert.equal(task.workspaceMode, 'shared-locked');
+  assert.ok(task.authorityRequest.toolKinds.includes('write'));
+  assert.deepEqual(task.authorityRequest.writePaths, ['.vibe-assets/ping.txt']);
+});
+
+test('acceptance command criteria coerce into commands and command toolKinds', () => {
+  const { task } = normalizePlanMeetingTask({
+    id: 'test-task',
+    title: 'Run tests',
+    prompt: 'Run the unit tests.',
+    deps: [],
+    writePaths: ['src'],
+    workspaceMode: 'shared-locked',
+    acceptanceCriteria: [{
+      id: 'unit',
+      description: 'npm test passes',
+      verification: { kind: 'command', argv: ['npm', 'test'] },
+    }],
+    authorityRequest: {
+      writePaths: ['src'],
+      toolKinds: ['read', 'write'],
+      workingDirectories: ['.'],
+      commands: [],
+      environmentKeys: [],
+      maxCommandTimeoutMs: 1_800_000,
+      networkHosts: [],
+    },
+  }, 'claude-code');
+  assert.deepEqual(task.authorityRequest.commands, [['npm', 'test']]);
+  assert.ok(task.authorityRequest.toolKinds.includes('command'));
+});
+
+test('command toolKinds without commands are rejected', () => {
+  assert.throws(
+    () => normalizePlanMeetingTask({
+      id: 'bad-cmd',
+      title: 'Bad',
+      prompt: 'Run something',
+      deps: [],
+      writePaths: ['src'],
+      workspaceMode: 'shared-locked',
+      authorityRequest: {
+        writePaths: ['src'],
+        toolKinds: ['read', 'write', 'command'],
+        workingDirectories: ['.'],
+        commands: [],
+        environmentKeys: [],
+        maxCommandTimeoutMs: 1_800_000,
+        networkHosts: [],
+      },
+    }, 'claude-code'),
+    /must declare commands/,
+  );
+});
+
+test('network toolKinds without hosts are rejected', () => {
+  assert.throws(
+    () => normalizePlanMeetingTask({
+      id: 'bad-net',
+      title: 'Bad',
+      prompt: 'Fetch something',
+      deps: [],
+      writePaths: ['src'],
+      workspaceMode: 'shared-locked',
+      authorityRequest: {
+        writePaths: ['src'],
+        toolKinds: ['read', 'write', 'network'],
+        workingDirectories: ['.'],
+        commands: [],
+        environmentKeys: [],
+        maxCommandTimeoutMs: 1_800_000,
+        networkHosts: [],
+      },
+    }, 'claude-code'),
+    /must declare networkHosts/,
+  );
+});
+
+test('coerceWorkspaceModeForBaseline downgrades git-worktree off clean git', () => {
+  assert.equal(coerceWorkspaceModeForBaseline('git-worktree', 'git-clean'), 'git-worktree');
+  assert.equal(coerceWorkspaceModeForBaseline('git-worktree', 'git-dirty'), 'shared-locked');
+  assert.equal(coerceWorkspaceModeForBaseline('git-worktree', 'non-git'), 'shared-locked');
+  assert.equal(coerceWorkspaceModeForBaseline('read-only', 'non-git'), 'read-only');
+});
+
+test('write-intent without writePaths gets a vibe-assets sandbox envelope', () => {
+  const { task, diagnostic } = normalizePlanMeetingTask({
+    id: 'ping',
+    title: 'Ping',
+    prompt: '写一句励志短句到文件里',
+    deps: [],
+  }, 'claude-code', { baselineKind: 'git-dirty' });
+  assert.equal(diagnostic, 'intent-defaults-applied');
+  assert.deepEqual(task.writePaths, ['.vibe-assets/tasks/ping']);
+  assert.equal(task.workspaceMode, 'shared-locked');
+  assert.ok(task.authorityRequest.toolKinds.includes('write'));
+});
+
+test('test-intent without commands probes package.json for npm test', async (t) => {
+  const { mkdtemp, rm, writeFile } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const cwd = await mkdtemp(join(tmpdir(), 'ahastation-plan-intent-'));
+  t.after(() => rm(cwd, { recursive: true, force: true }));
+  await writeFile(join(cwd, 'package.json'), '{"name":"demo"}\n');
+
+  const { task } = normalizePlanMeetingTask({
+    id: 'run-tests',
+    title: 'Run tests',
+    prompt: '跑测试',
+    deps: [],
+  }, 'claude-code', { cwd, baselineKind: 'git-clean' });
+  assert.deepEqual(task.authorityRequest.commands, [['npm', 'test']]);
+  assert.ok(task.authorityRequest.toolKinds.includes('command'));
+  assert.deepEqual(task.writePaths, ['.vibe-assets/tasks/run-tests']);
 });

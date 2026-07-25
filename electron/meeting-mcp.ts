@@ -24,6 +24,8 @@ import {
   submitDeliveryChunkReviewArgsSchema,
   completeDeliveryReviewArgsSchema,
   requestDeliveryReworkArgsSchema,
+  type AppliedTaskDefaults,
+  type MeetingPlanBriefInput,
   type PlanMeetingTaskInput,
   type PlanMeetingTask,
 } from './meeting-tools.js';
@@ -62,15 +64,43 @@ export interface ActiveReviewGate {
  *  (instead of telling the user "got it" while the message vanished). */
 export type SteerResult =
   | { ok: true; queued: boolean }
-  | { ok: false; reason: 'unknown' | 'done' | 'failed' | 'no-session' | 'invalid-message' };
+  | {
+      ok: false;
+      reason: 'unknown' | 'done' | 'failed' | 'no-session' | 'invalid-message';
+      availableTaskIds?: string[];
+    };
 
 /** Capabilities the MCP tool callbacks need from the Orchestrator. Each
  *  method maps to one tool's behaviour so the bridge stays narrow. */
 export interface OrchestratorBridge {
   // Talker tools
-  delegateSingleTask(description: string): { workerId: string; specialty: WorkerSpecialtyKind; reused: boolean };
+  delegateSingleTask(input: string | {
+    description: string;
+    writePaths?: string[];
+    workspaceMode?: PlanMeetingTaskInput['workspaceMode'];
+    commands?: string[][];
+    networkHosts?: string[];
+    toolKinds?: string[];
+  }): Promise<
+    | {
+        ok: true;
+        workerId: string;
+        specialty: WorkerSpecialtyKind;
+        reused: boolean;
+        status: 'spawned' | 'proposed' | 'installed';
+        /** Authority the runtime filled in, so the Talker can say it out loud. */
+        appliedDefaults?: string[];
+      }
+    | { ok: false; error: string }
+  >;
   installPlan(tasks: PlanMeetingTask[]): Promise<{ ok: true } | { ok: false; error: string }>;
-  proposePlan(tasks: PlanMeetingTaskInput[]): Promise<{ ok: true } | { ok: false; error: string }>;
+  proposePlan(
+    tasks: PlanMeetingTaskInput[],
+    brief?: MeetingPlanBriefInput,
+  ): Promise<
+    | { ok: true; appliedDefaults?: AppliedTaskDefaults[] }
+    | { ok: false; error: string }
+  >;
   steerWorker(workerId: string, addendum: string): Promise<SteerResult>;
   sendTaskMessage(taskId: string, message: string): Promise<{ id: string; status: string }>;
   queueTaskFollowUp(taskId: string, message: string): Promise<{ id: string; status: string }>;
@@ -190,33 +220,80 @@ export function buildTalkerMcp(
       ),
       tool(
         MEETING_TOOLS.DELEGATE,
-        'Delegate a single task to a new worker agent. Use this whenever the user describes one thing they want built, fixed, refactored, or investigated. The worker spawns immediately and streams progress back to you.',
-        { description: z.string().describe('Plain-language description of what the worker should do, in the user\'s words.') },
-        async ({ description }) => {
+        'Delegate a single task. description is enough for most asks — runtime fills a safe sandbox write path, workspace mode, and common test commands when omitted. Pass writePaths/commands only to override.',
+        {
+          description: z.string().describe('Plain-language description of what the worker should do, in the user\'s words.'),
+          writePaths: z.array(z.string().min(1)).max(100).optional()
+            .describe('Optional workspace-relative write paths. Omit to use .vibe-assets/tasks/<id>/ when the ask implies writing.'),
+          workspaceMode: z.enum(['read-only', 'git-worktree', 'shared-locked']).optional()
+            .describe('Optional. Omit to let runtime pick git-worktree or shared-locked from the workspace baseline.'),
+          commands: z.array(z.array(z.string().min(1)).min(1)).max(100).optional()
+            .describe('Optional argv allowlist. Omit to auto-detect npm test / pytest / go test from cwd when the ask implies testing.'),
+          networkHosts: z.array(z.string().min(1)).max(100).optional()
+            .describe('Allowed network hosts when the task needs fetch/web tools.'),
+        },
+        async ({ description, writePaths, workspaceMode, commands, networkHosts }) => {
           if (!canCoordinate()) return denied();
-          const r = bridge.delegateSingleTask(description);
+          const r = await bridge.delegateSingleTask({
+            description,
+            writePaths,
+            workspaceMode,
+            commands,
+            networkHosts,
+          });
+          if (!r.ok) {
+            return { content: [{ type: 'text', text: `error: ${r.error}` }] };
+          }
+          // Auto-filled authority is stated back so the Talker can tell the
+          // user what the runtime decided for them in one sentence.
+          const auto = r.appliedDefaults?.length
+            ? ` — auto-authority: ${r.appliedDefaults.join('; ')}`
+            : '';
+          if (r.status === 'proposed') {
+            return {
+              content: [{
+                type: 'text',
+                text: `plan proposed as ${r.workerId} (${r.specialty}) — waiting for user approval${auto}`,
+              }],
+            };
+          }
           const note = r.reused
             ? `delegated as ${r.workerId} (reused ${r.specialty} worker)`
             : `delegated as ${r.workerId} (${r.specialty})`;
-          return { content: [{ type: 'text', text: note }] };
+          return { content: [{ type: 'text', text: `${note}${auto}` }] };
         },
       ),
       tool(
         MEETING_TOOLS.PLAN_MEETING,
-        'Decompose the user request into multiple independent (or dependency-ordered) tasks and spawn a worker for each. Use this whenever the user mentions more than one piece of work. Independent tasks run in parallel; tasks listing deps wait until their deps complete.',
+        'Propose a detailed execution plan (goal, approach, steps, risks) plus a worker DAG. '
+        + 'Write a Cursor-style plan the host can read before approving — not a bare task list. '
+        + 'Each task needs id/title and a full worker prompt; writePaths/workspaceMode/commands '
+        + 'are optional (runtime fills safe defaults). Dispatch via the tool; do not ask which test framework to use.',
         planMeetingArgsSchema,
-        async ({ tasks }) => {
+        async ({ tasks, goal, approach, steps, risks, openQuestions }) => {
           if (!canCoordinate()) return denied();
-          const result = await bridge.proposePlan(tasks as PlanMeetingTaskInput[]);
+          const result = await bridge.proposePlan(tasks as PlanMeetingTaskInput[], {
+            goal,
+            approach,
+            steps,
+            risks,
+            openQuestions,
+          });
           if (!result.ok) {
             return { content: [{ type: 'text', text: `error: ${result.error}` }] };
           }
           const spawned = tasks.filter((t) => (t.deps ?? []).length === 0).length;
           const queued = tasks.length - spawned;
+          const auto = result.appliedDefaults?.length
+            ? ` — auto-authority: ${result.appliedDefaults
+                .map((entry) => `${entry.taskId}: ${entry.notes.join('; ')}`)
+                .join(' | ')}`
+            : '';
           return {
             content: [{
               type: 'text',
-              text: `plan installed: ${tasks.length} workers (${spawned} spawned now, ${queued} waiting on deps)`,
+              text: `plan proposed: ${goal ? `"${goal}" · ` : ''}${tasks.length} workers `
+                + `(${spawned} can start now, ${queued} wait on deps) — waiting for host approval${auto}`,
             }],
           };
         },
@@ -258,8 +335,11 @@ export function buildTalkerMcp(
           // B7: worker is gone — tell Talker explicitly so it can either
           // re-dispatch via delegate_task or surface the situation to the user
           // instead of silently swallowing the instruction.
+          const available = r.availableTaskIds?.length
+            ? ` available tasks: ${r.availableTaskIds.join(', ')}`
+            : '';
           const why = {
-            unknown: `unknown worker: ${workerId}`,
+            unknown: `unknown worker: ${workerId}.${available}`,
             done: `worker ${workerId} already completed — use delegate_task to spawn a follow-up for this addendum`,
             failed: `worker ${workerId} already failed — use delegate_task to spawn a new worker for this addendum`,
             'no-session': `worker ${workerId} has no live session — use delegate_task to spawn a new worker for this addendum`,
@@ -274,8 +354,17 @@ export function buildTalkerMcp(
         taskMessageArgsSchema,
         async ({ taskId, message }) => {
           if (!canCoordinate()) return denied();
-          const queued = await bridge.sendTaskMessage(taskId, message);
-          return { content: [{ type: 'text', text: `queued ${queued.id} for ${taskId}; acknowledgement pending` }] };
+          try {
+            const queued = await bridge.sendTaskMessage(taskId, message);
+            return { content: [{ type: 'text', text: `queued ${queued.id} for ${taskId}; acknowledgement pending` }] };
+          } catch (error) {
+            return {
+              content: [{
+                type: 'text',
+                text: `error: ${error instanceof Error ? error.message : String(error)}`,
+              }],
+            };
+          }
         },
       ),
       tool(
@@ -284,8 +373,17 @@ export function buildTalkerMcp(
         taskMessageArgsSchema,
         async ({ taskId, message }) => {
           if (!canCoordinate()) return denied();
-          const queued = await bridge.queueTaskFollowUp(taskId, message);
-          return { content: [{ type: 'text', text: `follow-up ${queued.id} queued for ${taskId}` }] };
+          try {
+            const queued = await bridge.queueTaskFollowUp(taskId, message);
+            return { content: [{ type: 'text', text: `follow-up ${queued.id} queued for ${taskId}` }] };
+          } catch (error) {
+            return {
+              content: [{
+                type: 'text',
+                text: `error: ${error instanceof Error ? error.message : String(error)}`,
+              }],
+            };
+          }
         },
       ),
       tool(
@@ -295,7 +393,12 @@ export function buildTalkerMcp(
         async ({ taskId, message }) => {
           if (!canCoordinate()) return denied();
           const result = await bridge.steerWorker(taskId, message);
-          if (!result.ok) return { content: [{ type: 'text', text: `error: ${result.reason}` }] };
+          if (!result.ok) {
+            const available = result.availableTaskIds?.length
+              ? `; available tasks: ${result.availableTaskIds.join(', ')}`
+              : '';
+            return { content: [{ type: 'text', text: `error: ${result.reason}${available}` }] };
+          }
           return { content: [{ type: 'text', text: result.queued ? 'steering queued; acknowledgement pending' : 'steering delivered; acknowledgement pending' }] };
         },
       ),

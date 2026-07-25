@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { arch, release, totalmem } from 'node:os';
 import { app, ipcMain, systemPreferences } from 'electron';
-import { isWhisperAvailable } from '../whisper.js';
+import { getSettings } from '../store.js';
 
 export interface DeviceDiagnostics {
   capturedAt: number;
@@ -18,7 +18,7 @@ export interface DeviceDiagnostics {
   audio: {
     microphone: 'granted' | 'denied' | 'available' | 'unavailable' | 'unknown';
     speaker: 'available' | 'unknown';
-    whisper: boolean;
+    xfyun: boolean;
   };
   workspace: {
     git: boolean;
@@ -26,6 +26,11 @@ export interface DeviceDiagnostics {
     version: string | null;
   };
   capacity: { hosts: number; workers: number };
+}
+
+function isXfyunAsrConfigured(): boolean {
+  const c = getSettings().xfyunAsr;
+  return Boolean(c?.appId?.trim() && c?.apiKey?.trim() && c?.apiSecret?.trim());
 }
 
 export function collectDeviceDiagnostics(): DeviceDiagnostics {
@@ -69,7 +74,7 @@ export function collectDeviceDiagnostics(): DeviceDiagnostics {
     audio: {
       microphone,
       speaker,
-      whisper: isWhisperAvailable(),
+      xfyun: isXfyunAsrConfigured(),
     },
     workspace: {
       git: Boolean(gitVersion),

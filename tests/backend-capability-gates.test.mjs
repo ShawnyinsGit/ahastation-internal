@@ -174,9 +174,11 @@ test('Codex coordinator can delegate through its verified Worker contract', asyn
     defaultBackendId: 'codex',
   });
   try {
-    const delegated = orchestrator.delegateSingleTask('change the code');
+    const delegated = await orchestrator.delegateSingleTask('change the code');
+    assert.equal(delegated.ok, true);
     assert.match(delegated.workerId, /^task-/);
     assert.equal(delegated.reused, false);
+    assert.equal(delegated.status, 'spawned');
   } finally {
     await orchestrator.end();
   }

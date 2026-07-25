@@ -1,6 +1,8 @@
 import { z } from 'zod';
 import {
   decisionOptionSchema,
+  meetingPlanBriefInputSchema,
+  meetingPlanStepSchema,
   normalizePlanMeetingTask,
   planMeetingTaskInputSchema,
   planMeetingTaskSchema,
@@ -57,7 +59,15 @@ export const finalDeliveryReworkOperationSchema = z.object({
 export type FinalDeliveryReworkOperation = z.infer<typeof finalDeliveryReworkOperationSchema>;
 
 export const meetingCommandSchema = z.discriminatedUnion('kind', [
-  z.object({ kind: z.literal('propose-plan'), tasks: z.array(planMeetingTaskSchema).min(1).max(100) }).strict(),
+  z.object({
+    kind: z.literal('propose-plan'),
+    goal: meetingPlanBriefInputSchema.shape.goal,
+    approach: meetingPlanBriefInputSchema.shape.approach,
+    steps: z.array(meetingPlanStepSchema).max(50).optional(),
+    risks: meetingPlanBriefInputSchema.shape.risks,
+    openQuestions: meetingPlanBriefInputSchema.shape.openQuestions,
+    tasks: z.array(planMeetingTaskSchema).min(1).max(100),
+  }).strict(),
   z.object({
     kind: z.literal('revise-plan'),
     expectedPlanVersion: z.number().int().nonnegative(),
@@ -106,7 +116,15 @@ const planRevisionOperationInputSchema = z.discriminatedUnion('kind', [
 ]);
 
 const meetingCommandInputSchema = z.discriminatedUnion('kind', [
-  z.object({ kind: z.literal('propose-plan'), tasks: z.array(planMeetingTaskInputSchema).min(1).max(100) }).strict(),
+  z.object({
+    kind: z.literal('propose-plan'),
+    goal: meetingPlanBriefInputSchema.shape.goal,
+    approach: meetingPlanBriefInputSchema.shape.approach,
+    steps: z.array(meetingPlanStepSchema).max(50).optional(),
+    risks: meetingPlanBriefInputSchema.shape.risks,
+    openQuestions: meetingPlanBriefInputSchema.shape.openQuestions,
+    tasks: z.array(planMeetingTaskInputSchema).min(1).max(100),
+  }).strict(),
   z.object({
     kind: z.literal('revise-plan'),
     expectedPlanVersion: z.number().int().nonnegative(),
@@ -133,25 +151,38 @@ export type MeetingCommandResult =
 export function authorizeMeetingCommand(
   raw: unknown,
   actor: MeetingCommandActor,
-  options: { defaultBackendId?: string } = {},
+  options: {
+    defaultBackendId?: string;
+    cwd?: string;
+    baselineKind?: 'git-clean' | 'git-dirty' | 'non-git';
+  } = {},
 ): { ok: true; command: MeetingCommand } | { ok: false; code: 'invalid-command' | 'forbidden'; error: string } {
   const input = meetingCommandInputSchema.safeParse(raw);
   if (!input.success) {
     return { ok: false, code: 'invalid-command', error: input.error.issues[0]?.message ?? 'invalid command' };
   }
   const defaultBackendId = options.defaultBackendId ?? 'claude-code';
+  const normalizeOptions = {
+    cwd: options.cwd,
+    baselineKind: options.baselineKind,
+  };
   let normalized: unknown = input.data;
   try {
     if (input.data.kind === 'propose-plan') {
       normalized = {
         ...input.data,
-        tasks: input.data.tasks.map((task) => normalizePlanMeetingTask(task, defaultBackendId).task),
+        tasks: input.data.tasks.map((task) => (
+          normalizePlanMeetingTask(task, defaultBackendId, normalizeOptions).task
+        )),
       };
     } else if (input.data.kind === 'revise-plan') {
       normalized = {
         ...input.data,
         operations: input.data.operations.map((operation) => operation.kind === 'add-task'
-          ? { ...operation, task: normalizePlanMeetingTask(operation.task, defaultBackendId).task }
+          ? {
+              ...operation,
+              task: normalizePlanMeetingTask(operation.task, defaultBackendId, normalizeOptions).task,
+            }
           : operation),
       };
     }

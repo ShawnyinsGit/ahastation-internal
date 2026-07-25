@@ -30,7 +30,7 @@ const TASK_INSPECTOR_TABS = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
   { id: 'context', label: 'Context', icon: Braces },
   { id: 'messages', label: 'Messages', icon: MessageSquareText },
-  { id: 'activity', label: 'Activity', icon: Activity },
+  { id: 'activity', label: 'Events', icon: Activity },
   { id: 'diff', label: 'Diff Review', icon: FileDiff },
   { id: 'verification', label: 'Verification', icon: CheckCircle2 },
   { id: 'permissions', label: 'Permissions', icon: ShieldAlert },
@@ -112,12 +112,15 @@ function ContextDetails({ snapshot }: { snapshot: RendererTaskSnapshot }) {
 export function TaskInspector({
   sessionId,
   taskId,
+  openSeq = 0,
   worker,
   onClose,
   onResolvePermission,
 }: {
   sessionId: string;
   taskId: string;
+  /** Incremented by the stage whenever the inspector is (re)opened so Overview is restored. */
+  openSeq?: number;
   worker?: WorkerState;
   onClose: () => void;
   onResolvePermission: (id: string, decision: 'allow' | 'deny') => Promise<{ ok: true } | { ok: false; error: string }> | void;
@@ -157,6 +160,10 @@ export function TaskInspector({
       meetingStore.closeTaskInspector(sessionId, taskId);
     };
   }, [sessionId, taskId]);
+
+  useEffect(() => {
+    setActiveTab('overview');
+  }, [openSeq]);
 
   const snapshot = projection?.snapshot ?? null;
   const activity = projection?.activity ?? [];
@@ -213,7 +220,13 @@ export function TaskInspector({
     }
   }, [sessionId, taskId]);
 
-  const extendBudget = useCallback(async () => {
+  const applyBudgetExtension = useCallback(async (next: {
+    schemaVersion: 1;
+    maxAttempts: number;
+    maxTotalTokens: number;
+    maxTotalDurationMs: number;
+    maxStagnantAttempts: number;
+  }) => {
     if (!snapshot?.task.budget) return;
     const planVersion = meetingStore.getSnapshot().plan?.version;
     if (planVersion === undefined) {
@@ -221,26 +234,8 @@ export function TaskInspector({
       return;
     }
     const current = snapshot.task.budget;
-    const nextMaxAttempts = Math.min(100, current.maxAttempts + 1);
-    const next = {
-      ...current,
-      maxAttempts: nextMaxAttempts,
-      maxTotalTokens: Math.min(
-        100_000_000,
-        current.maxTotalTokens + (snapshot.task.requestedProfile?.maxTokenBudget ?? 200_000),
-      ),
-      maxTotalDurationMs: Math.min(
-        7 * 24 * 60 * 60 * 1_000,
-        current.maxTotalDurationMs + (snapshot.task.requestedProfile?.timeoutMs ?? 1_800_000),
-      ),
-      maxStagnantAttempts: Math.min(
-        20,
-        nextMaxAttempts,
-        current.maxStagnantAttempts + 1,
-      ),
-    };
     if (JSON.stringify(next) === JSON.stringify(current)) {
-      setBudgetExtensionError('该任务的预算已达到首版安全上限。');
+      setBudgetExtensionError('该任务已经是不设预算（上限已开满）。');
       return;
     }
     setBudgetExtensionError('');
@@ -264,6 +259,41 @@ export function TaskInspector({
       setExtendingBudget(false);
     }
   }, [sessionId, snapshot, taskId]);
+
+  const extendBudget = useCallback(async () => {
+    if (!snapshot?.task.budget) return;
+    const current = snapshot.task.budget;
+    const nextMaxAttempts = Math.min(100, current.maxAttempts + 1);
+    await applyBudgetExtension({
+      ...current,
+      maxAttempts: nextMaxAttempts,
+      maxTotalTokens: Math.min(
+        100_000_000,
+        current.maxTotalTokens + (snapshot.task.requestedProfile?.maxTokenBudget ?? 200_000),
+      ),
+      maxTotalDurationMs: Math.min(
+        7 * 24 * 60 * 60 * 1_000,
+        current.maxTotalDurationMs + (snapshot.task.requestedProfile?.timeoutMs ?? 1_800_000),
+      ),
+      maxStagnantAttempts: Math.min(
+        20,
+        nextMaxAttempts,
+        current.maxStagnantAttempts + 1,
+      ),
+    });
+  }, [applyBudgetExtension, snapshot]);
+
+  /** Jump straight to schema ceilings so the paused task stops hitting budget. */
+  const clearBudget = useCallback(async () => {
+    if (!snapshot?.task.budget) return;
+    await applyBudgetExtension({
+      schemaVersion: 1,
+      maxAttempts: 100,
+      maxTotalTokens: 100_000_000,
+      maxTotalDurationMs: 7 * 24 * 60 * 60 * 1_000,
+      maxStagnantAttempts: 20,
+    });
+  }, [applyBudgetExtension, snapshot]);
 
   const resolveRecovery = useCallback(async (
     action:
@@ -449,16 +479,25 @@ export function TaskInspector({
                   <>
                     <p>
                       {snapshot.task.budgetState?.reason === 'non-converging'
-                        ? '连续返工未产生实质进展，需要用户明确增加预算。'
-                        : '已达到批准预算，需要用户明确增加预算。'}
+                        ? '连续返工未产生实质进展，需要你明确放开或加预算。'
+                        : '已达到批准预算，需要你明确放开或加预算。'}
                     </p>
-                    <button
-                      type="button"
-                      disabled={extendingBudget}
-                      onClick={() => void extendBudget()}
-                    >
-                      {extendingBudget ? '正在记录决定…' : '增加一次返工额度'}
-                    </button>
+                    <div className="task-inspector-actions">
+                      <button
+                        type="button"
+                        disabled={extendingBudget}
+                        onClick={() => void clearBudget()}
+                      >
+                        {extendingBudget ? '正在记录决定…' : '不设预算并继续'}
+                      </button>
+                      <button
+                        type="button"
+                        disabled={extendingBudget}
+                        onClick={() => void extendBudget()}
+                      >
+                        只加一次返工额度
+                      </button>
+                    </div>
                   </>
                 )}
                 {budgetExtensionError && (

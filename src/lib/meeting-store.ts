@@ -6,6 +6,7 @@ import type {
   CommandRun,
   CoordinatorBriefing,
   MeetingPlan,
+  MeetingPlanBrief,
   PlanMeetingTaskInput,
   RendererTaskSnapshot,
   OpenTabMeta,
@@ -24,7 +25,7 @@ import type {
   WorkerStatus,
   WorkerTaskHistoryEntry,
 } from '../types';
-import { MEETING_TOOL_NAMES } from '../../electron/meeting-tools';
+import { MEETING_TOOL_NAMES } from '../../electron/meeting-tool-names';
 import { redactSecrets } from '../../electron/format-error';
 import {
   columnForTask,
@@ -40,6 +41,7 @@ import {
   reduceTaskEvent,
   type TaskInspectorProjection,
 } from './task-event-reducer';
+import { isAffirmativeDeliveryFeedback } from './delivery-feedback';
 
 const MAX_TRANSCRIPT = 500;
 const MAX_ACTIVITY = 500;
@@ -181,6 +183,7 @@ export interface MeetingState {
   workers: Map<AgentSource, WorkerState>;
   plan: MeetingPlan | null;
   pendingPlan: PlanMeetingTaskInput[] | null;
+  pendingPlanBrief: MeetingPlanBrief | null;
   running: boolean;
   lastError: string | null;
   /** Most recent delivery awaiting user acceptance. Null when nothing is
@@ -198,6 +201,15 @@ export interface MeetingState {
    *  owns one host agent (the "talker" for that group) plus its workers. */
   hostGroups: Map<string, HostGroupState>;
   coordinatorHostId: string;
+  /** A pending coordinator-takeover prompt surfaced when the coordinator host
+   *  died and a candidate replacement is ready. Non-blocking: the renderer
+   *  presents it and the user transfers via the participant panel
+   *  (`setCoordinator` clears this). */
+  pendingCoordinatorTakeover?: {
+    failedHostId: string;
+    candidateHostId: string;
+    error?: string;
+  };
 }
 
 /** One host group: a host agent + its worker pool. Collapsible in the
@@ -288,6 +300,7 @@ export interface PendingPlanSummary {
   cwd: string;
   projectName: string;
   taskCount: number;
+  goal?: string;
 }
 
 export interface CrossProjectTasks {
@@ -397,6 +410,7 @@ function emptyState(defaultBackendId: string = 'claude-code'): MeetingState {
     workers,
     plan: null,
     pendingPlan: null,
+    pendingPlanBrief: null,
     running: false,
     lastError: null,
     currentDelivery: null,
@@ -705,6 +719,7 @@ class MeetingStore {
           cwd: slot.cwd,
           projectName,
           taskCount: slot.state.pendingPlan.length,
+          goal: slot.state.pendingPlanBrief?.goal,
         });
       }
 
@@ -1460,6 +1475,7 @@ class MeetingStore {
         executing: 'running',
         verifying: 'verifying',
         reviewing: 'reviewing',
+        'coordinator-reviewing': 'coordinator-reviewing',
         'awaiting-delivery-acceptance': 'awaiting-acceptance',
         'integration-queued': 'integration-queued',
         integrating: 'integrating',
@@ -1511,6 +1527,7 @@ class MeetingStore {
         const visible = [
           'verifying',
           'reviewing',
+          'coordinator-reviewing',
           'awaiting-delivery-acceptance',
           'integration-queued',
           'integrating',
@@ -1553,6 +1570,26 @@ class MeetingStore {
               : { kind: 'manual' },
           })),
         })),
+        pendingPlanBrief: e.brief
+          ? {
+            goal: e.brief.goal,
+            approach: e.brief.approach,
+            steps: e.brief.steps.map((step) => ({ ...step })),
+            risks: [...e.brief.risks],
+            openQuestions: [...e.brief.openQuestions],
+          }
+          : {
+            goal: e.tasks.length === 1
+              ? e.tasks[0]!.title
+              : `完成 ${e.tasks.length} 项协作任务`,
+            steps: e.tasks.map((task) => ({
+              title: task.title,
+              detail: task.prompt,
+              taskId: task.id,
+            })),
+            risks: [],
+            openQuestions: [],
+          },
       }));
       return;
     }
@@ -1603,11 +1640,25 @@ class MeetingStore {
         this.mutateSlot(slot.id, (s) => ({ ...s, running: false, lastError: e.error ?? 'Coordinator exited and no replacement is ready.' }));
         return;
       }
-      const approved = window.confirm(`当前主持人 ${e.hostId} 已退出。是否由 ${e.candidateHostId} 接管？\n\n已有 Worker 会继续运行。`);
-      if (approved) {
-        void this.setCoordinator(e.candidateHostId);
-      } else {
-        this.mutateSlot(slot.id, (s) => ({ ...s, lastError: '新任务调度已暂停，等待选择主持人。' }));
+      // Non-blocking: surface the takeover prompt as slot state + an
+      // announcement. The previous window.confirm ran on the single
+      // session:event listener and froze all worker/permission event
+      // processing (and tripped the ASR idle watchdog) while the modal was
+      // up. The user transfers via the participant panel (setCoordinator),
+      // which clears pendingCoordinatorTakeover.
+      const candidateHostId = e.candidateHostId;
+      this.mutateSlot(slot.id, (s) => ({
+        ...s,
+        pendingCoordinatorTakeover: {
+          failedHostId: e.hostId,
+          candidateHostId,
+          error: e.error,
+        },
+        lastError: `主持人 ${e.hostId} 已退出，可在参与者面板选 ${candidateHostId} 接管`,
+      }));
+      this.bumpUnread(slot);
+      if (slot.id === this.activeId) {
+        this.announce(`主持人 ${e.hostId} 已退出。可在参与者面板选择 ${e.candidateHostId} 接管，已有 Worker 会继续运行。`);
       }
       return;
     }
@@ -1741,7 +1792,11 @@ class MeetingStore {
     if (!slot) return { ok: false, error: 'No active session' };
     const result = await window.vibeMeet.sessions.setCoordinator(slot.id, hostId);
     if (!result.ok) return result;
-    this.mutateSlot(slot.id, (s) => ({ ...s, coordinatorHostId: result.coordinatorHostId }));
+    this.mutateSlot(slot.id, (s) => ({
+      ...s,
+      coordinatorHostId: result.coordinatorHostId,
+      pendingCoordinatorTakeover: undefined,
+    }));
     return { ok: true };
   }
 
@@ -2261,13 +2316,16 @@ class MeetingStore {
     return slot;
   }
 
-  async sendText(text: string) {
+  async sendText(text: string, options?: { displayText?: string }) {
     if (!text.trim()) return;
     const slot = this.activeLiveSlot();
     if (!slot) return;
     if (slot.status === 'failed') return;
     const entryId = uid();
-    const entry: TranscriptEntry = { id: entryId, role: 'user', text, ts: Date.now() };
+    // displayText keeps mode directives (e.g. multi-agent) out of the chat bubble
+    // while still shipping the full prompt to the model.
+    const visible = (options?.displayText ?? text).trim() || text;
+    const entry: TranscriptEntry = { id: entryId, role: 'user', text: visible, ts: Date.now() };
     this.updateWorker(slot, 'talker', (w) => ({
       ...w,
       transcript: appendCapped(w.transcript, [entry], MAX_TRANSCRIPT),
@@ -2334,13 +2392,17 @@ class MeetingStore {
   async sendAttachments(
     staged: StagedAttachment[],
     text: string,
+    options?: { displayText?: string },
   ): Promise<{ ok: boolean; error?: string }> {
     if (staged.length === 0 && !text.trim()) return { ok: false, error: 'Nothing to send' };
     const slot = this.activeLiveSlot();
     if (!slot) return { ok: false, error: 'No active session' };
     if (slot.status === 'failed') return { ok: false, error: 'Session failed to start' };
     const meta: AttachmentMeta[] = staged.map((a) => ({ name: a.name, kind: a.kind, sizeBytes: a.sizeBytes }));
-    const transcriptText = text.trim().length > 0 ? text : `Sent ${staged.length} file${staged.length === 1 ? '' : 's'}`;
+    const visibleRaw = options?.displayText ?? text;
+    const transcriptText = visibleRaw.trim().length > 0
+      ? visibleRaw.trim()
+      : `Sent ${staged.length} file${staged.length === 1 ? '' : 's'}`;
     const entryId = uid();
     const entry: TranscriptEntry = {
       id: entryId,
@@ -2508,13 +2570,22 @@ class MeetingStore {
     if (!id) return { ok: false, error: 'No active session' };
     const slot = this.slots.get(id);
     const delivery = slot?.state.currentDelivery;
-    if (!delivery?.candidateId || !delivery.deliveryId) {
+    if (!delivery?.deliveryId) {
+      return { ok: false, error: 'Delivery is not ready for acceptance' };
+    }
+    // Awaiting acceptance uses the live candidate; reworking can revive the
+    // last report via a stable synthetic id the harness recognizes.
+    const candidateId = delivery.candidateId
+      ?? (delivery.status === 'reworking' && delivery.report
+        ? `accept-last-${delivery.deliveryId}`
+        : null);
+    if (!candidateId) {
       return { ok: false, error: 'Delivery is not ready for acceptance' };
     }
     const result = await window.vibeMeet.acceptDelivery(
       id,
       delivery.deliveryId,
-      delivery.candidateId,
+      candidateId,
     );
     return result.ok ? { ok: true } : result;
   }
@@ -2540,6 +2611,13 @@ class MeetingStore {
     }
     if (delivery.status !== 'awaiting-delivery-acceptance' && delivery.status !== 'reworking') {
       return { ok: false, error: 'Delivery is not ready to be returned' };
+    }
+    // "可以了 / OK / LGTM" means Accept, not another rework loop.
+    if (isAffirmativeDeliveryFeedback(trimmed)) {
+      const accepted = await this.acceptDelivery();
+      return accepted.ok
+        ? { ok: true, route: 'talker' }
+        : { ok: false, error: accepted.error };
     }
     const result = await window.vibeMeet.returnDelivery(
       id,
@@ -2600,7 +2678,11 @@ class MeetingStore {
     if (!slot?.state.pendingPlan) return { ok: false, error: 'No pending plan' };
     const result = await window.vibeMeet.approvePlan(id, approved, tasks);
     if (result.ok) {
-      this.mutateSlot(id, (state) => ({ ...state, pendingPlan: null }));
+      this.mutateSlot(id, (state) => ({
+        ...state,
+        pendingPlan: null,
+        pendingPlanBrief: null,
+      }));
     } else {
       this.mutateSlot(id, (state) => ({
         ...state,

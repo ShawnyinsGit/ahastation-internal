@@ -23,10 +23,8 @@
     "dist/voice-id/**/*"
   ],
   "extraResources": [
-    { "from": "build/whisper", "to": "whisper", "filter": ["**/*"] },
     { "from": "build/claude-defaults", "to": "claude-defaults", "filter": ["**/*"] }
   ],
-  "afterPack": "scripts/sign-helpers.mjs",
   "mac": {
     "category": "public.app-category.developer-tools",
     "target": [

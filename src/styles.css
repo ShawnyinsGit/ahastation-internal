@@ -3050,8 +3050,8 @@ html.popout-view #root {
 .voice-select:focus { border-color: var(--accent); }
 .voice-select:disabled { opacity: 0.5; cursor: not-allowed; }
 
-/* Cloud ASR provider fields — shown in VoiceSelector when asrProvider is
-   'cloud'. Mirrors .voice-select so the inputs read as one settings block. */
+/* Xfyun (讯飞) ASR credential fields - shown in VoiceSelector.
+   Mirrors .voice-select so the inputs read as one settings block. */
 .asr-cloud-fields {
   display: flex;
   flex-direction: column;
@@ -3298,6 +3298,122 @@ html.popout-view #root {
   width: min(980px, 94vw);
   max-height: 92vh;
   padding: 20px;
+  overflow: auto;
+}
+
+.plan-brief-doc {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin: 0 0 18px;
+  padding: 16px 16px 18px;
+  border: 1px solid var(--border-soft);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.plan-brief-doc label,
+.plan-brief-side-by-side label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.plan-brief-doc label > span,
+.plan-brief-side-by-side label > span {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.plan-brief-doc textarea,
+.plan-brief-step-list input,
+.plan-brief-step-list textarea {
+  width: 100%;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  padding: 10px 12px;
+  font: inherit;
+  line-height: 1.45;
+  resize: vertical;
+}
+
+.plan-brief-goal textarea {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.plan-brief-steps .plan-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.plan-brief-step-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.plan-brief-step-list li {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.12);
+}
+
+.plan-brief-step-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.plan-brief-side-by-side {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.plan-task-list-title {
+  margin: 0 0 10px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.plan-task-ops {
+  margin-top: 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  padding: 0 12px 12px;
+}
+
+.plan-task-ops > summary {
+  cursor: pointer;
+  padding: 12px 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+@media (max-width: 720px) {
+  .plan-brief-side-by-side {
+    grid-template-columns: 1fr;
+  }
 }
 
 .task-rail {
@@ -4993,6 +5109,12 @@ html.popout-view #root {
 }
 .user-tasks-table tbody tr:last-child td {
   border-bottom: none;
+}
+.user-tasks-table tbody tr.user-tasks-row-openable {
+  cursor: pointer;
+}
+.user-tasks-table tbody tr.user-tasks-row-openable:hover td {
+  background: color-mix(in srgb, var(--surface-raised, #fff) 72%, transparent);
 }
 .user-tasks-col-status,
 .user-tasks-col-owner {

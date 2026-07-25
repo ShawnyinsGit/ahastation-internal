@@ -1,4 +1,4 @@
-// Durable on-disk cache for prebuild assets (whisper model, speaker model, etc.).
+// Durable on-disk cache for prebuild assets (speaker model, etc.).
 // Survives `rm -rf build/`, fresh git checkouts, and CI runs that don't preserve
 // the project tree. Override the location with VIBE_MEET_CACHE_DIR. Bust the
 // cache by deleting the directory.

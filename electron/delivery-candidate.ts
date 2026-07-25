@@ -143,7 +143,10 @@ export async function prepareFrozenDeliveryCandidate(
   const dirtyPaths = await changedWorkspacePaths(workspace);
   const unreported = dirtyPaths.filter((path) => !reportedPaths.includes(path));
   const unchangedReported = reportedPaths.filter((path) => !dirtyPaths.includes(path));
-  if (unreported.length > 0) {
+  // Report-only deliveries (read-only explore / verbal findings) claim no
+  // paths. Unrelated dirty files in the user's tree must not block host
+  // review — re-running the Worker cannot clean package.json for them.
+  if (reportedPaths.length > 0 && unreported.length > 0) {
     throw new Error(`worktree contains unreported changes: ${unreported.join(', ')}`);
   }
   if (unchangedReported.length > 0) {
@@ -194,7 +197,9 @@ export async function prepareFrozenDeliveryCandidate(
     throw new Error('frozen diff manifest does not cover every reported path');
   }
   const remaining = await changedWorkspacePaths(workspace);
-  if (remaining.length > 0) {
+  // Report-only freezes leave unrelated dirt alone. When the Worker claimed
+  // files, any leftover dirt means the freeze was racy.
+  if (reportedPaths.length > 0 && remaining.length > 0) {
     throw new Error(`worktree changed while freezing candidate: ${remaining.join(', ')}`);
   }
   return {

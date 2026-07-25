@@ -61,9 +61,14 @@ export function DeliveryViewer({
     const first = files[0]?.snapshotPath ?? files[0]?.snapshotRelativePath ?? files[0]?.path ?? '';
     setActivePath(first);
     setFeedback('');
-    setFeedbackOpen(delivery.status === 'reworking');
+    // Never auto-open the rework box — Accept must stay the obvious path.
+    setFeedbackOpen(false);
     setToast(null);
-    setActiveTab(delivery.status === 'reworking' ? 'verification' : 'summary');
+    setActiveTab(
+      delivery.status === 'reworking' || delivery.status === 'coordinator-reviewing'
+        ? 'verification'
+        : 'summary',
+    );
   }, [delivery.taskId, delivery.status, files]);
 
   useEffect(() => {
@@ -96,8 +101,11 @@ export function DeliveryViewer({
     if (scrollRef.current) scrollRef.current.scrollTop = 0;
   }, [activePath, state.phase]);
 
+  const canAccept = delivery.status === 'awaiting-delivery-acceptance'
+    || (delivery.status === 'reworking' && Boolean(delivery.report));
+
   const handleAccept = useCallback(async () => {
-    if (submitting || delivery.status !== 'awaiting-delivery-acceptance') return;
+    if (submitting || !canAccept) return;
     setSubmitting(true);
     setToast(null);
     try {
@@ -106,7 +114,7 @@ export function DeliveryViewer({
     } finally {
       setSubmitting(false);
     }
-  }, [delivery.status, onAccept, submitting]);
+  }, [canAccept, onAccept, submitting]);
 
   const handleSubmitFeedback = useCallback(async () => {
     const trimmed = feedback.trim();
@@ -141,6 +149,7 @@ export function DeliveryViewer({
   const statusLabel: Record<string, string> = {
     verifying: '正在校验',
     reviewing: '正在评审',
+    'coordinator-reviewing': 'Coordinator 审查中',
     'awaiting-delivery-acceptance': '等待验收',
     'integration-queued': '等待自动集成',
     integrating: '正在集成到 Meeting 分支',
@@ -318,6 +327,9 @@ export function DeliveryViewer({
             <h3>DeliveryHarness 校验</h3>
             {delivery.status === 'verifying' && <p className="delivery-live-state" aria-live="polite">正在逐项运行验收条件…</p>}
             {delivery.status === 'reviewing' && <p className="delivery-live-state" aria-live="polite">校验通过，正在进行独立评审…</p>}
+            {delivery.status === 'coordinator-reviewing' && (
+              <p className="delivery-live-state" aria-live="polite">Coordinator 正在审查冻结候选…</p>
+            )}
             {delivery.verification ? (
               <>
                 <div className={`delivery-verdict is-${delivery.verification.passed ? 'passed' : 'failed'}`}>
@@ -379,28 +391,26 @@ export function DeliveryViewer({
               onClick={() => setFeedbackOpen(true)}
               disabled={submitting || !canReturn}
             >
-              {delivery.status === 'reworking' ? '安排返工' : '还要继续改'}
+              还要继续改
             </button>
             <button
               type="button"
               className="delivery-viewer-btn delivery-viewer-btn-primary"
               onClick={() => { void handleAccept(); }}
-              disabled={submitting || delivery.status !== 'awaiting-delivery-acceptance'}
+              disabled={submitting || !canAccept}
             >
               {submitting
                 ? '处理中…'
-                : delivery.status === 'verifying'
-                  ? '校验中…'
-                  : delivery.status === 'reviewing'
-                    ? '评审中…'
-                    : '通过 · 验收'}
+                : delivery.status === 'reworking'
+                  ? '接受当前报告'
+                  : '通过 · 验收'}
             </button>
           </div>
         ) : feedbackOpen ? (
           <div className="delivery-viewer-feedback">
             <textarea
               className="delivery-viewer-feedback-input"
-              placeholder="必须说明哪里不对、验收标准是什么，以及希望怎么改…"
+              placeholder="说明哪里不对、希望怎么改。若已满意，直接点「通过 · 验收」。"
               rows={3}
               value={feedback}
               onChange={(e) => setFeedback(e.target.value)}
@@ -419,6 +429,16 @@ export function DeliveryViewer({
               >
                 取消
               </button>
+              {canAccept && (
+                <button
+                  type="button"
+                  className="delivery-viewer-btn delivery-viewer-btn-secondary"
+                  onClick={() => { void handleAccept(); }}
+                  disabled={submitting}
+                >
+                  通过 · 验收
+                </button>
+              )}
               <button
                 type="button"
                 className="delivery-viewer-btn delivery-viewer-btn-primary"
@@ -436,7 +456,9 @@ export function DeliveryViewer({
                 ? 'Coordinator 已审查并自动集成到 Meeting 分支。'
                 : delivery.status === 'integration-conflict'
                   ? '自动集成发生冲突，任务将按证据返工；不会修改用户主分支。'
-                  : 'Coordinator 正在审查或集成；单任务无需用户验收。'}
+                  : delivery.status === 'coordinator-reviewing'
+                    ? 'Coordinator 审查中，完成后会进入自动集成。'
+                    : 'Coordinator 正在审查或集成；单任务无需用户验收。'}
             </span>
           </div>
         )}

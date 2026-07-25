@@ -25,7 +25,7 @@ interface DeviceSnapshot {
   audio: {
     microphone: 'granted' | 'denied' | 'available' | 'unavailable' | 'unknown';
     speaker: 'available' | 'unknown';
-    whisper: boolean;
+    xfyun: boolean;
   };
   workspace: { git: boolean; worktree: boolean; version: string | null };
   capacity: { hosts: number; workers: number };
@@ -519,8 +519,8 @@ export function Lobby({ lastError }: LobbyProps) {
                       <small>Electron {diagnostics.electronVersion}</small>
                     </div>
                     <div>
-                      <span>音频 / Whisper</span>
-                      <strong>{diagnostics.audio.whisper ? 'Whisper 可用' : 'Whisper 需安装'}</strong>
+                      <span>音频 / 讯飞 ASR</span>
+                      <strong>{diagnostics.audio.xfyun ? '讯飞已配置' : '讯飞需配置'}</strong>
                       <small>
                         麦克风 {microphoneLabel(diagnostics.audio.microphone)}
                         {' · '}

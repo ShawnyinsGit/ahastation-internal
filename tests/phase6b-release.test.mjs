@@ -2,91 +2,15 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
-  MODEL_MIN_SIZE,
-  MODEL_NAME,
-  MODEL_SIZE,
-  whisperArchiveFor,
-  whisperBinaryName,
-} from '../scripts/lib/whisper-platforms.mjs';
-import { chooseGgmlBackend } from '../dist-electron/whisper-ggml.js';
-import {
   checkLatestRelease,
   compareVersions,
   parseLatestTag,
 } from '../dist-electron/update-check.js';
 
 // ---------------------------------------------------------------------------
-// whisper platform mapping (v1.9.1 official assets, verified live 2026-07-21)
-// ---------------------------------------------------------------------------
-
-test('whisperArchiveFor maps x64 platforms to official v1.9.1 archives', () => {
-  assert.equal(
-    whisperArchiveFor('linux', 'x64'),
-    'https://github.com/ggerganov/whisper.cpp/releases/download/v1.9.1/whisper-bin-ubuntu-x64.tar.gz',
-  );
-  assert.equal(
-    whisperArchiveFor('win32', 'x64'),
-    'https://github.com/ggerganov/whisper.cpp/releases/download/v1.9.1/whisper-bin-x64.zip',
-  );
-  assert.equal(
-    whisperArchiveFor('linux', 'arm64'),
-    'https://github.com/ggerganov/whisper.cpp/releases/download/v1.9.1/whisper-bin-ubuntu-arm64.tar.gz',
-  );
-});
-
-test('whisperArchiveFor returns null where no official prebuilt exists', () => {
-  assert.equal(whisperArchiveFor('darwin', 'arm64'), null); // brew path
-  assert.equal(whisperArchiveFor('darwin', 'x64'), null);
-  assert.equal(whisperArchiveFor('win32', 'arm64'), null);
-});
-
-test('whisperBinaryName appends .exe only on win32; model constants sane', () => {
-  assert.equal(whisperBinaryName('whisper-cli', 'win32'), 'whisper-cli.exe');
-  assert.equal(whisperBinaryName('whisper-cli', 'linux'), 'whisper-cli');
-  assert.equal(MODEL_NAME, 'ggml-small-q5_1.bin');
-  assert.ok(MODEL_MIN_SIZE < MODEL_SIZE && MODEL_MIN_SIZE > MODEL_SIZE - 2_000_000);
-});
-
-// ---------------------------------------------------------------------------
-// ggml backend selection
-// ---------------------------------------------------------------------------
-
-test('chooseGgmlBackend prefers apple_m1 on darwin, falls back to generic', () => {
-  assert.equal(
-    chooseGgmlBackend(['libggml-cpu-apple_m1.so', 'libggml-cpu.so'], 'darwin'),
-    'libggml-cpu-apple_m1.so',
-  );
-  assert.equal(chooseGgmlBackend(['libggml-cpu-icelake.so'], 'darwin'), 'libggml-cpu-icelake.so');
-  assert.equal(chooseGgmlBackend(['libggml-metal.so'], 'darwin'), null);
-});
-
-test('chooseGgmlBackend on linux/win prefers the generic plugin', () => {
-  assert.equal(
-    chooseGgmlBackend(['libggml-base.so', 'libggml-cpu.so'], 'linux'),
-    'libggml-cpu.so',
-  );
-  assert.equal(chooseGgmlBackend(['libggml-cpu-sse42.so'], 'linux'), 'libggml-cpu-sse42.so');
-  assert.equal(chooseGgmlBackend(['ggml-base.dll', 'ggml-cpu.dll'], 'win32'), 'ggml-cpu.dll');
-  // Official win archive has no plain ggml-cpu.dll — must pin the generic
-  // x64 baseline, never an ISA-specific variant (v1.9.1 real archive set).
-  assert.equal(
-    chooseGgmlBackend(
-      ['ggml-cpu-alderlake.dll', 'ggml-cpu-x64.dll', 'ggml-cpu-haswell.dll'],
-      'win32',
-    ),
-    'ggml-cpu-x64.dll',
-  );
-  assert.equal(
-    chooseGgmlBackend(['ggml-cpu-alderlake.dll', 'ggml-cpu-x64.dll', 'ggml-cpu-sse42.dll'], 'win32'),
-    'ggml-cpu-x64.dll',
-  );
-  assert.equal(chooseGgmlBackend(['ggml-cpu-sse42.dll', 'ggml-cpu-haswell.dll'], 'win32'), 'ggml-cpu-sse42.dll');
-  assert.equal(chooseGgmlBackend([], 'linux'), null);
-  assert.equal(chooseGgmlBackend(['random.txt'], 'win32'), null);
-});
-
-// ---------------------------------------------------------------------------
 // version comparison + release tag parsing + probe behavior
+// (the whisper platform/ggml portions of this file were removed when ASR
+//  switched to Xunfei streaming - only the update-probe tests remain.)
 // ---------------------------------------------------------------------------
 
 test('compareVersions orders numeric triples with optional v prefix', () => {

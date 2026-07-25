@@ -16,8 +16,7 @@ test('accepts a full valid patch and maps renderer keys to settings keys', () =>
     voicePolishEnabled: true,
     reportModeEnabled: false,
     handheldMode: 'handheld',
-    asrProvider: 'cloud',
-    cloudAsr: { baseUrl: ' https://api.groq.com/openai/v1 ', apiKey: ' gsk ', model: ' whisper-large-v3 ' },
+    xfyunAsr: { appId: ' test-appid ', apiKey: ' test-key ', apiSecret: ' test-secret ' },
   });
   assert.equal(r.ok, true);
   assert.deepEqual(r.next, {
@@ -27,8 +26,7 @@ test('accepts a full valid patch and maps renderer keys to settings keys', () =>
     voicePolishEnabled: true,
     reportModeEnabled: false,
     handheldMode: 'handheld',
-    asrProvider: 'cloud',
-    cloudAsr: { baseUrl: 'https://api.groq.com/openai/v1', apiKey: 'gsk', model: 'whisper-large-v3' },
+    xfyunAsr: { appId: 'test-appid', apiKey: 'test-key', apiSecret: 'test-secret' },
   });
 });
 
@@ -42,9 +40,9 @@ test('rejects invalid enum values instead of silently ignoring them', () => {
   for (const patch of [
     { speechFilterMode: 'loud' },
     { handheldMode: 'tablet' },
-    { asrProvider: 'remote' },
-    // The reported footgun: a boolean where an enum belongs.
-    { asrProvider: true },
+    { xfyunAsr: 'remote' },
+    // A boolean where an object belongs.
+    { xfyunAsr: true },
     { speechFilterMode: true },
   ]) {
     const r = buildVoicePrefUpdate(patch);
@@ -63,10 +61,10 @@ test('rejects wrong-typed boolean fields', () => {
   }
 });
 
-test('rejects malformed cloudAsr payloads', () => {
-  assert.equal(buildVoicePrefUpdate({ cloudAsr: 'https://x' }).ok, false);
-  assert.equal(buildVoicePrefUpdate({ cloudAsr: { apiKey: 42 } }).ok, false);
-  assert.equal(buildVoicePrefUpdate({ cloudAsr: { baseUrl: null } }).ok, false);
+test('rejects malformed xfyunAsr payloads', () => {
+  assert.equal(buildVoicePrefUpdate({ xfyunAsr: 'x' }).ok, false);
+  assert.equal(buildVoicePrefUpdate({ xfyunAsr: { apiKey: 42 } }).ok, false);
+  assert.equal(buildVoicePrefUpdate({ xfyunAsr: { appId: null } }).ok, false);
 });
 
 test('rejects a non-object patch', () => {

@@ -18,6 +18,7 @@ export class DeterministicDeliveryReviewer {
     verification: VerificationEvidence,
   ): Promise<ReviewVerdict> {
     const findings: ReviewFinding[] = [];
+    const reportOnly = report.files.length === 0;
     if (report.status !== 'completed') {
       findings.push({
         severity: 'error',
@@ -40,8 +41,10 @@ export class DeterministicDeliveryReviewer {
           message: `${test.command}: ${test.summary ?? 'failed'}`,
         });
       } else if (test.status === 'not-run') {
+        // Explore / report-only deliveries honestly skip tests — warn the host
+        // instead of auto-failing into a rework loop.
         findings.push({
-          severity: 'error',
+          severity: reportOnly ? 'warning' : 'error',
           code: 'reported-test-not-run',
           message: `${test.command}: ${test.summary ?? 'not run'}`,
         });

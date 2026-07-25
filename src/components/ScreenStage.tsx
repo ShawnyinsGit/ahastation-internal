@@ -27,7 +27,6 @@ import { TerminalPanel } from './TerminalPanel';
 import { ActivityTabContent } from './ActivityTabContent';
 import { DeliveryViewer } from './DeliveryViewer';
 import { TaskInspector } from './TaskInspector';
-import { TaskRail } from './TaskRail';
 import { FinalMeetingDelivery } from './FinalMeetingDelivery';
 
 interface ScreenStageProps {
@@ -125,18 +124,12 @@ export function ScreenStage({
 }: ScreenStageProps) {
   const [selectedParticipantId, setSelectedParticipantId] = useState<string | null>(null);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  /** Bumped on every task open so the inspector returns to Overview even for the same taskId. */
+  const [inspectorOpenSeq, setInspectorOpenSeq] = useState(0);
   const [inspectorHeight, setInspectorHeight] = useState(76);
   const [inspectorFullscreen, setInspectorFullscreen] = useState(false);
   const dragState = useRef<{ pointerId: number; startY: number } | null>(null);
   const suppressInspectorClick = useRef(false);
-
-  const handleSelectParticipant = useCallback((id: string) => {
-    setSelectedParticipantId(id);
-    // Auto-switch to activity tab so the selection is visible
-    if (activeWindowId !== ACTIVITY_TAB_ID) {
-      onSelectWindow(ACTIVITY_TAB_ID);
-    }
-  }, [activeWindowId, onSelectWindow]);
 
   /** Task requested by the cross-project board whose plan hasn't arrived yet.
    *  Suppresses the stale-selection sweep below during the switch. */
@@ -145,12 +138,26 @@ export function ScreenStage({
   const handleSelectTask = useCallback((id: string) => {
     awaitingFocus.current = null;
     setSelectedTaskId(id);
+    setInspectorOpenSeq((seq) => seq + 1);
     setInspectorHeight(76);
     setInspectorFullscreen(false);
     if (activeWindowId !== ACTIVITY_TAB_ID) {
       onSelectWindow(ACTIVITY_TAB_ID);
     }
   }, [activeWindowId, onSelectWindow]);
+
+  const handleSelectParticipant = useCallback((id: string) => {
+    setSelectedParticipantId(id);
+    // Worker tiles double as the in-meeting task picker now that TaskRail is
+    // gone — open the inspector when the tile maps to a plan node.
+    if ((plan?.nodes ?? []).some((node) => node.id === id)) {
+      handleSelectTask(id);
+      return;
+    }
+    if (activeWindowId !== ACTIVITY_TAB_ID) {
+      onSelectWindow(ACTIVITY_TAB_ID);
+    }
+  }, [activeWindowId, onSelectWindow, plan, handleSelectTask]);
 
   useEffect(() => {
     if (!selectedTaskId) return;
@@ -313,13 +320,6 @@ export function ScreenStage({
             onPopOut={onPopOutWindow}
           />
 
-          <TaskRail
-            plan={plan}
-            workers={workers}
-            selectedId={selectedTaskId}
-            onSelect={handleSelectTask}
-          />
-
           <div className="stage-content">
             {finalMeetingDelivery ? (
               <FinalMeetingDelivery
@@ -351,6 +351,7 @@ export function ScreenStage({
                 onOpenInTerminal={(workerId) => onCreateWindow('terminal', { workerId })}
                 customAvatars={customAvatars}
                 sessionId={sessionId}
+                onOpenTask={handleSelectTask}
               />
             )}
 
@@ -441,6 +442,7 @@ export function ScreenStage({
               <TaskInspector
                 sessionId={sessionId}
                 taskId={selectedTaskId}
+                openSeq={inspectorOpenSeq}
                 worker={selectedTaskWorker}
                 onClose={() => setSelectedTaskId(null)}
                 onResolvePermission={onResolvePermission}
