@@ -57,8 +57,10 @@ export interface ObservedFileSignal {
   filePath: string;
   mtimeMs: number;
   sizeBytes: number;
-  /** Client-specific title source (Codex session_index thread_name). */
+  /** Client-specific title (Codex: session_index / global-state thread title). */
   title?: string;
+  /** Provenance of `title` when set by the parser (Codex only). */
+  titleSource?: ObservedTitleSource;
   model?: string;
   tailSignals: TailSignals;
 }
@@ -67,6 +69,7 @@ export type ObservedState = 'active' | 'waiting' | 'idle' | 'done' | 'unknown';
 export type ObservedActivity = 'thinking' | 'executing' | 'waiting' | 'unknown';
 
 export type ObservedTitleSource =
+  | 'global-state'
   | 'session-index'
   | 'first-prompt'
   | 'summary'

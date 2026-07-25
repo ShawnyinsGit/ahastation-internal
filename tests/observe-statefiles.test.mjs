@@ -12,7 +12,9 @@ import {
 import {
   analyzeCodexTail,
   listCodexRollouts,
+  loadCodexGlobalStateTitles,
   loadCodexSessionIndex,
+  loadCodexTitles,
   parseCodexRollout,
   readCodexMeta,
 } from '../dist-electron/observe/statefiles/codex-sessions.js';
@@ -163,6 +165,27 @@ test('session_index: latest updated_at wins, numeric epoch tolerated', async () 
   assert.equal(index.get(CODEX_PENDING), 'Investigate flaky tests (npm test)');
   assert.equal(index.get(CODEX_EXEC_DONE), 'One-shot changelog');
   assert.equal(index.has(CODEX_WAITING), false);
+});
+
+test('global-state titles: thread-descriptions load, missing file degrades', async () => {
+  const titles = await loadCodexGlobalStateTitles(HOME);
+  assert.equal(titles.get(CODEX_EXEC_DONE), '全局标题应胜过索引');
+  assert.equal(titles.get(CODEX_WAITING), '调研蓝牙切换模块');
+  const missing = await loadCodexGlobalStateTitles(join(HOME, 'no-such-home'));
+  assert.equal(missing.size, 0);
+});
+
+test('loadCodexTitles: global-state wins over session_index, provenance kept', async () => {
+  const { titles, sources } = await loadCodexTitles(HOME);
+  // In both maps → global-state description wins.
+  assert.equal(titles.get(CODEX_EXEC_DONE), '全局标题应胜过索引');
+  assert.equal(sources.get(CODEX_EXEC_DONE), 'global-state');
+  // Only in session_index → index title with index provenance.
+  assert.equal(titles.get(CODEX_PENDING), 'Investigate flaky tests (npm test)');
+  assert.equal(sources.get(CODEX_PENDING), 'session-index');
+  // Only in global-state → description with global provenance.
+  assert.equal(titles.get(CODEX_WAITING), '调研蓝牙切换模块');
+  assert.equal(sources.get(CODEX_WAITING), 'global-state');
 });
 
 // ---------------------------------------------------------------------------
