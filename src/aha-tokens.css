@@ -1,0 +1,109 @@
+/* ==========================================================================
+   AhaStudio 设计令牌层（03-hifi-ux-design.md）
+   浅色为默认主界面；深色值在 prefers-color-scheme: dark 下覆盖。
+   新组件一律使用 --aha-* 令牌；旧 styles.css 令牌逐步迁移。
+   ========================================================================== */
+
+:root {
+  /* ---- 语义色（浅色） ---- */
+  --aha-accent: #E8730C;        /* 品牌/主行动（批准键、AhaKey 灯色同步） */
+  --aha-accent-soft: #FDF0E2;
+  --aha-run: #1F9D55;           /* 运行中/正常 */
+  --aha-run-soft: rgba(31, 157, 85, 0.12);
+  --aha-attend: #D97706;        /* 待批准/中风险/需注意 */
+  --aha-attend-soft: rgba(217, 119, 6, 0.12);
+  --aha-danger: #D92D20;        /* 高风险/拒绝/额度告急 */
+  --aha-danger-soft: rgba(217, 45, 32, 0.12);
+  --aha-info: #2563EB;          /* 观察中/信息/同步 */
+  --aha-info-soft: rgba(37, 99, 235, 0.12);
+  --aha-quota-ok: #1F9D55;
+  --aha-quota-warn: #D97706;
+  --aha-quota-crit: #D92D20;
+
+  /* ---- 中性色（浅色） ---- */
+  --aha-bg-canvas: #FFFFFF;
+  --aha-bg-surface: #F6F7F9;
+  --aha-bg-raised: #FFFFFF;
+  --aha-bg-overlay: rgba(255, 255, 255, 0.82);
+  --aha-border-subtle: rgba(17, 20, 24, 0.08);
+  --aha-border-strong: rgba(17, 20, 24, 0.16);
+  --aha-text-primary: #14171A;
+  --aha-text-secondary: #5B6470;
+  --aha-text-tertiary: #8A929C;
+
+  /* ---- 圆角（同心规则） ---- */
+  --aha-r-sm: 6px;
+  --aha-r-md: 10px;
+  --aha-r-lg: 14px;
+  --aha-r-xl: 18px;
+  --aha-r-pill: 999px;
+
+  /* ---- 阴影 ---- */
+  --aha-shadow-card: 0 1px 2px rgba(16, 17, 19, 0.06), 0 2px 8px rgba(16, 17, 19, 0.06);
+  --aha-shadow-overlay: 0 4px 12px rgba(16, 17, 19, 0.10), 0 12px 32px rgba(16, 17, 19, 0.14);
+  --aha-shadow-modal: 0 8px 24px rgba(16, 17, 19, 0.14), 0 24px 64px rgba(16, 17, 19, 0.18);
+
+  /* ---- 动效 ---- */
+  --aha-ease-standard: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --aha-ease-emphasis: cubic-bezier(0.34, 1.3, 0.4, 1);
+  --aha-dur-fast: 120ms;
+  --aha-dur-base: 200ms;
+  --aha-dur-slow: 300ms;
+  --aha-dur-hold: 800ms;
+
+  /* ---- 字阶 ---- */
+  --aha-fs-display: 24px;
+  --aha-fs-h1: 18px;
+  --aha-fs-h2: 15px;
+  --aha-fs-body: 13px;
+  --aha-fs-caption: 12px;
+  --aha-fs-micro: 11px;
+  --aha-fs-mono: 12px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --aha-accent: #FF8A2A;
+    --aha-accent-soft: #3A2412;
+    --aha-run: #34C97A;
+    --aha-run-soft: rgba(52, 201, 122, 0.14);
+    --aha-attend: #F5A524;
+    --aha-attend-soft: rgba(245, 165, 36, 0.14);
+    --aha-danger: #F0503E;
+    --aha-danger-soft: rgba(240, 80, 62, 0.14);
+    --aha-info: #5B8DEF;
+    --aha-info-soft: rgba(91, 141, 239, 0.16);
+    --aha-quota-ok: #34C97A;
+    --aha-quota-warn: #F5A524;
+    --aha-quota-crit: #F0503E;
+
+    --aha-bg-canvas: #101113;
+    --aha-bg-surface: #17191D;
+    --aha-bg-raised: #1E2126;
+    --aha-bg-overlay: rgba(23, 25, 29, 0.78);
+    --aha-border-subtle: rgba(255, 255, 255, 0.08);
+    --aha-border-strong: rgba(255, 255, 255, 0.14);
+    --aha-text-primary: #F2F4F6;
+    --aha-text-secondary: #9AA3AD;
+    --aha-text-tertiary: #6B7480;
+
+    --aha-shadow-card: 0 1px 2px rgba(0, 0, 0, 0.24), 0 2px 8px rgba(0, 0, 0, 0.24);
+    --aha-shadow-overlay: 0 4px 12px rgba(0, 0, 0, 0.30), 0 12px 32px rgba(0, 0, 0, 0.36);
+    --aha-shadow-modal: 0 8px 24px rgba(0, 0, 0, 0.36), 0 24px 64px rgba(0, 0, 0, 0.44);
+  }
+}
+
+/* 数字等宽：额度百分比与计时器跳动不产生横向抖动 */
+.aha-tnum {
+  font-feature-settings: 'tnum';
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .aha-motion,
+  .aha-motion::before,
+  .aha-motion::after {
+    transition-duration: 1ms !important;
+    animation-duration: 1ms !important;
+  }
+}

@@ -5,7 +5,7 @@
 //
 //   low  → single click allow
 //   mid  → hold 800ms then allow
-//   high → no shortcut allow; jump to the meeting PermissionCard
+//   high → no shortcut allow; jump to the meeting ApprovalCard
 
 import { classifyToolRisk } from './auto-approve-policy.js';
 
@@ -18,7 +18,7 @@ const ALWAYS_HIGH_PREFIXES: ReadonlyArray<string> = [
 ];
 
 /** Short path / command excerpt for the AhaBar hover card. Never the full
- *  payload — that stays in the meeting PermissionCard. */
+ *  payload — that stays in the meeting ApprovalCard. */
 export function summarizeApprovalTarget(
   toolName: string,
   input: Record<string, unknown>,

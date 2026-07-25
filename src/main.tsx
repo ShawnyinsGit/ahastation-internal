@@ -11,6 +11,8 @@ import { AppErrorBoundary } from './components/AppErrorBoundary';
 import { parseEditorCapabilities } from './types';
 import { meetingStore } from './lib/meeting-store';
 import './styles.css';
+import './aha-tokens.css';
+import './aha-approval.css';
 
 const params = new URLSearchParams(window.location.search);
 const viewParam = params.get('view');
