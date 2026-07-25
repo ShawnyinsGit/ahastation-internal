@@ -391,12 +391,14 @@ test('Worker question reaches only Coordinator and forwarding creates a second m
 
 test('terminal follow-up starts a new attempt and legacy steer uses the mailbox', async (t) => {
   const setup = await fixture(t);
+  // 'failed' keeps the fresh-attempt semantics; accepted deliveries now reject
+  // follow-ups entirely (createFinalDeliveryRework is the only legal reopen).
   setup.scheduler.restoreTasks([{
     id: 'task-a',
     title: 'Task A',
     prompt: 'old task',
     deps: [],
-    status: 'accepted',
+    status: 'failed',
     attempt: 1,
   }]);
 

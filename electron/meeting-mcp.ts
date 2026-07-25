@@ -138,9 +138,9 @@ export interface OrchestratorBridge {
   getCoordinatorHostId(): string;
 
   // Worker tools
-  markWorkerTaskDone(workerId: string, summary: string): void;
-  submitWorkerReport(workerId: string, report: WorkReport): void;
-  submitWorkerDelivery(workerId: string, files: string[]): void;
+  markWorkerTaskDone(workerId: string, summary: string, sourceAttempt?: number): void;
+  submitWorkerReport(workerId: string, report: WorkReport, sourceAttempt?: number): void;
+  submitWorkerDelivery(workerId: string, files: string[], sourceAttempt?: number): void;
   askCoordinator(
     workerId: string,
     question: string,
@@ -594,7 +594,7 @@ export function buildWorkerMcp(
         'Deprecated compatibility hint. This does not complete the task or release dependencies. Submit a full WorkReport with submit_work_report.',
         taskDoneArgsSchema,
         async ({ summary }) => {
-          bridge.markWorkerTaskDone(workerId, summary);
+          bridge.markWorkerTaskDone(workerId, summary, sourceAttempt);
           return { content: [{ type: 'text', text: 'summary recorded; submit_work_report is still required' }] };
         },
       ),
@@ -603,7 +603,7 @@ export function buildWorkerMcp(
         'Submit the authoritative WorkReport. The task will then be verified and reviewed; dependencies release only after user acceptance.',
         submitWorkReportArgsSchema,
         async ({ report }) => {
-          bridge.submitWorkerReport(workerId, report);
+          bridge.submitWorkerReport(workerId, report, sourceAttempt);
           return { content: [{ type: 'text', text: 'work report submitted for verification' }] };
         },
       ),
@@ -612,7 +612,7 @@ export function buildWorkerMcp(
         'Explicitly declare which files are the final deliverables for user acceptance. Use this when you have produced documents, code, or other artifacts that the user should review. Paths must be absolute. Call this before task_done if you want to override the automatic file tracking.',
         submitDeliveryArgsSchema,
         async ({ files }) => {
-          bridge.submitWorkerDelivery(workerId, files);
+          bridge.submitWorkerDelivery(workerId, files, sourceAttempt);
           return { content: [{ type: 'text', text: `submitted ${files.length} file(s) for delivery` }] };
         },
       ),

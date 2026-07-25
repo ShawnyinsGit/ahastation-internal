@@ -17,6 +17,8 @@ import {
 } from '../lib/dispatch-mode';
 import { PermissionCard } from './PermissionCard';
 import { FileTree } from './FileTree';
+import { Modal } from './Modal';
+import { toast } from '../lib/toast';
 
 interface SideDrawerProps {
   open: boolean;
@@ -452,6 +454,9 @@ export function SideDrawer({
         setStaged([]);
         setText('');
         setRejected([]);
+      } else {
+        // Without this the user sees the draft stay put and assumes it sent.
+        toast.error(`附件发送失败：${res.error ?? '未知原因'}`);
       }
       return;
     }
@@ -837,13 +842,11 @@ export function SideDrawer({
       )}
 
       {previewImg && (
-        <div
-          className="img-preview-backdrop"
-          onClick={() => setPreviewImg(null)}
-          onKeyDown={(ev) => { if (ev.key === 'Escape') setPreviewImg(null); }}
-          role="dialog"
-          aria-label="图片预览"
-          tabIndex={-1}
+        <Modal
+          open
+          onClose={() => setPreviewImg(null)}
+          backdropClassName="img-preview-backdrop"
+          ariaLabel="图片预览"
         >
           <button
             type="button"
@@ -859,7 +862,7 @@ export function SideDrawer({
             alt="Preview"
             onClick={(ev) => ev.stopPropagation()}
           />
-        </div>
+        </Modal>
       )}
     </aside>
   );

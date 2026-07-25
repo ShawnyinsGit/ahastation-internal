@@ -309,6 +309,17 @@ export interface WorkerHandle {
   /** Canonical requests currently waiting on a user decision, keyed by native
    *  request id, so an approval can be folded into the addendum. */
   pendingAuthorityAsks?: Map<string, import('./backends/canonical-execution.js').CanonicalExecutionRequest>;
+  /** Fingerprints (toolName+input hash) of asks the user already allowed this
+   *  attempt, for requests the addendum cannot remember (non-normalizable or
+   *  opaque-shell/external high-risk). An identical repeat auto-allows instead
+   *  of raising another card. Survives a same-task rework; never crosses tasks. */
+  approvedAskFingerprints?: Set<string>;
+  /** Ask fingerprints currently waiting on a user decision, keyed by native
+   *  request id, so an allow can be promoted into approvedAskFingerprints. */
+  pendingAskFingerprints?: Map<string, string>;
+  /** One-shot latch: the addendum saturation briefing has been emitted for
+   *  this attempt. Reset on attempt/grant boundaries. */
+  addendumCapNotified?: boolean;
 }
 
 export interface RecentFileEdit {

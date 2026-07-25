@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { X, Lock, RefreshCw, RotateCw } from 'lucide-react';
 import type { DesktopSource } from '../types';
 import { errorMessage } from '../lib/format-error';
+import { Modal } from './Modal';
 
 interface SourcePickerProps {
   open: boolean;
@@ -82,12 +83,17 @@ export function SourcePicker({ open, onClose, onPick }: SourcePickerProps) {
   const needsRelaunch = error?.kind === 'permission' && error.status === 'denied';
 
   return (
-    <div className="picker-backdrop" onClick={onClose}>
-      <div className="picker" onClick={(e) => e.stopPropagation()}>
-        <div className="picker-head">
-          <span>选择要共享给 Claude 的画面</span>
-          <button className="picker-close" onClick={onClose} aria-label="关闭"><X size={16} /></button>
-        </div>
+    <Modal
+      open={open}
+      onClose={onClose}
+      backdropClassName="picker-backdrop"
+      className="picker"
+      ariaLabel="选择要共享的画面"
+    >
+      <div className="picker-head">
+        <span>选择要共享给 Claude 的画面</span>
+        <button className="picker-close" onClick={onClose} aria-label="关闭"><X size={16} /></button>
+      </div>
 
         {error?.kind === 'permission' && (
           <div className="picker-permission">
@@ -145,21 +151,20 @@ export function SourcePicker({ open, onClose, onPick }: SourcePickerProps) {
 
         {!error && loading && <div className="picker-loading">Loading sources…</div>}
 
-        {!error && !loading && (
-          <div className="picker-grid">
-            {sources.length === 0 ? (
-              <div className="picker-empty">No sources found.</div>
-            ) : (
-              sources.map((s) => (
-                <button key={s.id} className="picker-item" onClick={() => { onPick(s); onClose(); }}>
-                  <img src={s.thumbnail} alt={s.name} />
-                  <div className="picker-item-name" title={s.name}>{s.name}</div>
-                </button>
-              ))
-            )}
-          </div>
-        )}
-      </div>
-    </div>
+      {!error && !loading && (
+        <div className="picker-grid">
+          {sources.length === 0 ? (
+            <div className="picker-empty">No sources found.</div>
+          ) : (
+            sources.map((s) => (
+              <button key={s.id} className="picker-item" onClick={() => { onPick(s); onClose(); }}>
+                <img src={s.thumbnail} alt={s.name} />
+                <div className="picker-item-name" title={s.name}>{s.name}</div>
+              </button>
+            ))
+          )}
+        </div>
+      )}
+    </Modal>
   );
 }

@@ -149,6 +149,8 @@ export interface HostGroupOpts {
   /** Shared Meeting mailbox; every Worker instruction is journaled here
    * before a Backend session receives it. */
   taskMailbox?: TaskMailbox;
+  /** Worker concurrency ceiling forwarded to the scheduler (default 4). */
+  maxConcurrentWorkers?: number;
 }
 
 export class HostGroup {
@@ -233,6 +235,7 @@ export class HostGroup {
       persistPermissionDecision: opts.persistPermissionDecision,
       taskAuthorityCompilerRequired: opts.taskAuthorityCompilerRequired,
       taskMailbox: opts.taskMailbox,
+      maxConcurrentWorkers: opts.maxConcurrentWorkers,
       buildWorkerMcp: (workerId, attempt) => (
         buildWorkerMcp(this.bridge, workerId, this.cwd, attempt)
       ),
@@ -348,9 +351,14 @@ export class HostGroup {
     );
   }
 
-  resolvePermission(id: string, decision: 'allow' | 'deny', message?: string) {
+  resolvePermission(
+    id: string,
+    decision: 'allow' | 'deny',
+    message?: string,
+    scope: 'worker' | 'task-wide' = 'worker',
+  ) {
     this.host?.resolvePermission(id, decision, message);
-    this.scheduler.resolvePermissionInAny(id, decision, message);
+    this.scheduler.resolvePermissionInAny(id, decision, message, scope);
   }
 
   async interrupt() {

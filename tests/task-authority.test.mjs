@@ -5,10 +5,12 @@ import { join } from 'node:path';
 import test from 'node:test';
 
 import {
+  addendumSaturatedDimensions,
   compileReworkTaskAuthority,
   compileTaskAuthority,
   evaluateTaskAuthority,
   extendAuthorityAddendum,
+  rebaseAuthorityAddendum,
 } from '../dist-electron/task-authority.js';
 import { CodexBackend } from '../dist-electron/backends/codex-adapter.js';
 import { WorkerScheduler } from '../dist-electron/worker-scheduler.js';
@@ -723,4 +725,117 @@ test('repeated identical authority denials fail the worker instead of burning bu
   const node = scheduler.snapshot().find((task) => task.id === 'deny-loop');
   assert.equal(node?.status, 'failed');
   assert.match(node?.summary ?? '', /repeated authority denial/);
+});
+
+test('rebaseAuthorityAddendum carries hand approvals into a rework grant', () => {
+  const root = workspace();
+  const shape = {
+    writePaths: ['.vibe-assets/tasks/login'],
+    commands: [['npm', 'test']],
+    toolKinds: ['read', 'write', 'command', 'network'],
+    networkHosts: [],
+  };
+  const authority = grant(root, shape);
+  const write = canonical(root, {
+    kind: 'write',
+    readPaths: [],
+    writePaths: ['src/auth/login.ts'],
+    sideEffects: ['workspace-write'],
+  });
+  const network = canonical(root, {
+    kind: 'network',
+    readPaths: [],
+    networkHosts: ['api.example.com'],
+    sideEffects: ['network'],
+  });
+  let addendum = extendAuthorityAddendum(authority, write);
+  addendum = extendAuthorityAddendum(authority, network, addendum);
+
+  const rework = compileReworkTaskAuthority(authority, 2, root, authorityRequest(shape));
+  const rebased = rebaseAuthorityAddendum(rework, addendum);
+  assert.equal(rebased.taskId, 'task-login');
+  assert.equal(rebased.attempt, 2);
+  assert.equal(rebased.grantHash, rework.grantHash);
+  assert.deepEqual(rebased.networkHosts, ['api.example.com']);
+  // The rebased addendum authorizes the same targets on the new attempt.
+  assert.deepEqual(
+    evaluateTaskAuthority(rework, { ...write, attempt: 2 }, APPROVED_AT + 2, rebased),
+    { kind: 'allow', reason: 'within-user-approved-addendum' },
+  );
+  assert.deepEqual(
+    evaluateTaskAuthority(rework, { ...network, attempt: 2 }, APPROVED_AT + 2, rebased),
+    { kind: 'allow', reason: 'within-user-approved-addendum' },
+  );
+  // The stale addendum (old attempt/grant) would not have authorized it.
+  assert.equal(
+    evaluateTaskAuthority(rework, { ...write, attempt: 2 }, APPROVED_AT + 2, addendum).kind,
+    'ask-user',
+  );
+});
+
+test('rebaseAuthorityAddendum never crosses tasks and drops escaped paths', () => {
+  const root = workspace();
+  const authority = grant(root, {
+    writePaths: ['.vibe-assets/tasks/login'],
+    commands: [['npm', 'test']],
+    toolKinds: ['read', 'write', 'command'],
+    networkHosts: [],
+  });
+  const write = canonical(root, {
+    kind: 'write',
+    readPaths: [],
+    writePaths: ['src/auth/login.ts'],
+    sideEffects: ['workspace-write'],
+  });
+  const addendum = extendAuthorityAddendum(authority, write);
+  assert.ok(addendum.writePaths.length > 0);
+
+  // No previous addendum → nothing to carry.
+  assert.equal(rebaseAuthorityAddendum(authority, undefined), undefined);
+
+  // A different task's grant can never inherit these approvals.
+  const otherTask = compileTaskAuthority(
+    'other-task', 1, 1, 'approval-other', root, authorityRequest(), APPROVED_AT,
+  );
+  assert.equal(rebaseAuthorityAddendum(otherTask, addendum), undefined);
+
+  // Same task rebound to a different workspace root: absolute path entries
+  // no longer resolve inside the new root and are dropped; commands survive.
+  const otherRoot = workspace();
+  const movedGrant = compileTaskAuthority(
+    'task-login', 2, 3, 'approval-42', otherRoot, authorityRequest(), APPROVED_AT,
+  );
+  const moved = rebaseAuthorityAddendum(movedGrant, addendum);
+  assert.deepEqual(moved.writePaths, []);
+  assert.deepEqual(moved.commands, addendum.commands);
+});
+
+test('addendum dimensions hold 64 entries and report saturation', () => {
+  const root = workspace();
+  const authority = grant(root, {
+    writePaths: ['.vibe-assets/tasks/login'],
+    commands: [['npm', 'test']],
+    toolKinds: ['read', 'write', 'command', 'network'],
+    networkHosts: [],
+  });
+  let addendum;
+  for (let index = 0; index < 70; index += 1) {
+    addendum = extendAuthorityAddendum(authority, canonical(root, {
+      kind: 'network',
+      readPaths: [],
+      networkHosts: [`h${index}.example.com`],
+      sideEffects: ['network'],
+    }), addendum);
+  }
+  // New cap: 64 (was 16) — entries past the bound are silently dropped.
+  assert.equal(addendum.networkHosts.length, 64);
+  assert.deepEqual(addendumSaturatedDimensions(addendum), ['networkHosts']);
+
+  const small = extendAuthorityAddendum(authority, canonical(root, {
+    kind: 'network',
+    readPaths: [],
+    networkHosts: ['solo.example.com'],
+    sideEffects: ['network'],
+  }));
+  assert.deepEqual(addendumSaturatedDimensions(small), []);
 });

@@ -1446,11 +1446,16 @@ export class Orchestrator implements OrchestratorBridge {
     this.defaultHost().sendUserImage(content);
   }
 
-  resolvePermission(id: string, decision: 'allow' | 'deny', message?: string) {
+  resolvePermission(
+    id: string,
+    decision: 'allow' | 'deny',
+    message?: string,
+    scope: 'worker' | 'task-wide' = 'worker',
+  ) {
     // Try every active host group; only the one that issued the permission
     // request actually has a matching pending entry.
     for (const hg of this.hostGroups.values()) {
-      hg.resolvePermission(id, decision, message);
+      hg.resolvePermission(id, decision, message, scope);
     }
   }
 
@@ -2256,9 +2261,9 @@ export class Orchestrator implements OrchestratorBridge {
     }
   }
 
-  markWorkerTaskDone(workerId: string, summary: string): void {
+  markWorkerTaskDone(workerId: string, summary: string, sourceAttempt?: number): void {
     // Search across all host groups.
-    this.meetingScheduler.markTaskDone(workerId, summary);
+    this.meetingScheduler.markTaskDone(workerId, summary, sourceAttempt);
   }
 
   /** Build and durably expose the sole final Meeting delivery. Per-task
@@ -2671,8 +2676,8 @@ export class Orchestrator implements OrchestratorBridge {
     return safeCoordinatorReviewProjection(session);
   }
 
-  submitWorkerReport(workerId: string, report: import('./worker-protocol.js').WorkReport): void {
-    this.meetingScheduler.submitWorkerReport(workerId, report);
+  submitWorkerReport(workerId: string, report: import('./worker-protocol.js').WorkReport, sourceAttempt?: number): void {
+    this.meetingScheduler.submitWorkerReport(workerId, report, sourceAttempt);
   }
 
   // Test-only proxy: forward session events to the scheduler for simulation.
@@ -2683,8 +2688,8 @@ export class Orchestrator implements OrchestratorBridge {
     );
   }
 
-  submitWorkerDelivery(workerId: string, files: string[]): void {
-    this.meetingScheduler.submitWorkerDelivery(workerId, files);
+  submitWorkerDelivery(workerId: string, files: string[], sourceAttempt?: number): void {
+    this.meetingScheduler.submitWorkerDelivery(workerId, files, sourceAttempt);
   }
 
   private notifyCoordinatorReview(briefing: CoordinatorReviewBriefing): void {

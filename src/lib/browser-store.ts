@@ -102,3 +102,35 @@ class BrowserStore {
 }
 
 export const browserStore = new BrowserStore();
+
+// --- Overlay hide coordination ---
+//
+// The embedded browser is a native WebContentsView painted ABOVE all
+// renderer HTML, so any fixed overlay (modals, menus, lightboxes, the task
+// board) must hide it explicitly — CSS z-index cannot help. Callers come and
+// go independently, so visibility is coordinated through a request counter:
+// the first requester hides the view (remembering whether it was on), and it
+// is only restored when the LAST request is released.
+let hideRequests = 0;
+let visibleBeforeHide = false;
+
+/** Hide the embedded browser while an overlay is up. Returns a release
+ *  function — call exactly once (e.g. in an effect cleanup). */
+export function requestHideBrowser(): () => void {
+  if (typeof window === 'undefined' || !window.vibeMeet?.browser) return () => {};
+  hideRequests += 1;
+  if (hideRequests === 1) {
+    visibleBeforeHide = browserStore.getSnapshot().visible;
+    if (visibleBeforeHide) void browserStore.setVisible(false);
+  }
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    hideRequests = Math.max(0, hideRequests - 1);
+    if (hideRequests === 0 && visibleBeforeHide) {
+      visibleBeforeHide = false;
+      void browserStore.setVisible(true);
+    }
+  };
+}

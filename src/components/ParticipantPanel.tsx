@@ -13,7 +13,7 @@ interface ParticipantPanelProps {
   mutedHostIds?: Set<string>;
   aiSpeaking: boolean;
   selfTile: React.ReactNode;
-  onResolvePermission: (id: string, decision: 'allow' | 'deny') => void;
+  onResolvePermission: (id: string, decision: 'allow' | 'deny', scope?: 'worker' | 'task-wide') => void;
   onOpenParticipantsTab?: () => void;
   onToggleMuteHost?: (hostId: string) => void;
   onRemoveHost?: (hostId: string) => void;

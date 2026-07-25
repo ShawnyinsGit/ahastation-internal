@@ -3054,20 +3054,36 @@ html.popout-view #root {
 
 /* ----- Error banner ----- */
 
-.error-banner {
+/* Fixed stack so the error banner and the update notice never overlap —
+   both used to pin themselves to the same bottom-center spot. */
+.banner-stack {
   position: fixed;
   bottom: 110px; left: 50%; transform: translateX(-50%);
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  max-width: 80vw;
+}
+
+.error-banner {
   background: var(--danger-soft);
   color: #ffb1c0;
   padding: 8px 16px;
   border-radius: 10px;
   font-size: 12px;
   border: 1px solid rgba(240, 72, 100, 0.4);
-  z-index: 50;
   max-width: 80vw;
   display: flex;
   align-items: center;
   gap: 12px;
+}
+
+.error-banner--info {
+  background: rgba(10, 132, 255, 0.14);
+  color: var(--text-primary);
+  border-color: rgba(10, 132, 255, 0.4);
 }
 
 .error-banner__text {
@@ -3088,6 +3104,80 @@ html.popout-view #root {
 
 .error-banner__reconnect:hover {
   background: rgba(255, 255, 255, 0.22);
+}
+
+/* ----- Shared modal base (components/Modal.tsx) ----- */
+/* Callers with existing backdrop classes (picker-backdrop, perm-modal-backdrop,
+   img-preview-backdrop) keep their own look; this is the default for new modals. */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: rgba(8, 9, 13, 0.65);
+  backdrop-filter: blur(8px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Dialog panel itself is focusable (fallback when nothing inside is) —
+   suppress the default outline; keyboard focus is visible on inner controls. */
+.modal-backdrop [role="dialog"]:focus {
+  outline: none;
+}
+
+/* ----- Toast viewport (components/ToastViewport.tsx) ----- */
+/* Sits above modals so failures surfaced from inside a dialog stay visible. */
+.toast-viewport {
+  position: fixed;
+  bottom: 96px;
+  right: 20px;
+  z-index: 1100;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  max-width: min(380px, 80vw);
+}
+
+.toast {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 9px 12px;
+  border-radius: 10px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-primary);
+  background: var(--bg-elevated, rgba(30, 32, 40, 0.96));
+  border: 1px solid var(--border-soft, rgba(255, 255, 255, 0.12));
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  animation: toast-in 160ms ease-out;
+}
+
+.toast-error { border-color: rgba(240, 72, 100, 0.45); }
+.toast-success { border-color: rgba(48, 209, 88, 0.45); }
+.toast-info { border-color: rgba(10, 132, 255, 0.4); }
+
+.toast-text { flex: 1; word-break: break-word; }
+
+.toast-close {
+  appearance: none;
+  background: none;
+  border: none;
+  color: inherit;
+  opacity: 0.6;
+  cursor: pointer;
+  padding: 2px;
+  display: flex;
+  align-items: center;
+}
+
+.toast-close:hover { opacity: 1; }
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 
 /* ----- Voice selector (drawer) ----- */

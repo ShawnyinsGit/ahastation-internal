@@ -1154,7 +1154,13 @@ export interface VibeMeetApi {
     items: AttachmentSendWire[],
     caption: string,
   ) => Promise<{ ok: boolean; error?: string; inlinedCount?: number; workspaceCount?: number }>;
-  resolvePermission: (sessionId: string | null, id: string, decision: 'allow' | 'deny', message?: string) => Promise<{ ok: boolean }>;
+  resolvePermission: (
+    sessionId: string | null,
+    id: string,
+    decision: 'allow' | 'deny',
+    message?: string,
+    scope?: 'worker' | 'task-wide',
+  ) => Promise<{ ok: boolean }>;
   interrupt: (sessionId: string | null) => Promise<{ ok: boolean }>;
   setPermissionMode: (sessionId: string | null, mode: string) => Promise<{ ok: boolean }>;
   setAutoApprove: (scope: AutoApproveScope) => Promise<{ ok: boolean; autoApproveScope?: AutoApproveScope }>;
@@ -1391,6 +1397,7 @@ export interface AhaBarApi {
   resolvePermission: (
     id: string,
     decision: 'allow' | 'deny',
+    scope?: 'worker' | 'task-wide',
   ) => Promise<{ ok: boolean; error?: string }>;
   focusMain: () => Promise<{ ok: boolean }>;
   setExpanded: (expanded: boolean) => Promise<{ ok: boolean }>;

@@ -17,7 +17,8 @@ import { useDragAndDrop } from './hooks/useDragAndDrop';
 import { useHandheldMode } from './lib/handheld-mode';
 import { planDisplayMigration } from './lib/display-migration';
 import { meetingStore } from './lib/meeting-store';
-import { browserStore } from './lib/browser-store';
+import { browserStore, requestHideBrowser } from './lib/browser-store';
+import { toast } from './lib/toast';
 import { Lobby } from './components/Lobby';
 import { TabStrip } from './components/TabStrip';
 import { MeetingHeader, type MeetingView } from './components/MeetingHeader';
@@ -32,6 +33,8 @@ import { VoiceGuideModal } from './components/VoiceGuideModal';
 import { ParticipantPanel } from './components/ParticipantPanel';
 import { PermissionCard } from './components/PermissionCard';
 import { EditorOverlay } from './components/EditorOverlay';
+import { Modal } from './components/Modal';
+import { ToastViewport } from './components/ToastViewport';
 import { PlanMeetingModal } from './components/PlanMeetingModal';
 import {
   buildDirectAttachmentDirective,
@@ -90,16 +93,11 @@ export function App() {
 
   // The embedded browser is a native WebContentsView painted above the
   // renderer, so no amount of CSS can tuck it behind the task board. Drop it
-  // while the board is up and put it back the way we found it on return.
-  const browserWasVisible = useRef(false);
+  // while the board is up; the request counter restores it once the board
+  // (and any other overlay) is gone.
   useEffect(() => {
-    if (view === 'tasks') {
-      browserWasVisible.current = browserStore.getSnapshot().visible;
-      if (browserWasVisible.current) void browserStore.setVisible(false);
-    } else if (browserWasVisible.current) {
-      browserWasVisible.current = false;
-      void browserStore.setVisible(true);
-    }
+    if (view !== 'tasks') return;
+    return requestHideBrowser();
   }, [view]);
 
   const handleOpenTaskFromBoard = useCallback((sessionId: string, taskId: string) => {
@@ -370,15 +368,21 @@ export function App() {
       const res = await window.vibeMeet.setAutoApprove(autoApproveScope);
       if (!res.ok || !state.running) return;
       const id = meetingStore.getActiveId();
+      // Only 'all' bypasses SDK permission checks entirely. 'read' keeps the
+      // default mode so canUseTool still runs — the session-level scope then
+      // auto-allows safe tools and escalates destructive ones.
       void window.vibeMeet.setPermissionMode(
         id,
-        autoApproveScope !== 'off' ? 'bypassPermissions' : 'default',
+        autoApproveScope === 'all' ? 'bypassPermissions' : 'default',
       );
     })();
   }, [autoApproveScope, state.running]);
 
   useEffect(() => {
-    if (autoApproveScope !== 'off' && state.pendingPermission) {
+    // Auto-resolve pending cards only under 'all'. Under 'read', anything
+    // that reached the UI card was already classified as non-safe upstream
+    // (safe tools never become pending), so it must stay a manual decision.
+    if (autoApproveScope === 'all' && state.pendingPermission) {
       void resolvePermission(state.pendingPermission.id, 'allow');
     }
   }, [autoApproveScope, state.pendingPermission, resolvePermission]);
@@ -431,17 +435,18 @@ export function App() {
 
   const handleRemoveHost = useCallback(async (hostId: string) => {
     if (hostId === 'default') return;
-    await workers.removeHostGroup(hostId);
+    const result = await workers.removeHostGroup(hostId);
+    if (result && !result.ok) toast.error(`移出成员失败：${result.error ?? '未知原因'}`);
   }, [workers]);
 
   const handleSetCoordinator = useCallback(async (hostId: string) => {
     const result = await workers.setCoordinator(hostId);
-    if (!result.ok) console.warn('[coordinator] transfer failed:', result.error);
+    if (!result.ok) toast.error(`切换主持人失败：${result.error ?? '未知原因'}`);
   }, [workers]);
 
   const handleRestartHost = useCallback(async (hostId: string) => {
     const result = await workers.restartHost(hostId);
-    if (!result.ok) console.warn('[host] reconnect failed:', result.error);
+    if (!result.ok) toast.error(`重连成员失败：${result.error ?? '未知原因'}`);
   }, [workers]);
 
   // Handheld UI mode (§3.3): resolved mode drives the root <html> class via
@@ -556,7 +561,12 @@ export function App() {
   );
 
   if (!hasTabs) {
-    return <Lobby lastError={state.lastError} />;
+    return (
+      <>
+        <Lobby lastError={state.lastError} />
+        <ToastViewport />
+      </>
+    );
   }
 
   return (
@@ -689,8 +699,12 @@ export function App() {
           backends={backends}
           activeBackendIds={activeBackendIds}
           hostGroups={workers.hostGroups}
-          onAddHost={(backendId) => {
-            workers.addHostGroup(backendId);
+          onAddHost={async (backendId) => {
+            const result = await workers.addHostGroup(backendId);
+            if (result && !result.ok) {
+              toast.error(`邀请成员失败：${result.error ?? '未知原因'}`);
+              return;
+            }
             // Refresh backends after adding a host
             window.vibeMeet.backendAuth.list().then(setBackends).catch(() => setBackends([]));
           }}
@@ -736,18 +750,22 @@ export function App() {
       />
 
       {handheld && permModalOpen && state.pendingPermission && (
-        <div className="perm-modal-backdrop" onClick={() => setPermModalOpen(false)}>
-          <div className="perm-modal" onClick={(e) => e.stopPropagation()}>
-            <PermissionCard
-              pending={state.pendingPermission}
-              onDecide={async (id, decision) => {
-                const res = await resolvePermission(id, decision);
-                if (res && res.ok) setPermModalOpen(false);
-                return res;
-              }}
-            />
-          </div>
-        </div>
+        <Modal
+          open
+          backdropClassName="perm-modal-backdrop"
+          className="perm-modal"
+          ariaLabel="权限审批"
+          onClose={() => setPermModalOpen(false)}
+        >
+          <PermissionCard
+            pending={state.pendingPermission}
+            onDecide={async (id, decision) => {
+              const res = await resolvePermission(id, decision);
+              if (res && res.ok) setPermModalOpen(false);
+              return res;
+            }}
+          />
+        </Modal>
       )}
 
       {overlayHostId && (
@@ -777,6 +795,8 @@ export function App() {
         onDismissForever={voicePrefs.handleDismissForever}
       />
 
+      <ToastViewport />
+
       <PlanMeetingModal
         open={Boolean(workers.pendingPlan)}
         brief={workers.pendingPlanBrief}
@@ -786,36 +806,40 @@ export function App() {
         onSubmit={(tasks) => workers.decidePendingPlan(true, tasks)}
       />
 
-      {(state.lastError || micError) && (
-        <div className="error-banner">
-          <span className="error-banner__text">{state.lastError ?? micError}</span>
-          {state.lastError && !state.running && (
-            <button
-              type="button"
-              className="error-banner__reconnect"
-              onClick={() => { void restartSession(); }}
-            >
-              Reconnect
-            </button>
+      {(state.lastError || micError || updateInfo) && (
+        <div className="banner-stack">
+          {(state.lastError || micError) && (
+            <div className="error-banner">
+              <span className="error-banner__text">{state.lastError ?? micError}</span>
+              {state.lastError && !state.running && (
+                <button
+                  type="button"
+                  className="error-banner__reconnect"
+                  onClick={() => { void restartSession(); }}
+                >
+                  Reconnect
+                </button>
+              )}
+              {!state.lastError && micError && micRetryable && (
+                <button
+                  type="button"
+                  className="error-banner__reconnect"
+                  onClick={retryMic}
+                >
+                  Retry microphone
+                </button>
+              )}
+            </div>
           )}
-          {!state.lastError && micError && micRetryable && (
-            <button
-              type="button"
-              className="error-banner__reconnect"
-              onClick={retryMic}
-            >
-              Retry microphone
-            </button>
-          )}
-        </div>
-      )}
 
-      {updateInfo && (
-        <div className="error-banner">
-          <span className="error-banner__text">新版本 {updateInfo.latest} 可用</span>
-          <a className="error-banner__reconnect" href={updateInfo.url} target="_blank" rel="noreferrer">
-            前往下载
-          </a>
+          {updateInfo && (
+            <div className="error-banner error-banner--info">
+              <span className="error-banner__text">新版本 {updateInfo.latest} 可用</span>
+              <a className="error-banner__reconnect" href={updateInfo.url} target="_blank" rel="noreferrer">
+                前往下载
+              </a>
+            </div>
+          )}
         </div>
       )}
     </div>

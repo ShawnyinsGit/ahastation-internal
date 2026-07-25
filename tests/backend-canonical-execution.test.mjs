@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   canonicalExecutionRequestSchema,
+  tokenizeSimpleCommand,
 } from '../dist-electron/backends/canonical-execution.js';
 import { ClaudeCodeBackend } from '../dist-electron/backends/claude-code-adapter.js';
 import { CodexBackend } from '../dist-electron/backends/codex-adapter.js';
@@ -85,7 +86,93 @@ for (const [backendId, backend] of workers) {
       requiresUser: true,
     });
   });
+
+  test(`${backendId} tokenizes a simple string command to an exact argv`, () => {
+    const plain = backend.normalizePermissionRequest(
+      native(backendId, 'Bash', { command: 'npm test' }),
+    );
+    assert.equal(plain.ok, true);
+    assert.equal(plain.request.executable, 'npm');
+    assert.deepEqual(plain.request.argv, ['test']);
+
+    const quoted = backend.normalizePermissionRequest(
+      native(backendId, 'Bash', {
+        command: 'git commit -m "fix login flow" --author \'Dev One <dev@example.com>\'',
+      }, 'native-quoted'),
+    );
+    assert.equal(quoted.ok, true);
+    assert.equal(quoted.request.executable, 'git');
+    assert.deepEqual(quoted.request.argv, [
+      'commit', '-m', 'fix login flow', '--author', 'Dev One <dev@example.com>',
+    ]);
+  });
 }
+
+test('shell metacharacters, expansions, and unclosed quotes stay opaque', () => {
+  const backend = new ClaudeCodeBackend();
+  for (const command of [
+    'npm test && npm run build',
+    'cat package.json | grep name',
+    'echo one; echo two',
+    'echo $(whoami)',
+    'echo `whoami`',
+    'echo hi > out.txt',
+    'cat < input.txt',
+    'echo $HOME',
+    'ls *.ts',
+    'ls ~/secrets',
+    'echo hi # comment',
+    'echo "unclosed',
+    "echo 'unclosed",
+    'echo "has $expansion"',
+    'echo "has `subshell`"',
+    'echo "has \\\\ escape"',
+    'run (subshell)',
+    'a \\\\ b',
+  ]) {
+    assert.deepEqual(
+      backend.normalizePermissionRequest(native('claude-code', 'Bash', { command })),
+      { ok: false, diagnostic: 'opaque-shell-command', requiresUser: true },
+      command,
+    );
+    assert.equal(tokenizeSimpleCommand(command), null, command);
+  }
+});
+
+test('tokenizer handles quote grouping without any expansion', () => {
+  assert.deepEqual(tokenizeSimpleCommand('npm  test '), ['npm', 'test']);
+  assert.deepEqual(tokenizeSimpleCommand("echo 'a && b'"), ['echo', 'a && b']);
+  assert.deepEqual(tokenizeSimpleCommand('echo "a | b"'), ['echo', 'a | b']);
+  assert.deepEqual(tokenizeSimpleCommand("pre'mid'post"), ['premidpost']);
+  assert.deepEqual(tokenizeSimpleCommand("echo ''"), ['echo', '']);
+  assert.equal(tokenizeSimpleCommand('   '), null);
+  assert.equal(tokenizeSimpleCommand(''), null);
+});
+
+test('a tokenized string command still fails closed on secret-bearing argv', () => {
+  const backend = new ClaudeCodeBackend();
+  assert.deepEqual(
+    backend.normalizePermissionRequest(
+      native('claude-code', 'Bash', { command: 'tool --api-key=never-store-this' }),
+    ),
+    { ok: false, diagnostic: 'secret-bearing-argument', requiresUser: true },
+  );
+  assert.deepEqual(
+    backend.normalizePermissionRequest(
+      native('claude-code', 'Bash', { command: 'curl https://user:password@example.com/path' }),
+    ),
+    { ok: false, diagnostic: 'secret-bearing-argument', requiresUser: true },
+  );
+});
+
+test('tokenized string commands keep side-effect classification', () => {
+  const backend = new ClaudeCodeBackend();
+  const push = backend.normalizePermissionRequest(
+    native('claude-code', 'Bash', { command: 'git push --force origin main' }),
+  );
+  assert.equal(push.ok, true);
+  assert.ok(push.request.sideEffects.includes('destructive-git'));
+});
 
 test('Codex preserves an array command boundary without joining shell text', () => {
   const result = new CodexBackend().normalizePermissionRequest(

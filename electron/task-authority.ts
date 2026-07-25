@@ -446,7 +446,7 @@ export interface TaskAuthorityAddendum {
 
 /** Bound on user-approved entries per dimension, so a runaway Worker cannot
  *  turn repeated approvals into an unbounded allowlist. */
-const ADDENDUM_ENTRY_LIMIT = 16;
+const ADDENDUM_ENTRY_LIMIT = 64;
 
 function addBounded<T>(values: T[], candidate: T, key: (value: T) => string): T[] {
   if (values.length >= ADDENDUM_ENTRY_LIMIT) return values;
@@ -477,6 +477,50 @@ function addendumForGrant(
     && addendum.grantHash === grant.grantHash
     ? addendum
     : undefined;
+}
+
+/** Dimensions whose hand-approved entries hit the bound — further approvals
+ *  in these dimensions are silently dropped by `addBounded`, so the caller
+ *  should surface the saturation instead of letting cards ask forever. */
+export function addendumSaturatedDimensions(addendum: TaskAuthorityAddendum): string[] {
+  const saturated: string[] = [];
+  if (addendum.writePaths.length >= ADDENDUM_ENTRY_LIMIT) saturated.push('writePaths');
+  if (addendum.workingDirectories.length >= ADDENDUM_ENTRY_LIMIT) saturated.push('workingDirectories');
+  if (addendum.commands.length >= ADDENDUM_ENTRY_LIMIT) saturated.push('commands');
+  if (addendum.networkHosts.length >= ADDENDUM_ENTRY_LIMIT) saturated.push('networkHosts');
+  return saturated;
+}
+
+/** Carry hand approvals across a rework attempt boundary. Safe because a
+ *  rework grant is subset-checked by `compileReworkTaskAuthority` (it can only
+ *  narrow) and every entry here came from an explicit user click. Path entries
+ *  are re-anchored on the new grant's workspace root; any that no longer
+ *  resolve inside it are dropped. Never crosses tasks. */
+export function rebaseAuthorityAddendum(
+  grant: TaskAuthorityGrant,
+  previous?: TaskAuthorityAddendum,
+): TaskAuthorityAddendum | undefined {
+  if (!previous || previous.taskId !== grant.taskId) return undefined;
+  const rebasePaths = (paths: readonly string[]): string[] => {
+    const rebased: string[] = [];
+    for (const path of paths) {
+      const canonical = canonicalRequestPath(grant.workspaceRoot, path);
+      if (canonical) {
+        rebased.push(canonical);
+        if (rebased.length >= ADDENDUM_ENTRY_LIMIT) break;
+      }
+    }
+    return rebased;
+  };
+  return {
+    taskId: grant.taskId,
+    attempt: grant.attempt,
+    grantHash: grant.grantHash,
+    writePaths: rebasePaths(previous.writePaths),
+    workingDirectories: rebasePaths(previous.workingDirectories),
+    commands: previous.commands.map((command) => [...command]),
+    networkHosts: [...previous.networkHosts],
+  };
 }
 
 /** Fold one hand-approved request into the attempt's addendum. Paths follow the

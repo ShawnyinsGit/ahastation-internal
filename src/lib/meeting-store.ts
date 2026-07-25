@@ -2347,7 +2347,8 @@ class MeetingStore {
       return;
     }
     try {
-      await window.vibeMeet.sendUserText(slot.id, text);
+      const res = await window.vibeMeet.sendUserText(slot.id, text);
+      if (!res.ok) throw new Error(res.error ?? 'Send rejected by main process');
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error('[meeting-store] sendText failed:', msg);
@@ -2384,7 +2385,8 @@ class MeetingStore {
       return;
     }
     try {
-      await window.vibeMeet.sendUserImage(slot.id, dataUrl, caption);
+      const res = await window.vibeMeet.sendUserImage(slot.id, dataUrl, caption);
+      if (!res.ok) throw new Error(res.error ?? 'Send rejected by main process');
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error('[meeting-store] sendImage failed:', msg);
@@ -2482,7 +2484,11 @@ class MeetingStore {
     return () => { this.droppedFileListeners.delete(cb); };
   }
 
-  async resolvePermission(id: string, decision: 'allow' | 'deny'): Promise<{ ok: true } | { ok: false; error: string }> {
+  async resolvePermission(
+    id: string,
+    decision: 'allow' | 'deny',
+    scope: 'worker' | 'task-wide' = 'worker',
+  ): Promise<{ ok: true } | { ok: false; error: string }> {
     const sessionId = this.effectiveSessionId();
     if (!sessionId) return { ok: false, error: 'No active session' };
     const slot = this.slots.get(sessionId);
@@ -2502,7 +2508,10 @@ class MeetingStore {
     });
 
     try {
-      await window.vibeMeet.resolvePermission(sessionId, id, decision);
+      const res = await window.vibeMeet.resolvePermission(sessionId, id, decision, undefined, scope);
+      // A structured failure means the main process never delivered the reply
+      // (e.g. session slot not found) — treat it exactly like a thrown error.
+      if (!res.ok) throw new Error('主进程未找到待处理的权限请求');
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error('[meeting-store] resolvePermission IPC failed:', err);

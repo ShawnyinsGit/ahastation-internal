@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { BackendInfo, MeetingPlanBrief, PlanMeetingTaskInput } from '../types';
+import { requestHideBrowser } from '../lib/browser-store';
 import {
   isWorkerBackendReady,
   normalizePlanDraft,
@@ -94,6 +95,13 @@ export function PlanMeetingModal({
   const [draftBrief, setDraftBrief] = useState<MeetingPlanBrief>(() => cloneBrief(brief, tasks));
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // This modal is a full-screen decision point: the native browser view
+  // would paint over it if a browser stage tab happened to be active.
+  useEffect(() => {
+    if (!open) return;
+    return requestHideBrowser();
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
