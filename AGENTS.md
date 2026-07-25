@@ -1,5 +1,15 @@
 # AhaStation — Codex working notes
 
+## Active uncommitted work: pocket-vibe backend (2026-07-26)
+
+The working tree contains an **uncommitted** new backend (`pocket-vibe`,
+remote agents via a LAN hub). Before touching backends/orchestrator/meeting
+code, read `docs/POCKET_VIBE_BACKEND.md` — it covers what changed, how to
+launch the dev build (the /opt installed app is an OLD build without it),
+the real node path (`.tools/node22/bin`, NOT `/usr/local/bin`), test
+commands, and pitfalls. `electron/main.ts` also has the user's own unrelated
+uncommitted change — do not revert it.
+
 ## Environment paths
 
 This shell does not always inherit a usable `PATH`, so `node` / `npm` / `npx`

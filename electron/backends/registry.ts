@@ -11,6 +11,7 @@ import { KimiBackend } from './kimi-adapter.js';
 import { QoderBackend } from './qoder-adapter.js';
 import { CustomBackend, type CustomBackendOptions } from './custom-adapter.js';
 import { OpenCodeBackend } from './opencode-adapter.js';
+import { PocketVibeBackend } from './pocket-vibe-adapter.js';
 import type { ConfirmDestructive } from '../claude-session.js';
 import type {
   BackendEffectiveProfile,
@@ -163,6 +164,7 @@ export function getBackendRegistry(confirmDestructive?: ConfirmDestructive): Bac
     instance.register(new KimiBackend());
     instance.register(new QoderBackend());
     instance.register(new OpenCodeBackend());
+    instance.register(new PocketVibeBackend());
   }
   return instance;
 }
