@@ -104,6 +104,17 @@ test('task statuses include text and icon semantics rather than color alone', ()
   assert.match(board, /task\.statusLabel|task\.blockedReason/);
 });
 
+test('task board prefers live worker status over lagging plan nodes', () => {
+  const columns = read('src/lib/task-columns.ts');
+  const store = read('src/lib/meeting-store.ts');
+  const stage = read('src/components/ScreenStage.tsx');
+  assert.match(columns, /export function resolveBoardTaskStatus/);
+  assert.match(store, /resolveBoardTaskStatus\(node\.status, worker\?\.status\)/);
+  // Cross-project open must arm awaitingFocus before selection, or the
+  // plan-sweep clears the inspector while the target session's plan swaps in.
+  assert.match(stage, /awaitingFocus\.current = focusTaskId;\s*setSelectedTaskId\(focusTaskId\)/);
+});
+
 test('compact widths use an in-window drawer and never open a separate inspector window', () => {
   const css = read('src/styles.css');
   const stage = read('src/components/ScreenStage.tsx');

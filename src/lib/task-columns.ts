@@ -58,6 +58,18 @@ export function columnForTask(status: WorkerStatus, blocked: boolean): TaskColum
   return 'active';
 }
 
+/** Prefer the live worker status over the plan-node snapshot. `delivery-status`
+ *  / `worker-ended` update workers immediately; `plan-updated` can lag a tick
+ *  behind, which made the cross-project board disagree with the in-meeting
+ *  task list. Idle is a talker/blank placeholder and never wins. */
+export function resolveBoardTaskStatus(
+  nodeStatus: WorkerStatus,
+  workerStatus: WorkerStatus | 'idle' | undefined,
+): WorkerStatus {
+  if (workerStatus && workerStatus !== 'idle') return workerStatus;
+  return nodeStatus;
+}
+
 /** Last path segment of a cwd, tolerant of both separators. Falls back to the
  *  whole string for degenerate inputs like a bare drive root. */
 export function projectNameFromCwd(cwd: string): string {

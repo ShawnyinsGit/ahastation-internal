@@ -172,14 +172,22 @@ export function ScreenStage({
   }, [plan, selectedTaskId]);
 
   // Depends on seq alone: the board can hand us the same taskId twice and the
-  // inspector still has to come back up.
+  // inspector still has to come back up. Set awaitingFocus BEFORE selection so
+  // the plan-sweep effect cannot clear the card during a cross-project switch
+  // (handleSelectTask used to null the ref first, racing the hold).
   const focusSeq = focusTask?.seq;
   const focusTaskId = focusTask?.taskId;
   useEffect(() => {
     if (focusSeq === undefined || !focusTaskId) return;
-    handleSelectTask(focusTaskId);
     awaitingFocus.current = focusTaskId;
-  }, [focusSeq]);
+    setSelectedTaskId(focusTaskId);
+    setInspectorOpenSeq((seq) => seq + 1);
+    setInspectorHeight(76);
+    setInspectorFullscreen(false);
+    if (activeWindowId !== ACTIVITY_TAB_ID) {
+      onSelectWindow(ACTIVITY_TAB_ID);
+    }
+  }, [focusSeq, focusTaskId, activeWindowId, onSelectWindow]);
 
   const handleInspectorPointerDown = useCallback((event: React.PointerEvent<HTMLButtonElement>) => {
     dragState.current = { pointerId: event.pointerId, startY: event.clientY };

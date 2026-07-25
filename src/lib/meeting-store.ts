@@ -30,6 +30,7 @@ import { redactSecrets } from '../../electron/format-error';
 import {
   columnForTask,
   projectNameFromCwd,
+  resolveBoardTaskStatus,
   WORKER_STATUS_LABEL,
   type TaskColumnId,
 } from './task-columns';
@@ -725,13 +726,17 @@ class MeetingStore {
 
       for (const node of slot.state.plan?.nodes ?? []) {
         const worker = slot.state.workers.get(node.id);
+        // Live worker status wins: delivery-status updates the worker map
+        // before plan-updated replaces plan.nodes, so the board would lag
+        // the in-meeting task list if it only read the plan snapshot.
+        const status = resolveBoardTaskStatus(node.status, worker?.status);
         const blockedReason = worker?.pendingPermission
           ? '等待权限'
           : node.workspaceDiagnostic
             ? node.workspaceDiagnostic.message
-            : node.status === 'budget-paused'
+            : status === 'budget-paused'
               ? '预算耗尽，需要续额'
-              : node.status === 'integration-conflict'
+              : status === 'integration-conflict'
                 ? '集成冲突待处理'
                 : null;
         tasks.push({
@@ -741,9 +746,9 @@ class MeetingStore {
           projectName,
           taskId: node.id,
           title: node.title,
-          status: node.status,
-          column: columnForTask(node.status, Boolean(worker?.pendingPermission || node.workspaceDiagnostic)),
-          statusLabel: WORKER_STATUS_LABEL[node.status],
+          status,
+          column: columnForTask(status, Boolean(worker?.pendingPermission || node.workspaceDiagnostic)),
+          statusLabel: WORKER_STATUS_LABEL[status],
           backendId: worker?.backendId ?? node.executorBackendId ?? null,
           deps: node.deps,
           attempt: worker?.attempt ?? 1,
