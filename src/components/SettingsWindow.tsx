@@ -4,7 +4,7 @@
 
 import { Component, useCallback, useEffect, useState, type ErrorInfo, type ReactNode } from 'react';
 import { useVoicePreferences } from '../hooks/useVoicePreferences';
-import { useVoiceLock } from '../hooks/useVoiceLock';
+import { useRemoteVoiceLock } from '../hooks/useRemoteVoiceLock';
 import { MemoryPanel } from './MemoryPanel';
 import { VoiceSelector } from './VoiceSelector';
 import { VoiceLockPanel } from './VoiceLockPanel';
@@ -66,22 +66,13 @@ class SettingsErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryS
   }
 }
 
-// Dummy refs/callbacks for useVoiceLock — the settings window has no active
-// audio session, so mute/speaking state is irrelevant. The hook still needs
-// these arguments for type correctness and to update its own enrollment state.
-const noopSetState = () => {};
-const dummySpeakingRef = { current: false };
-
 function SettingsWindowInner() {
   const voicePrefs = useVoicePreferences();
   const [appVersion, setAppVersion] = useState<string>('');
   const [updateInfo, setUpdateInfo] = useState<{ latest: string; url: string } | null>(null);
-  const voiceLock = useVoiceLock({
-    muted: false,
-    setMuted: noopSetState,
-    setAiSpeaking: noopSetState,
-    speakingRef: dummySpeakingRef,
-  });
+  // Enrollment runs on the main window's mic pipeline — this hook drives the
+  // panel over the enrollment bridge instead of a disconnected local capture.
+  const voiceLock = useRemoteVoiceLock();
 
   useEffect(() => {
     void window.vibeMeet.appVersion().then(setAppVersion).catch(() => {});
@@ -136,6 +127,8 @@ function SettingsWindowInner() {
           xfyunAsr={voicePrefs.xfyunAsr}
           onXfyunAsrInput={voicePrefs.handleXfyunAsrInput}
           onXfyunAsrCommit={voicePrefs.handleXfyunAsrCommit}
+          xfyunDirty={voicePrefs.xfyunDirty}
+          xfyunSaveState={voicePrefs.xfyunSaveState}
         />
         <VoiceLockPanel
           enabled={voiceLock.voiceLockEnabled}

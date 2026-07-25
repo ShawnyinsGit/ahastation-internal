@@ -70,8 +70,35 @@ const api = {
   getVoiceConfig: () => ipcRenderer.invoke('settings:get-voice-config'),
   setVoiceLockEnabled: (on) => ipcRenderer.invoke('settings:set-voice-lock-enabled', on),
   setVoicePrint: (vp) => ipcRenderer.invoke('settings:set-voice-print', vp),
+  // Voice-lock enrollment bridge. The enrollment UI lives in the settings
+  // window but the mic/VAD pipeline only exists in the main window's App, so
+  // commands travel settings -> main -> App, and progress streams back the
+  // same way.
+  voiceLockEnrollStart: () => ipcRenderer.invoke('voicelock:enroll-start'),
+  voiceLockEnrollCancel: () => ipcRenderer.invoke('voicelock:enroll-cancel'),
+  onVoiceLockEnrollCmd: (cb) => {
+    const listener = (_event, cmd) => cb(cmd);
+    ipcRenderer.on('voicelock:enroll-cmd', listener);
+    return () => ipcRenderer.removeListener('voicelock:enroll-cmd', listener);
+  },
+  sendVoiceLockEnrollState: (state) => ipcRenderer.send('voicelock:enroll-state', state),
+  onVoiceLockEnrollState: (cb) => {
+    const listener = (_event, state) => cb(state);
+    ipcRenderer.on('voicelock:enroll-state', listener);
+    return () => ipcRenderer.removeListener('voicelock:enroll-state', listener);
+  },
+  onVoiceConfigChanged: (cb) => {
+    const listener = () => cb();
+    ipcRenderer.on('voiceconfig:changed', listener);
+    return () => ipcRenderer.removeListener('voiceconfig:changed', listener);
+  },
   getVoicePref: () => ipcRenderer.invoke('settings:get-voice-pref'),
   setVoicePref: (patch) => ipcRenderer.invoke('settings:set-voice-pref', patch),
+  onVoicePrefChanged: (cb) => {
+    const listener = () => cb();
+    ipcRenderer.on('settings:voice-pref-changed', listener);
+    return () => ipcRenderer.removeListener('settings:voice-pref-changed', listener);
+  },
   openVoiceSettings: () => ipcRenderer.invoke('system:open-voice-settings'),
   useSystemPicker: () => ipcRenderer.invoke('desktop:use-system-picker'),
   getDesktopSources: () => ipcRenderer.invoke('desktop:get-sources'),
@@ -313,6 +340,17 @@ const api = {
     ipcRenderer.on('update-available', listener);
     return () => ipcRenderer.removeListener('update-available', listener);
   },
+  app: {
+    // Minimize/close → AhaBar prompt: main intercepts the window action and
+    // asks; the renderer answers with minimizeChoice. Main has a 60s
+    // fail-safe that replays the original action if no answer arrives.
+    onMinimizePrompt: (cb) => {
+      const listener = (_, payload) => cb(payload);
+      ipcRenderer.on('app:minimize-prompt', listener);
+      return () => ipcRenderer.removeListener('app:minimize-prompt', listener);
+    },
+    minimizeChoice: (choice) => ipcRenderer.invoke('app:minimize-choice', choice),
+  },
   companion: {
     // Main-window side: toggle the floating companion window + relay the
     // TTS-active flag (sound ducking). The companion window itself uses the
@@ -349,6 +387,16 @@ const api = {
     const listener = (_, e) => cb(e);
     ipcRenderer.on('session:event', listener);
     return () => ipcRenderer.removeListener('session:event', listener);
+  },
+  // Observation layer (S0): read-only snapshots of externally-launched CLI
+  // sessions. Full snapshot per scan tick — no incremental diff.
+  observe: {
+    getSnapshot: () => ipcRenderer.invoke('observe:getSnapshot'),
+    onEvent: (cb) => {
+      const listener = (_, snapshot) => cb(snapshot);
+      ipcRenderer.on('observe:event', listener);
+      return () => ipcRenderer.removeListener('observe:event', listener);
+    },
   },
 };
 

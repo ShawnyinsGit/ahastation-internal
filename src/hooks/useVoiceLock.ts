@@ -62,6 +62,24 @@ export function useVoiceLock({ muted, setMuted, setAiSpeaking, speakingRef }: Us
     if (enrollmentToastTimerRef.current != null) window.clearTimeout(enrollmentToastTimerRef.current);
   }, []);
 
+  // Cross-window sync: the voice config can be changed from the settings
+  // window (toggle / clear / re-enroll) while this hook instance lives in the
+  // main window (or vice versa). The writing side's IPC handler broadcasts
+  // 'voiceconfig:changed' to every other window; refetch on receipt so the
+  // capture gate never runs on a stale voiceprint or lock state.
+  useEffect(() => {
+    const unsubscribe = window.vibeMeet.onVoiceConfigChanged?.(() => {
+      window.vibeMeet.getVoiceConfig().then(({ enabled, voicePrint: vp }) => {
+        setVoiceLockEnabled(enabled);
+        setVoicePrint(vp);
+        setVoicePrintEmbedding(
+          vp && vp.model === SPEAKER_MODEL_ID ? new Float32Array(vp.embedding) : null,
+        );
+      }).catch(() => {});
+    });
+    return unsubscribe;
+  }, []);
+
   const showEnrollmentToast = useCallback((kind: Exclude<EnrollmentToast, null>) => {
     setEnrollmentToast(kind);
     if (enrollmentToastTimerRef.current != null) window.clearTimeout(enrollmentToastTimerRef.current);

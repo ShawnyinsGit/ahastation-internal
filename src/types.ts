@@ -905,6 +905,18 @@ export interface VoicePrint {
   enrolledAt: number;
 }
 
+// Enrollment progress broadcast from the main window's voice pipeline to the
+// settings window's VoiceLockPanel (the panel UI lives in settings, the mic
+// lives in the main window).
+export interface VoiceLockEnrollState {
+  enrollment: {
+    targetSeconds: number;
+    capturedSeconds: number;
+    segments: number;
+  } | null;
+  toast: 'saved' | 'tooShort' | 'cancelled' | null;
+}
+
 export type MemoryCategory = 'point' | 'decision' | 'todo' | 'fact';
 
 export interface MemoryEntry {
@@ -1295,8 +1307,16 @@ export interface VibeMeetApi {
   getVoiceConfig: () => Promise<{ enabled: boolean; voicePrint: VoicePrint | null }>;
   setVoiceLockEnabled: (on: boolean) => Promise<{ ok: boolean }>;
   setVoicePrint: (vp: VoicePrint | null) => Promise<{ ok: boolean }>;
+  // Voice-lock enrollment bridge (settings window <-> main window mic pipeline).
+  voiceLockEnrollStart: () => Promise<{ ok: boolean }>;
+  voiceLockEnrollCancel: () => Promise<{ ok: boolean }>;
+  onVoiceLockEnrollCmd: (cb: (cmd: 'start' | 'cancel') => void) => () => void;
+  sendVoiceLockEnrollState: (state: VoiceLockEnrollState) => void;
+  onVoiceLockEnrollState: (cb: (state: VoiceLockEnrollState) => void) => () => void;
+  onVoiceConfigChanged: (cb: () => void) => () => void;
   getVoicePref: () => Promise<{ selectedVoiceName: string | null; guidanceDismissed: boolean; speechFilterMode: 'strict' | 'off'; voicePolishEnabled: boolean; reportModeEnabled: boolean; handheldMode: 'auto' | 'handheld' | 'desktop'; xfyunAsr: XfyunAsrCredentials }>;
   setVoicePref: (patch: { selectedVoiceName?: string | null; guidanceDismissed?: boolean; speechFilterMode?: 'strict' | 'off'; voicePolishEnabled?: boolean; reportModeEnabled?: boolean; handheldMode?: 'auto' | 'handheld' | 'desktop'; xfyunAsr?: Partial<XfyunAsrCredentials> }) => Promise<{ ok: boolean; error?: string }>;
+  onVoicePrefChanged: (cb: () => void) => () => void;
   openVoiceSettings: () => Promise<{ ok: boolean }>;
   useSystemPicker: () => Promise<boolean>;
   getDesktopSources: () => Promise<
@@ -1381,6 +1401,11 @@ export interface VibeMeetApi {
   onDisplayChanged: (cb: (info: { displayCount: number; added: boolean }) => void) => () => void;
   appVersion: () => Promise<string>;
   onUpdateAvailable: (cb: (info: { latest: string; url: string }) => void) => () => void;
+  app: {
+    /** Fired when main intercepts a minimize/close to ask about AhaBar. */
+    onMinimizePrompt: (cb: (payload: { kind: 'minimize' | 'close' }) => void) => () => void;
+    minimizeChoice: (choice: { action: 'ahabar' | 'hide'; never: boolean }) => Promise<{ ok: boolean; error?: string }>;
+  };
   companion: CompanionApi;
   /** Floating AhaBar window bridge (preload-companion.cjs only). */
   ahabar?: AhaBarApi;
@@ -1451,6 +1476,9 @@ export interface VibeMeetApi {
     workerId: string,
   ) => Promise<{ ok: true } | { ok: false; error: string }>;
   onEvent: (cb: (e: RendererEvent) => void) => () => void;
+  /** Observation layer (S0). Optional: a renderer running against an older
+   *  preload without this namespace must degrade to "nothing observed". */
+  observe?: import('./lib/observed-store').ObserveApi;
 }
 
 // ── Companion screen (Phase 8) ─────────────────────────────────────────────

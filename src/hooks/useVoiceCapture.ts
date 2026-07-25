@@ -11,6 +11,20 @@ import {
 // entirely - embeddings on very short clips are unreliable and we'd rather
 // pass through brief responses ("ok", "yes") than reject them.
 const MIN_SAMPLES_FOR_GATE = 4800;
+// Grace window after TTS playback ends during which a segment that STARTED
+// during playback is still echo-gated (the VAD redemption tail + audio
+// ring-down outlive the suppression flag by roughly this much).
+const ECHO_GRACE_MS = 1500;
+
+// Stream-lifecycle races that resolve themselves on the next speech segment:
+// a stream superseded by a newer start, a socket cancelled while still
+// connecting, or the idle watchdog reaping a stream whose frames stopped.
+// Surfacing these as user-facing errors just spams the mic button.
+const BENIGN_ASR_CHURN_PATTERN =
+  /superseded|closed before the connection|closed during connection|idle timeout|cancelled/i;
+export function isBenignAsrChurnError(error: string): boolean {
+  return BENIGN_ASR_CHURN_PATTERN.test(error);
+}
 const VOICE_LOCK_THRESHOLD = 0.5;
 // Barge-in-during-playback gate: a speech segment that starts while TTS is
 // playing must reach this many samples (~200ms @ 16 kHz) before we treat it
@@ -116,6 +130,9 @@ export function useVoiceCapture({
   // Mirrored to a ref so VAD callbacks see the current value without
   // re-instantiating the VAD on every toggle.
   const suppressedRef = useRef(suppressed);
+  // Timestamp of the last TTS-playback end (suppressed true->false). Used by
+  // the speech-end echo gate's grace window — see the suppressed sync effect.
+  const lastSuppressedEndRef = useRef(0);
   const voiceLockEnabledRef = useRef(voiceLockEnabled);
   const voicePrintEmbeddingRef = useRef(voicePrintEmbedding);
   // Mirror lang so swapping zh⇄en⇄auto doesn't tear down MicVAD (which
@@ -175,6 +192,15 @@ export function useVoiceCapture({
     pausedRef.current = paused;
   }, [paused]);
   useEffect(() => {
+    // Remember when TTS playback last ended. A VAD segment that STARTED
+    // during playback often ends a beat after playback stops (VAD redemption
+    // tail + audio ring-down); without this timestamp the speech-end handler
+    // can't tell "echo tail of the AI's own voice" apart from "user replied
+    // right as playback finished", and the echo falls through to ASR — the
+    // AI then transcribes its own speech and answers itself in a loop.
+    if (suppressedRef.current && !suppressed) {
+      lastSuppressedEndRef.current = Date.now();
+    }
     suppressedRef.current = suppressed;
   }, [suppressed]);
   useEffect(() => {
@@ -258,10 +284,31 @@ export function useVoiceCapture({
         setPermissionDenied(false);
         setStatus('initializing');
         const { MicVAD } = await import('@ricky0123/vad-web');
-        const vad = await MicVAD.new({
+        // Watchdog: if MicVAD.new ever hangs silently again (a failed emscripten
+        // pthread worker currently rejects with an EMPTY error and the runtime
+        // waits on it forever), surface a retryable failure instead of leaving
+        // the mic button stuck at "Starting…" indefinitely.
+        const vadInitTimeout = new Promise<never>((_, reject) => {
+          setTimeout(() => reject(new Error('MicVAD init timed out after 45s')), 45000);
+        });
+        const vad = await Promise.race([
+          MicVAD.new({
           model: 'v5',
           baseAssetPath: VAD_ASSET_BASE,
           onnxWASMBasePath: VAD_ASSET_BASE,
+          // Packaged-Electron fix: vad-web's inline onnxruntime-web ships the
+          // THREADED wasm build, whose emscripten pthread pool spawns module
+          // workers from app://bundle/vad/ort-wasm-simd-threaded.mjs. Those
+          // workers fail to load in the packaged sandboxed renderer (empty
+          // error event), emscripten then waits on them forever, and
+          // MicVAD.new never resolves — the mic button shows "Starting…"
+          // indefinitely. Forcing a single wasm thread skips pthread worker
+          // creation entirely; VAD is a tiny 512-sample model and runs fine
+          // single-threaded. speaker-embedding.ts does the same for its own
+          // ORT session.
+          ortConfig: (ort) => {
+            ort.env.wasm.numThreads = 1;
+          },
           // Explicit AEC/NS/AGC so the speaker->mic loop is dampened. Browsers
           // default these on for `{audio: true}`, but the lib's default
           // getStream doesn't pass them through, and without AEC the VAD
@@ -320,11 +367,23 @@ export function useVoiceCapture({
               void start.then((result) => {
                 if (!result.ok) {
                   cloudLiveFramesRef.current = false;
-                  setLastError(result.error);
+                  // Stream churn races (a newer speech segment superseded this
+                  // one, or a misfire cancelled it mid-connect) are routine —
+                  // demote them to console noise instead of a user-facing
+                  // error. Only a failure of the CURRENT attempt is real.
+                  if (cloudStreamStartRef.current === start) {
+                    setLastError(result.error);
+                  } else {
+                    console.info('[asr] superseded stream-start failed (benign):', result.error);
+                  }
                 }
               }).catch((error: unknown) => {
                 cloudLiveFramesRef.current = false;
-                setLastError(String((error as Error)?.message ?? error));
+                if (cloudStreamStartRef.current === start) {
+                  setLastError(String((error as Error)?.message ?? error));
+                } else {
+                  console.info('[asr] superseded stream-start threw (benign):', error);
+                }
               });
             }
             setListening(true);
@@ -369,86 +428,98 @@ export function useVoiceCapture({
             }
 
             if (segmentSuppressedRef.current) {
-              // Re-check suppression at speech-end. If TTS has already stopped
-              // by the time the user finished speaking (common when their
-              // reply starts mid-utterance and ends after playback finishes),
-              // don't apply the barge-in DROP gate - just clear the latch and
-              // fall through to the normal voice-lock + transcribe path so the
-              // short reply ("OK", "嗯", "好的") still reaches ASR.
-              if (!suppressedRef.current) {
-                segmentSuppressedRef.current = false;
-                segmentFrameCountRef.current = 0;
-                segmentProbSumRef.current = 0;
-              } else {
-                segmentSuppressedRef.current = false;
-                // Segment started during TTS playback AND TTS is still playing
-                // at speech-end - so this audio is either the AI's own voice
-                // looping back through the mic (echo) or a real interruption.
-                const frames = segmentFrameCountRef.current;
-                const avgProb = frames > 0 ? segmentProbSumRef.current / frames : 0;
-                segmentFrameCountRef.current = 0;
-                segmentProbSumRef.current = 0;
-                const lockOn = voiceLockEnabledRef.current;
-                const enrolled = voicePrintEmbeddingRef.current;
-                if (lockOn && enrolled) {
-                  // Voice-lock is the authoritative echo filter during playback:
-                  // the AI's TTS voice won't match the enrolled user, so a
-                  // sub-threshold similarity means echo -> drop silently (no
-                  // barge-in, no transcript). Only a match counts as a real
-                  // interrupt. No short-clip bypass here - during playback an
-                  // unverifiable clip is far likelier echo than a real barge-in,
-                  // so anything we can't positively identify as the user drops.
-                  let matched = false;
-                  try {
-                    const emb =
-                      audio.length >= MIN_SAMPLES_FOR_GATE ? await embedSpeaker(audio) : null;
-                    if (emb) {
-                      const sim = cosineSimilarity(emb, enrolled);
-                      matched = sim >= VOICE_LOCK_THRESHOLD;
-                      console.info('[barge-in] voice-lock echo gate', {
-                        sim: +sim.toFixed(3),
-                        threshold: VOICE_LOCK_THRESHOLD,
-                        durationSec: +(audio.length / 16000).toFixed(2),
-                        decision: matched ? 'INTERRUPT' : 'DROP(echo)',
-                      });
-                    } else {
-                      console.info('[barge-in] voice-lock echo gate: unverifiable clip during TTS -> DROP', {
-                        durationSec: +(audio.length / 16000).toFixed(2),
-                      });
-                    }
-                  } catch (e) {
-                    console.error('[barge-in] echo embedding failed -> DROP to be safe:', e);
+              // Segment STARTED while TTS was playing: this audio is either
+              // the AI's own voice looping back through the mic (echo) or a
+              // genuine user interruption. Gate it in both cases below.
+              //
+              // The echo tail outlives playback (VAD redemption + audio
+              // ring-down), so a segment that started during playback often
+              // ENDS after the suppression flag has already cleared. Letting
+              // those fall straight through to ASR made the AI transcribe its
+              // own speech and answer itself in a loop. We therefore keep
+              // gating for a grace window after playback ends:
+              //  - voiceprint enrolled + lock on: embedding compare decides,
+              //    regardless of whether playback is still ongoing — the AI's
+              //    TTS voice cannot match the enrolled user.
+              //  - no voiceprint: duration + average-confidence heuristic.
+              // Past the grace window we fall through so a genuine reply that
+              // started mid-utterance ("OK", "嗯", "好的") still reaches ASR.
+              segmentSuppressedRef.current = false;
+              const frames = segmentFrameCountRef.current;
+              const avgProb = frames > 0 ? segmentProbSumRef.current / frames : 0;
+              segmentFrameCountRef.current = 0;
+              segmentProbSumRef.current = 0;
+              const lockOn = voiceLockEnabledRef.current;
+              const enrolled = voicePrintEmbeddingRef.current;
+              const stillPlaying = suppressedRef.current;
+              const withinGrace = !stillPlaying
+                && Date.now() - lastSuppressedEndRef.current < ECHO_GRACE_MS;
+              if (lockOn && enrolled && (stillPlaying || withinGrace)) {
+                // Voice-lock is the authoritative echo filter: a sub-threshold
+                // similarity means echo -> drop silently (no barge-in, no
+                // transcript). Only a match counts as a real interruption.
+                // No short-clip bypass here — right around playback an
+                // unverifiable clip is far likelier echo than a real barge-in,
+                // so anything we can't positively identify as the user drops.
+                let matched = false;
+                try {
+                  const emb =
+                    audio.length >= MIN_SAMPLES_FOR_GATE ? await embedSpeaker(audio) : null;
+                  if (emb) {
+                    const sim = cosineSimilarity(emb, enrolled);
+                    matched = sim >= VOICE_LOCK_THRESHOLD;
+                    console.info('[barge-in] voice-lock echo gate', {
+                      sim: +sim.toFixed(3),
+                      threshold: VOICE_LOCK_THRESHOLD,
+                      durationSec: +(audio.length / 16000).toFixed(2),
+                      stillPlaying,
+                      withinGrace,
+                      decision: matched ? 'INTERRUPT' : 'DROP(echo)',
+                    });
+                  } else {
+                    console.info('[barge-in] voice-lock echo gate: unverifiable clip -> DROP', {
+                      durationSec: +(audio.length / 16000).toFixed(2),
+                      stillPlaying,
+                      withinGrace,
+                    });
                   }
-                  if (!matched) {
-                    return;
-                  }
-                  // Confirmed the enrolled user spoke over the AI: real barge-in.
-                  // Skip the redundant voice-lock re-check below.
-                  bargeVerified = true;
-                  onBargeInRef.current?.();
-                } else {
-                  // No enrolled voiceprint to compare against - fall back to the
-                  // duration + average-confidence heuristic. Enough audio AND
-                  // sustained high speech probability -> real interrupt;
-                  // otherwise drop as echo/throat-clear/cough.
-                  const longEnough = audio.length >= MIN_SAMPLES_FOR_BARGE_IN;
-                  const confident = avgProb >= MIN_AVG_PROB_FOR_BARGE_IN;
-                  console.info('[barge-in] suppressed-segment heuristic decision', {
-                    durationSec: +(audio.length / 16000).toFixed(2),
-                    minSec: +(MIN_SAMPLES_FOR_BARGE_IN / 16000).toFixed(2),
-                    avgProb: +avgProb.toFixed(2),
-                    minAvgProb: MIN_AVG_PROB_FOR_BARGE_IN,
-                    decision: longEnough && confident ? 'INTERRUPT' : 'DROP',
-                  });
-                  if (!longEnough || !confident) {
-                    return;
-                  }
-                  // Real interrupt: cut Claude off now so playback stops before
-                  // the transcript even finishes. The transcript still flows
-                  // through the normal voice-lock + send pipeline below.
-                  onBargeInRef.current?.();
+                } catch (e) {
+                  console.error('[barge-in] echo embedding failed -> DROP to be safe:', e);
                 }
+                if (!matched) {
+                  return;
+                }
+                // Confirmed the enrolled user spoke over the AI: real barge-in.
+                // Skip the redundant voice-lock re-check below.
+                bargeVerified = true;
+                if (stillPlaying) onBargeInRef.current?.();
+              } else if (stillPlaying || withinGrace) {
+                // No enrolled voiceprint to compare against - fall back to the
+                // duration + average-confidence heuristic. Enough audio AND
+                // sustained high speech probability -> real interrupt;
+                // otherwise drop as echo/throat-clear/cough.
+                const longEnough = audio.length >= MIN_SAMPLES_FOR_BARGE_IN;
+                const confident = avgProb >= MIN_AVG_PROB_FOR_BARGE_IN;
+                console.info('[barge-in] suppressed-segment heuristic decision', {
+                  durationSec: +(audio.length / 16000).toFixed(2),
+                  minSec: +(MIN_SAMPLES_FOR_BARGE_IN / 16000).toFixed(2),
+                  avgProb: +avgProb.toFixed(2),
+                  minAvgProb: MIN_AVG_PROB_FOR_BARGE_IN,
+                  stillPlaying,
+                  withinGrace,
+                  decision: longEnough && confident ? 'INTERRUPT' : 'DROP',
+                });
+                if (!longEnough || !confident) {
+                  return;
+                }
+                // Real interrupt: cut Claude off now so playback stops before
+                // the transcript even finishes. The transcript still flows
+                // through the normal voice-lock + send pipeline below.
+                if (stillPlaying) onBargeInRef.current?.();
               }
+              // else: playback ended well before this segment finished — a
+              // genuine late reply; clear the latch and fall through to the
+              // normal voice-lock + transcribe path.
             } else {
               // Reset stats for the next segment.
               segmentFrameCountRef.current = 0;
@@ -547,7 +618,16 @@ export function useVoiceCapture({
               if (r.ok && r.text.trim()) {
                 onTranscriptRef.current(r.text.trim());
               } else if (!r.ok) {
-                setLastError(r.error);
+                // Benign stream-churn races ("superseded by a new
+                // stream-start", "WebSocket was closed before the connection
+                // was established", idle-timeout reaps) — the next speech
+                // segment opens a fresh stream, so these don't deserve a
+                // user-facing error toast.
+                if (isBenignAsrChurnError(r.error)) {
+                  console.info('[asr] stream churn (benign):', r.error);
+                } else {
+                  setLastError(r.error);
+                }
               }
             } catch (e) {
               setLastError(String((e as Error)?.message ?? e));
@@ -588,7 +668,9 @@ export function useVoiceCapture({
             segmentFrameCountRef.current += 1;
             segmentProbSumRef.current += probs.isSpeech;
           },
-        });
+          }),
+          vadInitTimeout,
+        ]);
         if (cancelled) {
           const stream = micStreamRef.current;
           micStreamRef.current = null;

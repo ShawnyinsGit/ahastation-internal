@@ -41,6 +41,9 @@ function makeOrch(cwd = '/tmp', workspaceManager, meetingId) {
     cwd,
     workspaceManager,
     meetingId,
+    // No real Coordinator paces these tests, so wall-clock must never charge
+    // the review turn budget (same convention as coordinator-review-loop).
+    reviewStallTimeoutMs: 0,
     sessionFactory: (options) => {
       const s = new FakeSession(options);
       sessions.push(s);

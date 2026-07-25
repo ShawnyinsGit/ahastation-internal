@@ -20,6 +20,11 @@ export function useVoicePreferences() {
   // Latest form values for the onBlur commit - state inside a callback
   // would go stale between keystrokes.
   const xfyunAsrRef = useRef(xfyunAsr);
+  // Explicit-save UX: dirty tracks unsaved edits; saveState drives the
+  // 保存并重连 button label so the user gets unambiguous feedback instead
+  // of relying on blur-commit alone.
+  const [xfyunDirty, setXfyunDirty] = useState(false);
+  const [xfyunSaveState, setXfyunSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
 
   const { voices, ready: voicesReady } = useVoices();
   const isMac = typeof navigator !== 'undefined' && /Mac/i.test(navigator.platform);
@@ -95,10 +100,32 @@ export function useVoicePreferences() {
       xfyunAsrRef.current = next;
       return next;
     });
+    setXfyunDirty(true);
+    setXfyunSaveState((s) => (s === 'saved' ? 'idle' : s));
   }, []);
 
-  const handleXfyunAsrCommit = useCallback(() => {
-    void window.vibeMeet.setVoicePref({ xfyunAsr: xfyunAsrRef.current });
+  // Explicit save (button) and blur-commit share this path. On success the
+  // main process broadcasts settings:voice-pref-changed, every useAsr hook
+  // re-probes availability, and the mic capture restarts against the new
+  // credentials — no app restart needed.
+  const handleXfyunAsrCommit = useCallback(async (): Promise<boolean> => {
+    setXfyunSaveState('saving');
+    try {
+      const res = await window.vibeMeet.setVoicePref({ xfyunAsr: xfyunAsrRef.current });
+      if (res && res.ok === false) {
+        setXfyunSaveState('error');
+        return false;
+      }
+      setXfyunDirty(false);
+      setXfyunSaveState('saved');
+      window.setTimeout(() => {
+        setXfyunSaveState((s) => (s === 'saved' ? 'idle' : s));
+      }, 3000);
+      return true;
+    } catch {
+      setXfyunSaveState('error');
+      return false;
+    }
   }, []);
 
   const handleOpenGuide = useCallback(() => setGuideOpen(true), []);
@@ -130,6 +157,8 @@ export function useVoicePreferences() {
     handleHandheldModeChange,
     handleXfyunAsrInput,
     handleXfyunAsrCommit,
+    xfyunDirty,
+    xfyunSaveState,
     handleOpenGuide,
     handleGuideClose,
     handleDismissForever,

@@ -1,6 +1,7 @@
 import { useMemo } from 'react';
 import { FileEdit, FilePlus, FileText } from 'lucide-react';
 import type { ActivityEntry } from '../types';
+import { stageWindowStore } from '../lib/stage-window-store';
 
 interface ReviewPanelProps {
   activity: ActivityEntry[];
@@ -75,8 +76,7 @@ export function ReviewPanel({ activity }: ReviewPanelProps) {
                 <button
                   className="review-document-open"
                   onClick={() => {
-                    // TODO: implement document viewer - for now just log
-                    console.log('Open document:', doc.actionPath);
+                    void stageWindowStore.openFile(doc.actionPath!);
                   }}
                 >
                   查看文档
