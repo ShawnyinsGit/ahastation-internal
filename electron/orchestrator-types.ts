@@ -299,9 +299,15 @@ export interface WorkerHandle {
   /** One-shot alert latch for a parked stretch, mirroring stallNotified. */
   parkedNotified?: boolean;
   /** Consecutive identical authority hard-denies. After the streak limit the
-   *  attempt terminates as failed/blocked instead of burning the token budget. */
+   *  attempt terminates as failed/blocked instead of burning the token budget.
+   *  Keyed by reason + request fingerprint so only a worker re-issuing the
+   *  byte-identical request accumulates strikes. */
   authorityDenyStreak: number;
-  lastAuthorityDenyReason?: string;
+  lastAuthorityDenyFingerprint?: string;
+  /** One-shot task-level latch: a report-protocol failure already consumed its
+   *  automatic rework attempt. Never reset across attempts, so a task gets at
+   *  most one free "resubmit the report" attempt in its whole lifetime. */
+  reportRecoveryReworked?: boolean;
   /** Targets the user approved by hand during this attempt. Consulted only for
    *  remediable authority misses so the same directory/command/host stops
    *  asking; dropped whenever the attempt or its grant changes. */

@@ -288,6 +288,18 @@ const WORK_REPORT_RECOVERY_MESSAGE = [
   'This is the only automatic correction; another missing report will fail the task.',
 ].join(' ');
 
+const REPORT_RECOVERY_REWORK_MESSAGE = [
+  '[AhaStation protocol rework]',
+  'Your previous attempt finished its actual work but never delivered a valid WorkReport,',
+  'so it was rolled into this recovery attempt instead of being discarded.',
+  'Do not redo the implementation and do not run more tools.',
+  'Based on the session history, immediately submit the authoritative report with meeting-worker submit_work_report,',
+  'or output exactly one fenced ```work-report JSON object matching the required schema.',
+  'Exact shape: {"status":"completed","summary":"short result","files":[{"path":"relative/path","action":"created"}],"tests":[{"command":"actual command","status":"passed","summary":"actual result"}],"unresolved":[]}.',
+  'tests.status must be passed, failed, or not-run. Every unresolved item must be {"message":"description","blocking":true} rather than a string.',
+  'This is the final automatic recovery; another missing report will fail the task.',
+].join(' ');
+
 const MAX_CONCURRENT_WORKERS = 4;
 const QUEUED_UPDATE_FLUSH_MS = 1200;
 const QUEUED_UPDATE_MAX = 8;
@@ -298,6 +310,11 @@ const QUEUED_UPDATE_MAX = 8;
 // waits blind. Swept on a coarse interval; only runs while a worker is alive.
 const STALL_THRESHOLD_MS = 45_000;
 const STALL_SWEEP_MS = 15_000;
+// A tool reported in-flight (live.currentTool) legitimately produces no SDK
+// events for minutes — cargo build / full test suites routinely exceed the
+// idle threshold. Those get a much longer leash before the watchdog treats
+// silence as a hang.
+const TOOL_INFLIGHT_STALL_THRESHOLD_MS = 300_000;
 // Parked slot-holders (verifying / reviewing / coordinator-reviewing /
 // awaiting-acceptance / integration-queued / integrating / integration-conflict)
 // hold a concurrency slot but emit no SDK activity, so the running-worker sweep
@@ -1891,24 +1908,25 @@ export class WorkerScheduler {
         anyActive = true;
         if (handle.stallNotified) continue;
         const idleMs = now - handle.live.lastUpdateTs;
-        if (idleMs < STALL_THRESHOLD_MS) continue;
+        const toolInFlight = Boolean(handle.live.currentTool);
+        if (idleMs < (toolInFlight ? TOOL_INFLIGHT_STALL_THRESHOLD_MS : STALL_THRESHOLD_MS)) continue;
 
-        if (!handle.stallNudged) {
+        if (!handle.stallNudged && !toolInFlight) {
           // First stall: nudge the worker to continue rather than bothering
           // the user. The nudge resets stallNotified so the next sweep cycle
-          // re-checks; if it's still stuck we escalate.
+          // re-checks; if it's still stuck we escalate. With a tool in flight
+          // the nudge is skipped entirely — the text would only queue behind
+          // the blocked tool call and pollute the transcript.
           handle.stallNudged = true;
-          const toolHint = handle.live.currentTool
-            ? `你当前卡在 ${handle.live.currentTool}，`
-            : '';
           handle.session.sendUserText(
-            `${toolHint}已经超过 ${Math.round(idleMs / 1000)} 秒没有进展了。请继续执行你的任务，如果遇到无法解决的问题就直接换一个方案绕过去。不要停下来等确认。`,
+            `已经超过 ${Math.round(idleMs / 1000)} 秒没有进展了。请继续执行你的任务，如果遇到无法解决的问题就直接换一个方案绕过去。不要停下来等确认。`,
             'normal',
           );
           continue;
         }
 
-        // Second stall (nudge didn't help): escalate to the user.
+        // Second stall (nudge didn't help), or a tool call silent past its
+        // long leash: escalate to the user.
         handle.stallNotified = true;
         this.opts.emit({
           source: 'talker',
@@ -2231,16 +2249,22 @@ export class WorkerScheduler {
     }
     if (decisionKind === 'allow') {
       handle.authorityDenyStreak = 0;
-      handle.lastAuthorityDenyReason = undefined;
+      handle.lastAuthorityDenyFingerprint = undefined;
       handle.session?.resolvePermission(event.id, 'allow', decisionReason);
       return;
     }
     if (decisionKind === 'deny') {
       const reason = decisionReason;
-      if (handle.lastAuthorityDenyReason === reason) {
+      // Streak by request fingerprint, not by reason alone: a parallel batch
+      // of distinct reads denied for one shared reason must not add up to an
+      // instant kill before the worker has even received the first denial.
+      // Only re-issuing the byte-identical request after feedback burns a
+      // strike toward exhaustion.
+      const denyFingerprint = `${reason}\u0000${approvalFingerprint(event.toolName, event.input)}`;
+      if (handle.lastAuthorityDenyFingerprint === denyFingerprint) {
         handle.authorityDenyStreak += 1;
       } else {
-        handle.lastAuthorityDenyReason = reason;
+        handle.lastAuthorityDenyFingerprint = denyFingerprint;
         handle.authorityDenyStreak = 1;
       }
       handle.session?.resolvePermission(event.id, 'deny', reason);
@@ -2253,7 +2277,7 @@ export class WorkerScheduler {
       return;
     }
     handle.authorityDenyStreak = 0;
-    handle.lastAuthorityDenyReason = undefined;
+    handle.lastAuthorityDenyFingerprint = undefined;
     // Remember what this card is actually asking for: if the user allows it,
     // the same target should not interrupt them again this attempt.
     if (
@@ -2417,10 +2441,11 @@ export class WorkerScheduler {
     const canRequestReportCorrection = reportProtocolFailure
       && handle.status === 'running'
       && !this.hasWorkReportRecovery(handle);
-    if (canRequestReportCorrection) {
+    if (reportProtocolFailure && handle.status === 'running') {
       // Adapters emit the invalid-report failure and the provider's completed
       // turn boundary back-to-back. Claim that one paired completion before
-      // awaiting journal I/O so it cannot race ahead and fail the task.
+      // awaiting journal I/O so it cannot race ahead and fail the task while
+      // the correction — or the report-recovery rework — is still queueing.
       handle.suppressNextReportlessCompletion = true;
     }
     const event = this.createWorkerEvent(handle, signal);
@@ -2482,8 +2507,14 @@ export class WorkerScheduler {
       if (canRequestReportCorrection) {
         const recoverySent = await this.requestMissingWorkReportRecovery(handle);
         if (recoverySent) return;
-        handle.suppressNextReportlessCompletion = false;
       }
+      // A report-protocol failure after the in-turn correction still is not
+      // terminal: the work itself is done, only the report is missing. Roll
+      // the task into one automatic rework attempt (same backend session, no
+      // new tools) before giving up and discarding the completed work. The
+      // claimed completion guard stays up until this decision is final.
+      if (reportProtocolFailure && await this.beginReportRecoveryRework(handle)) return;
+      handle.suppressNextReportlessCompletion = false;
       handle.summary = signal.message;
       if (handle.status !== 'failed' && handle.status !== 'accepted') {
         handle.status = 'failed';
@@ -3341,6 +3372,47 @@ export class WorkerScheduler {
     )) ?? false;
   }
 
+  /** Second-chance recovery for report-protocol failures: the attempt's real
+   *  work succeeded, only the mandatory WorkReport is missing, so instead of
+   *  failing terminally we roll the task into one automatic rework attempt on
+   *  the same backend session whose sole job is to submit the report. Guarded
+   *  by a task-lifetime latch — if the rework attempt also fails to report,
+   *  the normal terminal path applies. Returns true when the rework was
+   *  queued and the terminal handling must be skipped. */
+  private async beginReportRecoveryRework(handle: WorkerHandle): Promise<boolean> {
+    if (handle.reportRecoveryReworked) return false;
+    if (handle.status !== 'running') return false;
+    const mailbox = this.opts.taskMailbox;
+    if (!mailbox) return false;
+    handle.reportRecoveryReworked = true;
+    try {
+      // Journal-first: the rework instruction must be durably queued for the
+      // next attempt before we mutate the handle; if it cannot be persisted
+      // we fall through to the ordinary terminal-failure path.
+      await mailbox.enqueue({
+        taskId: handle.id,
+        attempt: handle.attempt + 1,
+        sender: 'coordinator',
+        kind: 'follow-up',
+        payload: { text: REPORT_RECOVERY_REWORK_MESSAGE },
+      });
+    } catch (error) {
+      console.warn('[scheduler] report-recovery rework enqueue failed', {
+        taskId: handle.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return false;
+    }
+    if (handle.status !== 'running') {
+      // A concurrent signal terminalized the task while the rework message
+      // was being journaled; the queued message is inert for a dead attempt.
+      return false;
+    }
+    this.beginFollowUpAttempt(handle);
+    this.spawnReadyWorkers();
+    return true;
+  }
+
   private queuedInitialMessage(handle: WorkerHandle): TaskMessage | undefined {
     return this.opts.taskMailbox?.list(handle.id)
       .find((entry) => this.isDeliverableFollowUp(handle, entry));
@@ -3442,7 +3514,7 @@ export class WorkerScheduler {
       stallNotified: false,
       stallNudged: false,
       authorityDenyStreak: 0,
-      lastAuthorityDenyReason: undefined,
+      lastAuthorityDenyFingerprint: undefined,
     };
     this.workers.set(spec.id, handle);
   }

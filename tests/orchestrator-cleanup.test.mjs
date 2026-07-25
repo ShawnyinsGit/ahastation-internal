@@ -87,20 +87,26 @@ test('legacy task_done cannot release a worker; reviewed WorkReport does', async
     { worktreeRoot: join(root, '.task-worktrees') },
   );
   const { orch, sessions, events } = makeOrch(root, workspaceManager, meetingId);
+  // Start the Coordinator host before requesting reviews. Without a live
+  // Coordinator session every review briefing lands on a null host and the
+  // driver pauses the review for disconnect, racing the manual submit loop
+  // below into 'review is paused' failures on slow runners.
+  await orch.start();
+  assert.equal(sessions.length, 1, 'coordinator host session created');
   const result = await orch.installPlan([
     { id: 'a', title: 'A', prompt: 'do A', deps: [], writePaths: ['result.txt'] },
   ]);
   assert.equal(result.ok, true);
-  await waitUntil(() => sessions.length === 1, 'worker session was not created');
-  assert.equal(sessions.length, 1, 'worker session created');
-  assert.equal(sessions[0].started, true);
-  assert.equal(sessions[0].ended, false, 'session live during task');
+  await waitUntil(() => sessions.length === 2, 'worker session was not created');
+  const worker = sessions[1];
+  assert.equal(worker.started, true);
+  assert.equal(worker.ended, false, 'session live during task');
 
   // Legacy completion is only a note. It cannot bypass verification/review.
   orch.markWorkerTaskDone('a', 'finished');
-  assert.equal(sessions[0].ended, false, 'task_done cannot release the session');
+  assert.equal(worker.ended, false, 'task_done cannot release the session');
 
-  writeFileSync(join(sessions[0].cwd, 'result.txt'), 'finished with evidence\n');
+  writeFileSync(join(worker.cwd, 'result.txt'), 'finished with evidence\n');
   orch.submitWorkerReport('a', {
     status: 'completed',
     summary: 'finished with evidence',
@@ -122,7 +128,7 @@ test('legacy task_done cannot release a worker; reviewed WorkReport does', async
   // verification (freeing the concurrency slot during review/acceptance), so by
   // the time Coordinator review opens the session is already ended. Legacy
   // task_done above must NOT have ended it; the reviewed WorkReport did.
-  assert.equal(sessions[0].ended, true, 'a reviewed WorkReport releases the Backend session for verification/review');
+  assert.equal(worker.ended, true, 'a reviewed WorkReport releases the Backend session for verification/review');
   for (;;) {
     if (orch.inspectDeliveryReview(review.id)?.status === 'paused') {
       await orch.coordinatorReviewDriver.resume(review.id);
@@ -145,7 +151,7 @@ test('legacy task_done cannot release a worker; reviewed WorkReport does', async
     )),
     'reviewed delivery did not become durably accepted',
   );
-  assert.equal(sessions[0].ended, true, 'accepted delivery releases the session');
+  assert.equal(worker.ended, true, 'accepted delivery releases the session');
   await orch.end();
 });
 

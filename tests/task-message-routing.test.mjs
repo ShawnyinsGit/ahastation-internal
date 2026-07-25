@@ -185,16 +185,36 @@ test('a missing WorkReport gets one durable protocol correction before fail-clos
     signal: { kind: 'ended', reason: 'completed' },
   });
   await waitFor(
-    () => scheduler.snapshot()[0].status === 'failed',
-    'second missing WorkReport did not fail closed',
+    () => sessions.length === 2,
+    'second missing WorkReport did not fork the report-recovery rework attempt',
   );
+  assert.equal(scheduler.snapshot()[0].status, 'running', 'rework keeps the task alive');
   assert.equal(
     mailbox.list('task-a').filter((entry) => (
       entry.kind === 'follow-up'
-      && entry.payload?.text?.includes('protocol correction')
+      && entry.payload?.text?.includes('protocol rework')
     )).length,
     1,
   );
+
+  // The rework attempt gets its own single correction, then fails closed.
+  sessions[1].opts.emit({
+    kind: 'worker-signal',
+    signal: { kind: 'ended', reason: 'completed' },
+  });
+  await waitFor(
+    () => sessions[1].inputs.some((input) => input.includes('protocol correction')),
+    'rework attempt did not receive its own protocol correction',
+  );
+  sessions[1].opts.emit({
+    kind: 'worker-signal',
+    signal: { kind: 'ended', reason: 'completed' },
+  });
+  await waitFor(
+    () => scheduler.snapshot()[0].status === 'failed',
+    'missing WorkReport after the rework attempt did not fail closed',
+  );
+  assert.equal(sessions.length, 2, 'the report-recovery rework happens at most once per task');
 });
 
 test('an invalid WorkReport gets the same single correction without racing its turn end', async (t) => {
@@ -245,16 +265,46 @@ test('an invalid WorkReport gets the same single correction without racing its t
   });
 
   await waitFor(
+    () => sessions.length === 2,
+    'second invalid WorkReport did not fork the report-recovery rework attempt',
+  );
+  assert.equal(scheduler.snapshot()[0].status, 'running', 'rework keeps the task alive');
+
+  sessions[1].opts.emit({
+    kind: 'worker-signal',
+    signal: {
+      kind: 'failed',
+      code: 'invalid-work-report',
+      message: 'still invalid in the rework attempt',
+      retryable: true,
+    },
+  });
+  sessions[1].opts.emit({
+    kind: 'worker-signal',
+    signal: { kind: 'ended', reason: 'completed' },
+  });
+  await waitFor(
+    () => sessions[1].inputs.some((input) => input.includes('protocol correction')),
+    'rework attempt did not receive its own protocol correction',
+  );
+  sessions[1].opts.emit({
+    kind: 'worker-signal',
+    signal: {
+      kind: 'failed',
+      code: 'invalid-work-report',
+      message: 'invalid after every recovery lever',
+      retryable: true,
+    },
+  });
+  sessions[1].opts.emit({
+    kind: 'worker-signal',
+    signal: { kind: 'ended', reason: 'completed' },
+  });
+  await waitFor(
     () => scheduler.snapshot()[0].status === 'failed',
-    'second invalid WorkReport did not fail closed',
+    'invalid WorkReport after the rework attempt did not fail closed',
   );
-  assert.equal(
-    mailbox.list('task-a').filter((entry) => (
-      entry.kind === 'follow-up'
-      && entry.payload?.text?.includes('protocol correction')
-    )).length,
-    1,
-  );
+  assert.equal(sessions.length, 2, 'the report-recovery rework happens at most once per task');
 });
 
 test('steering is durable before interrupt and never terminalizes the task turn', async (t) => {

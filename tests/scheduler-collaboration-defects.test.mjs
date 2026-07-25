@@ -21,6 +21,7 @@ const report = {
 };
 
 const PROTOCOL_CORRECTION_PREFIX = '[AhaStation protocol correction]';
+const PROTOCOL_REWORK_PREFIX = '[AhaStation protocol rework]';
 
 async function waitFor(predicate, message, timeoutMs = 2_000) {
   const deadline = Date.now() + timeoutMs;
@@ -549,4 +550,100 @@ test('snapshot and restoreTasks round-trip the worker event sequence', async () 
   restored.restoreTasks(snap);
   assert.equal(restored.workers.get('w1').eventSeq, 3, 'restore must resume the persisted eventSeq');
   restored.endAll();
+});
+
+// Trajectory defect #5: a report-protocol failure after the in-turn correction
+// rolled the task terminal and discarded the finished work. It must instead
+// fork exactly one automatic rework attempt whose only job is the report.
+test('a second report-protocol failure forks one rework attempt, not a terminal fail', async () => {
+  const mailbox = inMemoryMailbox();
+  const { scheduler, sessions } = makeScheduler({ taskMailbox: mailbox });
+  assert.deepEqual(scheduler.installPlan([
+    { id: 'w1', title: 'Report rework', prompt: 'do the work', deps: [] },
+  ]), { ok: true });
+  await waitFor(() => sessions.length === 1, 'worker was not spawned');
+
+  const failSignal = {
+    kind: 'failed', code: 'missing-work-report', message: 'no report', retryable: true,
+  };
+  // First failure: the in-turn correction fires inside attempt 1.
+  sessions[0].opts.emit({ kind: 'worker-signal', signal: failSignal });
+  await waitFor(
+    () => sessions[0].inputs.some((text) => text.includes(PROTOCOL_CORRECTION_PREFIX)),
+    'in-turn protocol correction was not sent',
+  );
+  assert.equal(scheduler.snapshot().find((task) => task.id === 'w1')?.status, 'running');
+
+  // Second failure: instead of terminalizing, the task forks a rework attempt.
+  sessions[0].opts.emit({ kind: 'worker-signal', signal: failSignal });
+  await waitFor(() => sessions.length === 2, 'rework attempt was not spawned');
+  const afterRework = scheduler.snapshot().find((task) => task.id === 'w1');
+  assert.equal(afterRework.status, 'running', 'rework attempt must be live');
+  assert.equal(afterRework.attempt, 2, 'rework must run on a fresh attempt');
+  assert.ok(
+    mailbox.list('w1').some((m) => (
+      m.attempt === 2 && m.kind === 'follow-up' && m.payload.text.startsWith(PROTOCOL_REWORK_PREFIX)
+    )),
+    'rework instruction must be durably queued for attempt 2',
+  );
+  await waitFor(() => sessions[1].inputs.length >= 1, 'attempt-2 initial prompt was not sent');
+  assert.ok(
+    sessions[1].inputs[0].includes(PROTOCOL_REWORK_PREFIX),
+    'rework instruction must ride the attempt-2 initial prompt',
+  );
+
+  // The rework attempt gets its own in-turn correction, but a second
+  // protocol failure there is terminal: the task-lifetime latch permits
+  // exactly one automatic rework.
+  sessions[1].opts.emit({ kind: 'worker-signal', signal: failSignal });
+  await waitFor(
+    () => sessions[1].inputs.some((text) => text.includes(PROTOCOL_CORRECTION_PREFIX)),
+    'attempt-2 in-turn correction was not sent',
+  );
+  sessions[1].opts.emit({ kind: 'worker-signal', signal: failSignal });
+  await waitFor(
+    () => scheduler.snapshot().find((task) => task.id === 'w1')?.status === 'failed',
+    'post-rework protocol failure did not terminalize',
+  );
+  assert.equal(sessions.length, 2, 'a second automatic rework must never spawn');
+  assert.equal(scheduler.snapshot().find((task) => task.id === 'w1')?.attempt, 2);
+  scheduler.endAll();
+});
+
+// Trajectory defect #4: long compiles tripped the 45s watchdog while a tool
+// call was legitimately in flight. With a tool running the leash is 5 minutes
+// and the nudge phase is skipped entirely.
+test('an in-flight tool suspends the stall watchdog until the long leash', async () => {
+  const emitted = [];
+  const { scheduler, sessions } = makeScheduler({ emit(event) { emitted.push(event); } });
+  assert.deepEqual(scheduler.installPlan([
+    { id: 'w1', title: 'Long build', prompt: 'do the work', deps: [] },
+  ]), { ok: true });
+  await waitFor(() => sessions.length === 1, 'worker was not spawned');
+  const handle = scheduler.workers.get('w1');
+  const stalledCount = () => emitted.filter((entry) => entry.event?.kind === 'worker-stalled').length;
+  const inputsBefore = sessions[0].inputs.length;
+
+  // 2 minutes silent with a tool in flight: neither nudge nor escalation.
+  handle.live.currentTool = 'Bash';
+  handle.live.lastUpdateTs = Date.now() - 120_000;
+  scheduler.sweepStalls();
+  assert.equal(stalledCount(), 0, 'in-flight tool under the long leash must not stall');
+  assert.equal(sessions[0].inputs.length, inputsBefore, 'no nudge may queue behind a running tool');
+
+  // Past the 5-minute leash: escalate directly, still without a nudge.
+  handle.live.lastUpdateTs = Date.now() - 301_000;
+  scheduler.sweepStalls();
+  assert.equal(stalledCount(), 1, 'tool silent past the long leash must escalate');
+  assert.equal(sessions[0].inputs.length, inputsBefore, 'escalation must skip the useless nudge');
+
+  // Without a tool in flight the original two-phase 45s path still applies.
+  handle.stallNotified = false;
+  handle.stallNudged = false;
+  handle.live.currentTool = null;
+  handle.live.lastUpdateTs = Date.now() - 60_000;
+  scheduler.sweepStalls();
+  assert.equal(sessions[0].inputs.length, inputsBefore + 1, 'tool-less stall must nudge first');
+  assert.equal(stalledCount(), 1, 'the nudge phase must not escalate yet');
+  scheduler.endAll();
 });
