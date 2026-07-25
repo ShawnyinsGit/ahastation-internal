@@ -22,6 +22,13 @@ import { toast } from './lib/toast';
 import { Lobby } from './components/Lobby';
 import { TabStrip } from './components/TabStrip';
 import { MeetingHeader, type MeetingView } from './components/MeetingHeader';
+import { AppTopBar } from './components/AppTopBar';
+import { StatusBar } from './components/StatusBar';
+import { BroadcastStrip } from './components/BroadcastStrip';
+import { MeetingControls } from './components/MeetingControls';
+import { AgentDetailPanel } from './components/AgentDetailPanel';
+import { OnboardingModal } from './components/OnboardingModal';
+import { ExplorePage } from './components/ExplorePage';
 import { TasksView } from './components/TasksView';
 import { ParticipantTile } from './components/ParticipantTile';
 import { ScreenStage } from './components/ScreenStage';
@@ -31,7 +38,7 @@ import { SideDrawer } from './components/SideDrawer';
 import { SettingsMenu } from './components/SettingsMenu';
 import { VoiceGuideModal } from './components/VoiceGuideModal';
 import { ParticipantPanel } from './components/ParticipantPanel';
-import { PermissionCard } from './components/PermissionCard';
+import { ApprovalCard } from './components/ApprovalCard';
 import { EditorOverlay } from './components/EditorOverlay';
 import { Modal } from './components/Modal';
 import { ToastViewport } from './components/ToastViewport';
@@ -66,6 +73,13 @@ export function App() {
   const [multiAgent, setMultiAgent] = useState(false);
   const [dispatchMode, setDispatchMode] = useState<DispatchMode>('direct');
   const [view, setView] = useState<MeetingView>('meeting');
+  // P3 agent 详情面板（右侧滑出）：'user' 忽略，hostId/workerId 打开详情
+  const [agentPanelId, setAgentPanelId] = useState<string | null>(null);
+  // P6 探索页 / P8 首次启动引导
+  const [exploreOpen, setExploreOpen] = useState(false);
+  const [onboarded, setOnboarded] = useState(
+    () => window.localStorage.getItem('ahastudio.onboarded') === '1',
+  );
   /** Bumped every time the task board asks the meeting view to open a task, so
    *  re-clicking the same card after closing the inspector still reopens it. */
   const [taskFocus, setTaskFocus] = useState<{ taskId: string; seq: number } | null>(null);
@@ -90,6 +104,32 @@ export function App() {
       + crossProjectTasks.pendingPlans.length,
     [crossProjectTasks],
   );
+
+  const showOnboarding = !onboarded && !visualFixture;
+  const handleOnboardingFinish = useCallback(() => {
+    window.localStorage.setItem('ahastudio.onboarded', '1');
+    setOnboarded(true);
+  }, []);
+
+  // P3 agent 详情面板数据解析：host tile → 该组 talker；worker tile → worker 本体
+  const agentPanelData = useMemo(() => {
+    if (!agentPanelId) return null;
+    const hg = workers.hostGroups.get(agentPanelId) ?? null;
+    const directWorker = workers.workerList.find((w) => w.id === agentPanelId) ?? null;
+    const talker = hg
+      ? workers.workerList.find((w) => w.role === 'talker' && (w.hostId || 'default') === hg.id) ?? null
+      : null;
+    return { worker: directWorker ?? talker, hostGroup: hg };
+  }, [agentPanelId, workers.hostGroups, workers.workerList]);
+
+  // 状态栏活跃任务计数（进行中 + 待批准 + 待验收）
+  const activeTaskCount = useMemo(() => {
+    const nodes = workers.plan?.nodes ?? [];
+    const active = nodes.filter(
+      (node) => !['accepted', 'done', 'failed', 'interrupted'].includes(node.status),
+    ).length;
+    return active + (state.pendingPermission ? 1 : 0) + (workers.pendingPlan ? 1 : 0);
+  }, [workers.plan, state.pendingPermission, workers.pendingPlan]);
 
   // The embedded browser is a native WebContentsView painted above the
   // renderer, so no amount of CSS can tuck it behind the task board. Drop it
@@ -151,7 +191,7 @@ export function App() {
     return map;
   }, [backends]);
 
-  // SideDrawer renders a single legacy PermissionCard for the first pending
+  // SideDrawer renders the unified ApprovalCard for the first pending
   // permission across all workers (state.pendingPermission). Thread the
   // matching worker's resolving/error flags so that card stays in lock-step
   // with WorkerCard and TaskInspector for the same permission id.
@@ -164,6 +204,22 @@ export function App() {
       error: owner?.permissionError ?? null,
     };
   }, [state.pendingPermission, workers.workerList]);
+
+  // 批准卡片四要素上下文（04 BR-A2：项目/任务/客户端/动作缺一不渲染）
+  const approvalMeta = useMemo(() => {
+    const pending = state.pendingPermission;
+    const ownerW = pending
+      ? workers.workerList.find((w) => w.pendingPermission?.id === pending.id)
+      : undefined;
+    const project = state.cwd
+      ? (state.cwd.split('/').filter(Boolean).pop() ?? state.cwd)
+      : '当前项目';
+    return {
+      owner: ownerW?.title ?? 'Coordinator',
+      backendId: ownerW?.backendId,
+      project,
+    };
+  }, [state.pendingPermission, workers.workerList, state.cwd]);
 
   const speakingRef = useRef(false);
   const sendWithModeRef = useRef<(text: string) => void>(sendText);
@@ -564,6 +620,9 @@ export function App() {
     return (
       <>
         <Lobby lastError={state.lastError} />
+        {showOnboarding && (
+          <OnboardingModal backends={backends} projectCount={0} onFinish={handleOnboardingFinish} />
+        )}
         <ToastViewport />
       </>
     );
@@ -577,21 +636,39 @@ export function App() {
       onDragLeave={dragDrop.onDragLeave}
       onDrop={dragDrop.onDrop}
     >
-      <TabStrip tabs={tabs} />
-      <MeetingHeader
-        cwd={state.cwd}
-        elapsed={elapsed}
-        autoApproveScope={autoApproveScope}
-        onChangeAutoApproveScope={setAutoApproveScope}
-        multiAgent={multiAgent}
-        onToggleMultiAgent={() => setMultiAgent((v) => !v)}
-        view={view}
-        onChangeView={setView}
-        attentionCount={attentionCount}
-        settingsSlot={
-          <SettingsMenu badge={voiceLock.enrollmentActive} />
-        }
-      />
+      {/* 单会议收敛（一台设备一个会议，调度所有任务）：掌机模式或确有
+          多会话并存时才显示 TabStrip；默认不暴露多会议 Tab。 */}
+      {(handheld || tabs.length > 1) && <TabStrip tabs={tabs} />}
+      {handheld ? (
+        <MeetingHeader
+          cwd={state.cwd}
+          elapsed={elapsed}
+          autoApproveScope={autoApproveScope}
+          onChangeAutoApproveScope={setAutoApproveScope}
+          multiAgent={multiAgent}
+          onToggleMultiAgent={() => setMultiAgent((v) => !v)}
+          view={view}
+          onChangeView={setView}
+          attentionCount={attentionCount}
+          settingsSlot={
+            <SettingsMenu badge={voiceLock.enrollmentActive} />
+          }
+        />
+      ) : (
+        <AppTopBar
+          viewMode={view}
+          onChangeViewMode={setView}
+          attendCount={attentionCount}
+          onOpenExplore={() => setExploreOpen(true)}
+          settingsSlot={
+            <SettingsMenu badge={voiceLock.enrollmentActive} />
+          }
+        />
+      )}
+
+      {!handheld && view === 'meeting' && (
+        <BroadcastStrip briefings={workers.coordinatorBriefings} onInterrupt={onBargeIn} />
+      )}
 
       <main className="mtg-main">
         <section className="stage-wrap">
@@ -624,6 +701,7 @@ export function App() {
                   setOpenParticipantsTab(true);
                 }}
                 onOpenEditor={handleOpenEditor}
+                onSelectParticipant={(id) => { if (id !== 'user') setAgentPanelId(id); }}
                 selfTile={
                   <ParticipantTile
                     name="You"
@@ -682,6 +760,7 @@ export function App() {
           pending={state.pendingPermission}
           pendingResolving={drawerPermissionState.resolving}
           pendingError={drawerPermissionState.error}
+          approvalMeta={approvalMeta}
           onResolve={resolvePermission}
           onSend={sendWithMode}
           onSendAttachments={sendAttachmentsWithMode}
@@ -710,6 +789,17 @@ export function App() {
           }}
           forceParticipantsTab={openParticipantsTab}
         />
+
+        {!handheld && view === 'meeting' && agentPanelData && (
+          <AgentDetailPanel
+            worker={agentPanelData.worker}
+            hostGroup={agentPanelData.hostGroup}
+            backends={backends}
+            cwd={state.cwd}
+            onClose={() => setAgentPanelId(null)}
+            onOpenEditor={handleOpenEditor}
+          />
+        )}
       </main>
 
       {/* The board is a sibling rather than a replacement: unmounting
@@ -747,7 +837,25 @@ export function App() {
         handheld={handheld}
         permissionCount={permissionCount}
         onOpenPermission={() => setPermModalOpen(true)}
+        controlsSlot={!handheld ? (
+          <MeetingControls
+            autoApproveScope={autoApproveScope}
+            onChangeAutoApproveScope={setAutoApproveScope}
+            multiAgent={multiAgent}
+            onToggleMultiAgent={() => setMultiAgent((v) => !v)}
+          />
+        ) : undefined}
       />
+
+      {!handheld && (
+        <StatusBar
+          clientCount={workers.hostGroups.size}
+          activeTaskCount={activeTaskCount}
+          cwd={state.cwd}
+          elapsed={elapsed}
+          viewLabel={view === 'meeting' ? '会议模式' : '任务模式'}
+        />
+      )}
 
       {handheld && permModalOpen && state.pendingPermission && (
         <Modal
@@ -757,8 +865,11 @@ export function App() {
           ariaLabel="权限审批"
           onClose={() => setPermModalOpen(false)}
         >
-          <PermissionCard
+          <ApprovalCard
             pending={state.pendingPermission}
+            owner={approvalMeta.owner}
+            backendId={approvalMeta.backendId}
+            project={approvalMeta.project}
             onDecide={async (id, decision) => {
               const res = await resolvePermission(id, decision);
               if (res && res.ok) setPermModalOpen(false);
@@ -805,6 +916,11 @@ export function App() {
         onReject={() => workers.decidePendingPlan(false)}
         onSubmit={(tasks) => workers.decidePendingPlan(true, tasks)}
       />
+
+      {exploreOpen && <ExplorePage onClose={() => setExploreOpen(false)} />}
+      {showOnboarding && (
+        <OnboardingModal backends={backends} projectCount={tabs.length} onFinish={handleOnboardingFinish} />
+      )}
 
       {(state.lastError || micError || updateInfo) && (
         <div className="banner-stack">

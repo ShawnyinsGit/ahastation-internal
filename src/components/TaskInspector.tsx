@@ -25,7 +25,7 @@ import {
 } from '../lib/dependency-gate';
 import type { RendererTaskSnapshot } from '../types';
 import { BackendAvatar } from './BackendAvatar';
-import { PermissionCard } from './PermissionCard';
+import { ApprovalCard } from './ApprovalCard';
 import { TaskMailboxPanel } from './TaskMailboxPanel';
 import { TaskProfilePanel } from './TaskProfilePanel';
 import { TaskReviewPanel } from './TaskReviewPanel';
@@ -554,8 +554,11 @@ export function TaskInspector({
         {snapshot && activeTab === 'permissions' && (
           <div className="task-permission-stack">
             {pendingPermission && (
-              <PermissionCard
+              <ApprovalCard
                 pending={pendingPermission}
+                owner={worker?.title ?? 'Worker'}
+                backendId={worker?.backendId}
+                project="当前项目"
                 onDecide={onResolvePermission}
                 resolving={worker?.resolvingPermissionId === pendingPermission.id}
                 error={worker?.permissionError ?? null}

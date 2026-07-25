@@ -15,7 +15,7 @@ import {
   DISPATCH_MODE_LABELS,
   type DispatchMode,
 } from '../lib/dispatch-mode';
-import { PermissionCard } from './PermissionCard';
+import { ApprovalCard } from './ApprovalCard';
 import { FileTree } from './FileTree';
 import { Modal } from './Modal';
 import { toast } from '../lib/toast';
@@ -31,6 +31,8 @@ interface SideDrawerProps {
   pendingResolving?: boolean;
   /** Permission IPC error for the legacy single permission card. */
   pendingError?: string | null;
+  /** 批准卡片四要素上下文（04 BR-A2：项目/任务/客户端）。 */
+  approvalMeta?: { owner: string; backendId?: string; project: string };
   onResolve: (id: string, decision: 'allow' | 'deny') => Promise<{ ok: true } | { ok: false; error: string }> | void;
   onSend: (text: string) => void;
   onSendAttachments?: (
@@ -163,6 +165,7 @@ export function SideDrawer({
   pending,
   pendingResolving,
   pendingError,
+  approvalMeta,
   onResolve,
   onSend,
   onSendAttachments,
@@ -620,7 +623,17 @@ export function SideDrawer({
                 </div>
               );
             })}
-            {pending && <PermissionCard pending={pending} onDecide={onResolve} resolving={pendingResolving} error={pendingError} />}
+            {pending && (
+              <ApprovalCard
+                pending={pending}
+                owner={approvalMeta?.owner ?? 'Coordinator'}
+                backendId={approvalMeta?.backendId}
+                project={approvalMeta?.project ?? '当前项目'}
+                onDecide={onResolve}
+                resolving={pendingResolving}
+                error={pendingError}
+              />
+            )}
             <div ref={endRef} />
           </div>
           <div className="drawer-composer">

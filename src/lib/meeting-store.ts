@@ -2495,7 +2495,7 @@ class MeetingStore {
     if (!slot) return { ok: false, error: 'No active session' };
 
     // Mark the permission as resolving so every permission card (WorkerCard
-    // inline, PermissionCard in drawer/modal/inspector) disables its buttons
+    // inline, ApprovalCard in drawer/modal/inspector) disables its buttons
     // for the same id atomically. Clear any stale error from a prior attempt.
     this.mutateSlot(slot.id, (s) => {
       const workers = new Map(s.workers);

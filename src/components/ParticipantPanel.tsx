@@ -69,16 +69,19 @@ export const ParticipantPanel = memo(function ParticipantPanel({
     return map;
   }, [workers]);
 
-  // Sort host groups: 'default' first, then alphabetically
+  // Sort host groups: coordinator（Host Agent 助理）固定首位（04 §9.3），
+  // 其余 default 优先再按字母序。
   const sortedHostGroups = useMemo(() => {
     const entries = Array.from(hostGroups.entries());
     entries.sort(([a], [b]) => {
+      if (a === coordinatorHostId) return -1;
+      if (b === coordinatorHostId) return 1;
       if (a === 'default') return -1;
       if (b === 'default') return 1;
       return a.localeCompare(b);
     });
     return entries;
-  }, [hostGroups]);
+  }, [hostGroups, coordinatorHostId]);
   const taskWorkers = useMemo(
     () => workers.filter((worker) => worker.role === 'worker'),
     [workers],
@@ -204,7 +207,7 @@ export const ParticipantPanel = memo(function ParticipantPanel({
           );
           if (talker) {
             return (
-              <div key={hostId} className="tiles-gallery-tile-wrap">
+              <div key={hostId} className={`tiles-gallery-tile-wrap${isCoordinator ? ' tiles-gallery-tile-wrap-coordinator' : ''}`}>
                 <WorkerCard
                   worker={talker}
                   depTitles={new Map()}
