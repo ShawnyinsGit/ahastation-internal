@@ -31,6 +31,7 @@ interface OnboardingProps {
 const CLIENT_LABEL: Record<ObservedClientKind, string> = {
   'claude-code': 'Claude Code',
   codex: 'Codex',
+  kimi: 'Kimi',
 };
 
 const FIRST_LINE_MS = 400;

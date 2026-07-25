@@ -1384,6 +1384,7 @@ html.popout-view #root {
 
 .tasks-client-chip.is-claude-code { background: var(--aha-accent-soft); color: var(--aha-accent); }
 .tasks-client-chip.is-codex { background: var(--aha-run-soft); color: var(--aha-run); }
+.tasks-client-chip.is-kimi { background: var(--aha-info-soft); color: var(--aha-info); }
 .tasks-observed-badge { background: var(--aha-info-soft); color: var(--aha-info); }
 
 .tasks-card-actions { margin-top: 2px; }

@@ -90,6 +90,7 @@ const OBSERVED_STATE_LABEL: Record<ObservedState, string> = {
 const OBSERVED_CLIENT_LABEL: Record<ObservedClientKind, string> = {
   'claude-code': 'Claude',
   codex: 'Codex',
+  kimi: 'Kimi',
 };
 
 /** A done session leaves the board once it falls outside this window — the

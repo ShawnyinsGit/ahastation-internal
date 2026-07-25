@@ -39,6 +39,11 @@ import {
   loadCodexTitles,
   parseCodexRollout,
 } from './statefiles/codex-sessions.js';
+import {
+  listKimiSessions,
+  parseKimiSession,
+  type KimiSessionRef,
+} from './statefiles/kimi-sessions.js';
 import type {
   ClientKind,
   ObservedFileSignal,
@@ -86,6 +91,7 @@ export class ObserveService {
 
   private readonly claudeMarkers = new Map<string, FileMarker>();
   private readonly codexMarkers = new Map<string, FileMarker>();
+  private readonly kimiMarkers = new Map<string, FileMarker>();
   private readonly realpathCache = new Map<string, string>();
   private indexTitles = new Map<string, string>();
   private titleSources = new Map<string, 'global-state' | 'session-index'>();
@@ -173,15 +179,17 @@ export class ObserveService {
       // Per-observer scans, independently fault-isolated.
       const claudeSignals = await this.scanObserver('claude-code');
       const codexSignals = await this.scanObserver('codex');
-      const signals = [...claudeSignals, ...codexSignals];
+      const kimiSignals = await this.scanObserver('kimi');
+      const signals = [...claudeSignals, ...codexSignals, ...kimiSignals];
 
       // Client processes (exclusion list already drops mcp-server & co).
       const claudePids = findClientPids(snapshot, ['claude']);
       const codexPids = findClientPids(snapshot, ['codex']);
+      const kimiPids = findClientPids(snapshot, ['kimi-code']);
       const mcpPids = detectMcpServerPids(snapshot);
 
       // One batched lsof for every pid we care about.
-      const lsofPids = Array.from(new Set([...claudePids, ...codexPids, ...mcpPids]))
+      const lsofPids = Array.from(new Set([...claudePids, ...codexPids, ...kimiPids, ...mcpPids]))
         .filter((pid) => !selfExclusion.pids.has(pid));
       const lsofByPid = await lsofOpenFiles(lsofPids, this.execImpl);
       const suppressedPaths = mcpHeldRolloutPaths(lsofByPid, mcpPids);
@@ -193,6 +201,7 @@ export class ObserveService {
       const clients: Array<{ kind: ClientKind; pids: number[] }> = [
         { kind: 'claude-code', pids: claudePids },
         { kind: 'codex', pids: codexPids },
+        { kind: 'kimi', pids: kimiPids },
       ];
       for (const client of clients) {
         const clientSignals = signals.filter((signal) => signal.clientKind === client.kind);
@@ -263,8 +272,14 @@ export class ObserveService {
     try {
       const refs = kind === 'claude-code'
         ? await listClaudeTranscripts(this.homeDir)
-        : await listCodexRollouts(this.homeDir);
-      const markers = kind === 'claude-code' ? this.claudeMarkers : this.codexMarkers;
+        : kind === 'codex'
+          ? await listCodexRollouts(this.homeDir)
+          : await listKimiSessions(this.homeDir);
+      const markers = kind === 'claude-code'
+        ? this.claudeMarkers
+        : kind === 'codex'
+          ? this.codexMarkers
+          : this.kimiMarkers;
       const signals: ObservedFileSignal[] = [];
       for (const ref of refs) {
         const cached = markers.get(ref.filePath);
@@ -289,9 +304,9 @@ export class ObserveService {
   }
 
   private async parseRef(kind: ClientKind, ref: StateFileRef): Promise<ObservedFileSignal | null> {
-    return kind === 'claude-code'
-      ? parseClaudeTranscript(ref)
-      : parseCodexRollout(ref, this.indexTitles, this.titleSources);
+    if (kind === 'claude-code') return parseClaudeTranscript(ref);
+    if (kind === 'codex') return parseCodexRollout(ref, this.indexTitles, this.titleSources);
+    return parseKimiSession(ref as KimiSessionRef);
   }
 
   /** Re-attach the latest Codex title to a cached signal. */

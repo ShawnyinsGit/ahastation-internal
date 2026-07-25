@@ -16,7 +16,7 @@ import type {
 import type { Association } from './mapping.js';
 import { associationKey } from './mapping.js';
 import { maxDescendantCpu, type ProcessSnapshot } from './process/darwin.js';
-import { inferClaudeState, inferCodexState, type PidState } from './state-machine.js';
+import { inferClaudeState, inferCodexState, inferKimiState, type PidState } from './state-machine.js';
 import { sanitizeTitle, sha1 } from './util.js';
 
 export interface CorrelateInput {
@@ -56,7 +56,7 @@ function looksLikePath(text: string): boolean {
 
 function pickTitle(signal: ObservedFileSignal, projectName: string): TitlePick {
   const candidates: Array<{ text?: string; source: ObservedTitleSource }> =
-    signal.clientKind === 'codex'
+    signal.clientKind === 'codex' || signal.clientKind === 'kimi'
       ? [{ text: signal.title, source: signal.titleSource ?? 'session-index' }]
       : signal.tailSignals.kind === 'claude'
         ? [
@@ -75,6 +75,7 @@ function pickTitle(signal: ObservedFileSignal, projectName: string): TitlePick {
 
 function messageCount(signal: ObservedFileSignal): number {
   if (signal.tailSignals.kind === 'claude') return signal.tailSignals.messagesSeen;
+  if (signal.tailSignals.kind === 'kimi') return signal.tailSignals.messagesSeen;
   return signal.tailSignals.turnCount + (signal.tailSignals.generating ? 1 : 0);
 }
 
@@ -107,14 +108,16 @@ function correlateOne(input: CorrelateInput, signal: ObservedFileSignal): Observ
     const inferred =
       signal.tailSignals.kind === 'claude'
         ? inferClaudeState({ tail: signal.tailSignals, descendantCpuMax, pidState })
-        : inferCodexState({
-            tail: signal.tailSignals,
-            descendantCpuMax,
-            pidState,
-            mtimeMs: signal.mtimeMs,
-            now: input.now,
-          });
-    if (!inferred) return null; // Claude: dead pid → session disappears
+        : signal.tailSignals.kind === 'kimi'
+          ? inferKimiState({ tail: signal.tailSignals, descendantCpuMax, pidState })
+          : inferCodexState({
+              tail: signal.tailSignals,
+              descendantCpuMax,
+              pidState,
+              mtimeMs: signal.mtimeMs,
+              now: input.now,
+            });
+    if (!inferred) return null; // Claude/Kimi: dead pid → session disappears
     evidence.push(`state:${inferred.state}/${inferred.activity} (inferred)`);
 
     const projectName = projectNameOf(signal.cwd);
