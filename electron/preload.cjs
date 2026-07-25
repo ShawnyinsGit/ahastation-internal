@@ -276,6 +276,17 @@ const api = {
     ipcRenderer.on('update-available', listener);
     return () => ipcRenderer.removeListener('update-available', listener);
   },
+  app: {
+    // Minimize/close → AhaBar prompt: main intercepts the window action and
+    // asks; the renderer answers with minimizeChoice. Main has a 60s
+    // fail-safe that replays the original action if no answer arrives.
+    onMinimizePrompt: (cb) => {
+      const listener = (_, payload) => cb(payload);
+      ipcRenderer.on('app:minimize-prompt', listener);
+      return () => ipcRenderer.removeListener('app:minimize-prompt', listener);
+    },
+    minimizeChoice: (choice) => ipcRenderer.invoke('app:minimize-choice', choice),
+  },
   companion: {
     // Main-window side: toggle the floating companion window + relay the
     // TTS-active flag (sound ducking). The companion window itself uses the
@@ -312,6 +323,16 @@ const api = {
     const listener = (_, e) => cb(e);
     ipcRenderer.on('session:event', listener);
     return () => ipcRenderer.removeListener('session:event', listener);
+  },
+  // Observation layer (S0): read-only snapshots of externally-launched CLI
+  // sessions. Full snapshot per scan tick — no incremental diff.
+  observe: {
+    getSnapshot: () => ipcRenderer.invoke('observe:getSnapshot'),
+    onEvent: (cb) => {
+      const listener = (_, snapshot) => cb(snapshot);
+      ipcRenderer.on('observe:event', listener);
+      return () => ipcRenderer.removeListener('observe:event', listener);
+    },
   },
 };
 

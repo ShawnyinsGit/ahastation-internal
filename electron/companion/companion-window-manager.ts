@@ -30,6 +30,14 @@ export function getCompanionViewMode(): CompanionViewMode {
   return currentView;
 }
 
+/** Is the floating window alive — optionally narrowed to one view mode. The
+ *  minimize→AhaBar prompt keys off this to avoid offering a bar that's
+ *  already on screen. */
+export function isCompanionWindowOpen(view?: CompanionViewMode): boolean {
+  if (!companionWin || companionWin.isDestroyed()) return false;
+  return view ? currentView === view : true;
+}
+
 export function sendToCompanion(channel: string, payload: unknown): boolean {
   if (!companionWin || companionWin.isDestroyed()) return false;
   companionWin.webContents.send(channel, payload);

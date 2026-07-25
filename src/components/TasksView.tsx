@@ -2,8 +2,11 @@ import { useMemo, useState } from 'react';
 import {
   AlertTriangle,
   CheckCircle2,
+  ChevronDown,
+  ChevronRight,
   CircleDashed,
   Clock3,
+  Eye,
   GitMerge,
   LoaderCircle,
   RotateCcw,
@@ -12,6 +15,12 @@ import {
 import type { AggregatedTask, CrossProjectTasks } from '../lib/meeting-store';
 import { dependencyGateShortLabel } from '../lib/dependency-gate';
 import { TASK_COLUMNS, type TaskColumnId } from '../lib/task-columns';
+import { useObservedTasks } from '../hooks/useObservedTasks';
+import type {
+  ObservedClientKind,
+  ObservedSession,
+  ObservedState,
+} from '../lib/observed-store';
 import type { WorkerStatus } from '../types';
 
 interface TasksViewProps {
@@ -68,30 +77,141 @@ function TaskCard({ task, onOpen }: { task: AggregatedTask; onOpen: () => void }
   );
 }
 
+// ---- Observed sessions (S0 observation layer) -------------------------------
+
+const OBSERVED_STATE_LABEL: Record<ObservedState, string> = {
+  active: '进行中',
+  waiting: '等待输入',
+  idle: '空闲',
+  done: '已完成',
+  unknown: '状态未知',
+};
+
+const OBSERVED_CLIENT_LABEL: Record<ObservedClientKind, string> = {
+  'claude-code': 'Claude',
+  codex: 'Codex',
+};
+
+/** A done session leaves the board once it falls outside this window — the
+ *  board is action-oriented; stale file-only history is S1 material. */
+const RECENTLY_DONE_WINDOW_MS = 30 * 60_000;
+
+/** Board column for an observed session, or null when it shouldn't render.
+ *  `unknown` (file-only, no process) never shows; `idle` is also hidden — the
+ *  service uses it for stale file-only Codex evidence (no live process), which
+ *  is history-surface material (S1), not an in-flight task. `done` only while
+ *  recent. */
+function columnForObserved(session: ObservedSession, now: number): TaskColumnId | null {
+  switch (session.state) {
+    case 'waiting':
+      return 'attention';
+    case 'active':
+      return 'active';
+    case 'done':
+      return now - session.lastActiveAt <= RECENTLY_DONE_WINDOW_MS ? 'settled' : null;
+    default:
+      return null;
+  }
+}
+
+function formatObservedAge(ts: number): string {
+  const min = Math.floor((Date.now() - ts) / 60_000);
+  if (min < 1) return '刚刚活跃';
+  if (min < 60) return `${min} 分钟前活跃`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr} 小时前活跃`;
+  return `${Math.floor(hr / 24)} 天前活跃`;
+}
+
+/** Read-only card for an externally-launched CLI session. Deliberately NOT an
+ *  AggregatedTask: observed sessions have no attempt/deps/delivery semantics,
+ *  and S0 offers no in-app action — just a pointer back to the client. */
+function ObservedTaskCard({ session }: { session: ObservedSession }) {
+  return (
+    <div
+      className={`tasks-card tasks-card-observed is-observed-${session.state}`}
+      title={session.cwd}
+    >
+      <span className="tasks-card-project">{session.projectName}</span>
+      <strong className="tasks-card-title">{session.title}</strong>
+      <span className="tasks-card-meta">
+        <Eye size={13} />
+        {OBSERVED_STATE_LABEL[session.state]}
+        <em className="tasks-card-inferred">推断</em>
+        · {formatObservedAge(session.lastActiveAt)}
+      </span>
+      <span className="tasks-card-foot">
+        <em className={`tasks-client-chip is-${session.clientKind}`}>
+          {OBSERVED_CLIENT_LABEL[session.clientKind]}
+        </em>
+        {session.model && <em>{session.model}</em>}
+        <em className="tasks-observed-badge">观察中</em>
+      </span>
+      <span className="tasks-card-actions">
+        <button
+          type="button"
+          className="tasks-observed-action"
+          disabled
+          title="S0 仅观察：请切换到对应客户端处理"
+        >
+          去对应客户端处理 ↗
+        </button>
+      </span>
+    </div>
+  );
+}
+
 /** Cross-project task board. Reads the aggregated projection rather than any
  *  single session, so the user sees one meeting's worth of work even though
- *  each project still runs its own Orchestrator underneath. */
+ *  each project still runs its own Orchestrator underneath. Observed sessions
+ *  (external CLI windows) mix into the same columns after orchestrated cards. */
 export function TasksView({ data, onOpenTask, onOpenPlan }: TasksViewProps) {
   const [projectFilter, setProjectFilter] = useState<string>(ALL);
   const [backendFilter, setBackendFilter] = useState<string>(ALL);
+  const [noiseOpen, setNoiseOpen] = useState<Partial<Record<TaskColumnId, boolean>>>({});
+  const observed = useObservedTasks();
+
+  // Column-visible observed rows (unknown state and stale done are dropped),
+  // sorted by lastActiveAt desc so they append after orchestrated cards.
+  const boardableObserved = useMemo(() => {
+    const now = Date.now();
+    const rows: Array<{ session: ObservedSession; column: TaskColumnId }> = [];
+    for (const session of observed.sessions) {
+      const column = columnForObserved(session, now);
+      if (column) rows.push({ session, column });
+    }
+    rows.sort((a, b) => b.session.lastActiveAt - a.session.lastActiveAt);
+    return rows;
+  }, [observed]);
 
   const projects = useMemo(() => {
     const seen = new Map<string, string>();
     for (const t of data.tasks) seen.set(t.cwd, t.projectName);
     for (const p of data.pendingPlans) seen.set(p.cwd, p.projectName);
+    // Projects with ONLY observed sessions still get a filter chip.
+    for (const { session } of boardableObserved) {
+      if (!seen.has(session.cwd)) seen.set(session.cwd, session.projectName);
+    }
     return [...seen.entries()].map(([cwd, name]) => ({ cwd, name }));
-  }, [data]);
+  }, [data, boardableObserved]);
 
   const backends = useMemo(() => {
     const seen = new Set<string>();
     for (const t of data.tasks) if (t.backendId) seen.add(t.backendId);
+    // clientKind shares the backendId vocabulary (claude-code / codex).
+    for (const { session } of boardableObserved) seen.add(session.clientKind);
     return [...seen].sort();
-  }, [data.tasks]);
+  }, [data.tasks, boardableObserved]);
 
   const visible = useMemo(() => data.tasks.filter((t) => (
     (projectFilter === ALL || t.cwd === projectFilter)
     && (backendFilter === ALL || t.backendId === backendFilter)
   )), [data.tasks, projectFilter, backendFilter]);
+
+  const visibleObserved = useMemo(() => boardableObserved.filter(({ session }) => (
+    (projectFilter === ALL || session.cwd === projectFilter)
+    && (backendFilter === ALL || session.clientKind === backendFilter)
+  )), [boardableObserved, projectFilter, backendFilter]);
 
   const visiblePlans = data.pendingPlans.filter(
     (p) => projectFilter === ALL || p.cwd === projectFilter,
@@ -105,7 +225,23 @@ export function TasksView({ data, onOpenTask, onOpenPlan }: TasksViewProps) {
     return map;
   }, [visible]);
 
-  const total = visible.length + visiblePlans.length;
+  const observedByColumn = useMemo(() => {
+    const map = new Map<TaskColumnId, { normal: ObservedSession[]; noise: ObservedSession[] }>(
+      TASK_COLUMNS.map((c) => [c.id, { normal: [], noise: [] }]),
+    );
+    for (const row of visibleObserved) {
+      const bucket = map.get(row.column);
+      if (!bucket) continue;
+      (row.session.isNoise ? bucket.noise : bucket.normal).push(row.session);
+    }
+    return map;
+  }, [visibleObserved]);
+
+  const observedNormalCount = visibleObserved.reduce(
+    (sum, row) => sum + (row.session.isNoise ? 0 : 1),
+    0,
+  );
+  const total = visible.length + visiblePlans.length + observedNormalCount;
 
   return (
     <main className="tasks-view">
@@ -140,7 +276,9 @@ export function TasksView({ data, onOpenTask, onOpenPlan }: TasksViewProps) {
         {TASK_COLUMNS.map((column) => {
           const items = byColumn.get(column.id) ?? [];
           const plans = column.id === 'attention' ? visiblePlans : [];
-          const count = items.length + plans.length;
+          const observedBucket = observedByColumn.get(column.id) ?? { normal: [], noise: [] };
+          const count = items.length + plans.length + observedBucket.normal.length;
+          const isNoiseOpen = Boolean(noiseOpen[column.id]);
           return (
             <section className={`tasks-column tasks-column-${column.id}`} key={column.id}>
               <header className="tasks-column-head">
@@ -174,7 +312,30 @@ export function TasksView({ data, onOpenTask, onOpenPlan }: TasksViewProps) {
                     onOpen={() => onOpenTask(task.sessionId, task.taskId)}
                   />
                 ))}
-                {count === 0 && <p className="tasks-column-empty">暂无</p>}
+                {observedBucket.normal.map((session) => (
+                  <ObservedTaskCard key={`obs:${session.id}`} session={session} />
+                ))}
+                {observedBucket.noise.length > 0 && (
+                  <div className="tasks-noise-group">
+                    <button
+                      type="button"
+                      className="tasks-noise-toggle"
+                      onClick={() => setNoiseOpen((prev) => ({
+                        ...prev,
+                        [column.id]: !prev[column.id],
+                      }))}
+                    >
+                      {isNoiseOpen ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                      噪声 · {observedBucket.noise.length}
+                    </button>
+                    {isNoiseOpen && observedBucket.noise.map((session) => (
+                      <ObservedTaskCard key={`obs:${session.id}`} session={session} />
+                    ))}
+                  </div>
+                )}
+                {count === 0 && observedBucket.noise.length === 0 && (
+                  <p className="tasks-column-empty">暂无</p>
+                )}
               </div>
             </section>
           );

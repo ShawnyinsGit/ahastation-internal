@@ -1,16 +1,28 @@
-import { app, BrowserWindow, dialog, shell, nativeTheme, net, protocol, screen as electronScreen } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, shell, nativeTheme, net, protocol, screen as electronScreen } from 'electron';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
+import { homedir } from 'node:os';
 import { existsSync, writeFileSync } from 'node:fs';
+import { z } from 'zod';
 import type { AutoApproveScope } from './auto-approve-policy.js';
 import { SessionRegistry } from './sessions.js';
-import { flushSettingsWrites } from './store.js';
+import { flushSettingsWrites, getSettings, updateSettings } from './store.js';
 import { registerCustomBackends } from './backends/registry.js';
 import type { IpcContext, IpcEmittedEvent } from './ipc/context.js';
+import { handleSecure, mainWindowSenderPolicy } from './ipc/validators.js';
 import { BrowserTabManager } from './browser-tab-manager.js';
 import { requestMicrophoneAccess } from './microphone-access.js';
 import { checkForUpdateCached } from './update-check.js';
 import { getCompanionFeed } from './companion/companion-feed.js';
+import { isCompanionWindowOpen, toggleCompanionWindow } from './companion/companion-window-manager.js';
+import {
+  resolveMinimizeOutcome,
+  shouldPromptMinimize,
+  type MinimizePromptKind,
+} from './minimize-prompt.js';
+import { ObserveService } from './observe/observe-service.js';
+import { captureProcessSnapshot, descendantsOf } from './observe/process/darwin.js';
+import type { ObservedSnapshot } from './observe/types.js';
 import {
   buildRendererSecurityHeaders,
   resolveAppAssetPath,
@@ -84,6 +96,53 @@ function getThemeBackgroundColor(): string {
   return themeBackgroundColor(nativeTheme.shouldUseDarkColors);
 }
 
+// ---- Minimize/close → AhaBar prompt -----------------------------------------
+// Intercepting minimize/close to offer AhaBar. While a prompt is on screen the
+// original window action is held (preventDefault); the renderer's answer
+// arrives on app:minimize-choice. A 60s fail-safe replays the original action
+// if the renderer never answers (crash, hang, breakpoint). The suppress flags
+// make our own replayed minimize()/close() skip the interception exactly once.
+
+const MINIMIZE_PROMPT_FAILSAFE_MS = 60_000;
+
+let minimizePromptPending: { kind: MinimizePromptKind; failsafe: NodeJS.Timeout } | null = null;
+let suppressNextMinimize = false;
+let suppressNextClose = false;
+
+function minimizePromptGateOpen(): boolean {
+  return shouldPromptMinimize({
+    ahaBarOpen: isCompanionWindowOpen('ahabar'),
+    promptDisabled: getSettings().ahaBarPromptDisabled === true,
+    quitting: isQuitting,
+  });
+}
+
+function beginMinimizePrompt(kind: MinimizePromptKind): void {
+  // A prompt is already on screen — it covers this attempt too; the pending
+  // fail-safe still guarantees the window eventually minimizes/closes.
+  if (minimizePromptPending) return;
+  const win = liveWindow();
+  if (!win) return;
+  win.webContents.send('app:minimize-prompt', { kind });
+  const failsafe = setTimeout(() => {
+    minimizePromptPending = null;
+    proceedWithMinimizeDefault(kind);
+  }, MINIMIZE_PROMPT_FAILSAFE_MS);
+  minimizePromptPending = { kind, failsafe };
+}
+
+function proceedWithMinimizeDefault(kind: MinimizePromptKind): void {
+  const win = liveWindow();
+  if (!win) return;
+  if (kind === 'minimize') {
+    suppressNextMinimize = true;
+    win.minimize();
+  } else {
+    suppressNextClose = true;
+    win.close();
+  }
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1280,
@@ -112,6 +171,38 @@ function createWindow() {
   mainWindow.on('closed', () => {
     mainWindow = null;
     browserTabManager.destroy();
+    // The window is gone — drop any unanswered prompt state so a future
+    // minimize/close of the recreated window starts clean.
+    if (minimizePromptPending) {
+      clearTimeout(minimizePromptPending.failsafe);
+      minimizePromptPending = null;
+    }
+  });
+
+  // Minimize/close → AhaBar prompt: hold the window action and ask the
+  // renderer, unless the bar is already floating or the user opted out
+  // (settings.ahaBarPromptDisabled). Both events are cancellable — though
+  // the d.ts types 'minimize' as listener: () => void, at runtime Electron
+  // still delivers a cancellable event (the long-standing minimize-to-tray
+  // pattern), hence the local cast.
+  mainWindow.on('minimize', ((event: Electron.Event) => {
+    if (suppressNextMinimize) {
+      suppressNextMinimize = false;
+      return;
+    }
+    if (!minimizePromptGateOpen()) return;
+    event.preventDefault();
+    beginMinimizePrompt('minimize');
+  }) as () => void);
+
+  mainWindow.on('close', (event) => {
+    if (suppressNextClose) {
+      suppressNextClose = false;
+      return;
+    }
+    if (!minimizePromptGateOpen()) return;
+    event.preventDefault();
+    beginMinimizePrompt('close');
   });
 
   // Wire the embedded browser to the main window so it can add/remove
@@ -296,6 +387,66 @@ async function nativeConfirmDestructive(
   return res.response === 1;
 }
 
+// ---- Observation layer (S0) -------------------------------------------------
+// One ObserveService per app: scans for externally-launched claude/codex CLI
+// sessions and republishes each full snapshot to every window ('observe:event')
+// — the task board mixes those cards in next to orchestrated tasks. Pure-Node
+// and fault-isolated; started on app ready, stopped on quit.
+
+let lastObservedSnapshot: ObservedSnapshot = { sessions: [], scannedAt: 0 };
+
+// Self-exclusion, PID side: app-spawned CLI backends are children of this
+// process (subprocess-backend spawn), so the whole descendant tree is hidden
+// from the observer. getSelfExclusion is sync, so the tree is refreshed
+// lazily on the service's own tick cadence — the previous tree is served
+// while a ps refresh is in flight.
+let selfPidTree: Set<number> = new Set([process.pid]);
+let selfPidTreeAt = 0;
+let selfPidTreeRefreshing = false;
+const SELF_PID_TREE_TTL_MS = 2_000;
+const SELF_PID_TREE_MAX_DEPTH = 8;
+
+function selfExclusionPids(): Set<number> {
+  if (!selfPidTreeRefreshing && Date.now() - selfPidTreeAt > SELF_PID_TREE_TTL_MS) {
+    selfPidTreeRefreshing = true;
+    void captureProcessSnapshot()
+      .then((snapshot) => {
+        const tree = descendantsOf(snapshot, process.pid, SELF_PID_TREE_MAX_DEPTH);
+        tree.add(process.pid);
+        selfPidTree = tree;
+        selfPidTreeAt = Date.now();
+      })
+      .catch(() => { /* ps failed — keep serving the previous tree */ })
+      .finally(() => { selfPidTreeRefreshing = false; });
+  }
+  return selfPidTree;
+}
+
+// Self-exclusion, session-id side.
+// TODO(S1): collect native session ids (Claude SDK session_id, Codex thread
+// id) from the live SessionRegistry orchestrators/workers so transcripts
+// written by app-spawned sessions are excluded too. The PID tree above hides
+// their live processes; the residual gap is a file-only row lingering after
+// an app worker's process exits.
+function selfExclusionSessionIds(): Set<string> {
+  return new Set();
+}
+
+const observeService = new ObserveService({
+  homeDir: homedir(),
+  publish: (snapshot) => {
+    lastObservedSnapshot = snapshot;
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (win.isDestroyed()) continue;
+      win.webContents.send('observe:event', snapshot);
+    }
+  },
+  getSelfExclusion: () => ({
+    pids: selfExclusionPids(),
+    sessionIds: selfExclusionSessionIds(),
+  }),
+});
+
 // ---- Wire IPC domain modules -----------------------------------------------
 // Each domain module registers its own ipcMain.handle() calls. State that
 // crosses domains (orchestrator, autoApprove, etc.) flows through the shared
@@ -461,6 +612,56 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
   // synchronous ESM resolution of the same tree.
   await registerAllIpc(ipcCtx);
 
+  // Observation layer: snapshot pull + start scanning (broadcasts via publish).
+  ipcMain.handle('observe:getSnapshot', () => lastObservedSnapshot);
+  observeService.start();
+
+  // Minimize/close → AhaBar prompt: the renderer's answer. 'ahabar' floats the
+  // bar, then minimizes (minimize path) or hides the window (close path —
+  // hiding instead of destroying keeps sessions and the voice link alive,
+  // which is the point of enabling the bar). 'hide' replays the original
+  // minimize/close semantics. `never` persists the 不再提示 opt-out.
+  handleSecure('app:minimize-choice', {
+    schema: z.object({
+      action: z.enum(['ahabar', 'hide']),
+      never: z.boolean(),
+    }).strict(),
+    authorize: mainWindowSenderPolicy(() => liveWindow()?.webContents.id ?? null),
+    handler: async (choice) => {
+      const pending = minimizePromptPending;
+      if (!pending) return { ok: false, error: 'No minimize prompt pending' };
+      minimizePromptPending = null;
+      clearTimeout(pending.failsafe);
+      if (choice.never) {
+        await updateSettings({ ahaBarPromptDisabled: true }).catch((err) => {
+          console.warn('[main] failed to persist ahaBarPromptDisabled:', err);
+        });
+      }
+      const win = liveWindow();
+      if (!win) return { ok: true };
+      switch (resolveMinimizeOutcome(pending.kind, choice)) {
+        case 'open-ahabar-minimize':
+          toggleCompanionWindow('ahabar');
+          suppressNextMinimize = true;
+          win.minimize();
+          break;
+        case 'open-ahabar-hide':
+          toggleCompanionWindow('ahabar');
+          win.hide();
+          break;
+        case 'minimize':
+          suppressNextMinimize = true;
+          win.minimize();
+          break;
+        case 'close':
+          suppressNextClose = true;
+          win.close();
+          break;
+      }
+      return { ok: true };
+    },
+  });
+
   // Kick the merged bundled+user .claude shadow tree build OFF the launch
   // critical path. createWindow() fires immediately so Chromium starts up in
   // parallel; sessions:open awaits the resulting promise the first time it
@@ -587,7 +788,17 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
   }
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    if (BrowserWindow.getAllWindows().length === 0) {
+      createWindow();
+      return;
+    }
+    // The AhaBar close path hides the main window instead of destroying it —
+    // a dock click must be able to bring it back.
+    const win = liveWindow();
+    if (win && !win.isVisible() && !win.isMinimized()) {
+      win.show();
+      win.focus();
+    }
   });
 });
 
@@ -638,6 +849,7 @@ app.on('before-quit', (event) => {
   }
   isQuitting = true;
   event.preventDefault();
+  observeService.stop();
 
   void (async () => {
     // Close settings window early so it doesn't linger during teardown

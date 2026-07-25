@@ -153,6 +153,9 @@ export interface Settings {
    *  CustomBackend at app startup so it appears in the backend list and
    *  can be invited to meetings like any built-in backend. */
   customBackends?: CustomBackendEntry[];
+  /** Minimize/close → AhaBar prompt: set when the user checks 不再提示 in the
+   *  modal. Once true the main window minimizes/closes straight away. */
+  ahaBarPromptDisabled?: boolean;
 }
 
 const RECENT_CWDS_MAX = 10;

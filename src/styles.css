@@ -1364,6 +1364,61 @@ html.popout-view #root {
   background: rgba(196, 181, 160, 0.14);
 }
 
+/* Observed sessions (S0 observation layer) — read-only cards mixed into the
+   board after orchestrated ones. Uses aha tokens for the client chips and
+   the 观察中 badge; state tints reuse the board's existing vocabulary. */
+.tasks-card-observed { cursor: default; border-left-color: var(--aha-info); }
+.tasks-card-observed:hover { background: var(--bg-tile); }
+.tasks-card-observed.is-observed-waiting { border-left-color: var(--warn); }
+.tasks-card-observed.is-observed-active { border-left-color: var(--accent); }
+.tasks-card-observed.is-observed-done { border-left-color: var(--success); }
+
+.tasks-card-inferred {
+  padding: 0 4px;
+  border-radius: 3px;
+  background: var(--bg-input);
+  font-size: 10px;
+  font-style: normal;
+  color: var(--text-muted);
+}
+
+.tasks-client-chip.is-claude-code { background: var(--aha-accent-soft); color: var(--aha-accent); }
+.tasks-client-chip.is-codex { background: var(--aha-run-soft); color: var(--aha-run); }
+.tasks-observed-badge { background: var(--aha-info-soft); color: var(--aha-info); }
+
+.tasks-card-actions { margin-top: 2px; }
+.tasks-observed-action {
+  padding: 3px 8px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 11px;
+  cursor: not-allowed;
+}
+.tasks-observed-action:disabled { opacity: 0.7; }
+
+.tasks-noise-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.tasks-noise-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border: 1px dashed var(--border-soft);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--transition);
+}
+.tasks-noise-toggle:hover { background: var(--bg-hover); }
+
 /* Narrow windows and handheld mode cannot hold four columns side by side.
    Once columns wrap, the board itself scrolls and each column sizes to its
    content instead of splitting one viewport height four ways. */
@@ -12129,3 +12184,145 @@ html.ahabar-view #root {
   opacity: 0.35;
   pointer-events: none;
 }
+
+/* ---- Onboarding scan flow (first launch + cold-start splash) --------------
+   Adapted from _design_docs/prototypes/ahastudio-ux-review-v3.html onto the
+   app tokens: dim backdrop + centered card, scan-ring, progressive ✓ lines. */
+
+.onboarding-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(15, 17, 20, 0.55);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+
+.ob-card {
+  width: min(480px, 92vw);
+  background: var(--bg-tile);
+  border: 1px solid var(--border-soft);
+  border-radius: 18px;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.35);
+  padding: 36px 32px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.ob-step { display: flex; flex-direction: column; align-items: center; gap: 16px; }
+
+.ob-logo {
+  width: 62px;
+  height: 62px;
+  border-radius: 18px;
+  background: var(--aha-accent);
+  display: grid;
+  place-items: center;
+  font-size: 26px;
+  color: #fff;
+  box-shadow: 0 8px 24px rgba(232, 115, 12, 0.35);
+}
+
+.ob-card h2 { margin: 0; font-size: 24px; line-height: 32px; font-weight: 600; }
+.ob-card p { margin: 0; color: var(--text-secondary); font-size: 13px; line-height: 1.7; max-width: 400px; }
+.ob-note { font-size: 11px !important; color: var(--text-muted) !important; }
+
+.scan-ring {
+  width: 50px;
+  height: 50px;
+  border-radius: 50%;
+  border: 3px solid var(--aha-accent-soft);
+  border-top-color: var(--aha-accent);
+  animation: ob-spin 900ms linear infinite;
+}
+@keyframes ob-spin { to { transform: rotate(360deg); } }
+
+.ob-scan { display: flex; flex-direction: column; align-items: center; gap: 14px; }
+.scan-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  min-height: 88px;
+}
+.scan-lines .found { color: var(--text-primary); opacity: 0; animation: ob-fadein 300ms ease forwards; }
+@keyframes ob-fadein { to { opacity: 1; } }
+
+.ob-results { display: flex; gap: 10px; }
+
+.ob-stat {
+  padding: 14px 18px;
+  border-radius: 14px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-soft);
+  min-width: 108px;
+}
+.ob-stat strong { display: block; font-size: 22px; font-variant-numeric: tabular-nums; }
+.ob-stat span { font-size: 11px; color: var(--text-muted); }
+
+.ob-primary {
+  border: 0;
+  border-radius: 10px;
+  background: var(--aha-accent);
+  color: #fff;
+  font-weight: 600;
+  padding: 11px 26px;
+  font-size: 13.5px;
+  cursor: pointer;
+  box-shadow: 0 8px 20px rgba(232, 115, 12, 0.3);
+}
+.ob-primary:hover { filter: brightness(1.06); }
+
+/* ---- Minimize/close → AhaBar prompt ---------------------------------------*/
+
+.minimize-prompt { display: flex; flex-direction: column; gap: 12px; }
+.minimize-prompt-title { margin: 0; font-size: 16px; font-weight: 600; }
+.minimize-prompt-copy { margin: 0; color: var(--text-secondary); font-size: 13px; line-height: 1.7; }
+.minimize-prompt-never {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+  cursor: pointer;
+  user-select: none;
+}
+.minimize-prompt-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 4px; }
+.minimize-prompt-btn {
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 500;
+  padding: 9px 18px;
+  cursor: pointer;
+}
+.minimize-prompt-btn:hover { background: var(--bg-hover); }
+.minimize-prompt-btn-primary {
+  background: var(--aha-accent);
+  border-color: transparent;
+  color: #fff;
+  box-shadow: 0 8px 20px rgba(232, 115, 12, 0.3);
+}
+.minimize-prompt-btn-primary:hover { background: var(--aha-accent); filter: brightness(1.06); }
+
+/* ---- Lobby footer (zero-session entry + onboarding replay) ----------------*/
+
+.lobby-footer-actions { display: flex; justify-content: center; gap: 12px; }
+.lobby-footer-btn {
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 6px 10px;
+  border-radius: 8px;
+}
+.lobby-footer-btn:hover { color: var(--text-secondary); background: var(--bg-hover); }
