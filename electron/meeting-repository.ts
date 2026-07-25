@@ -34,6 +34,76 @@ const MAX_REPLAY_PAGE_BYTES = 4 * 1024 * 1024;
 const MAX_PAYLOAD_DEPTH = 64;
 const MAX_PAYLOAD_NODES = 100_000;
 
+/** Module-load timestamp. Snapshot tmp files older than this belong to a
+ *  previous (crashed) run and are safe to reap; a concurrent writer's fresh
+ *  tmp is always newer. */
+const PROCESS_EPOCH_MS = Date.now();
+
+const SNAPSHOT_TMP_PATTERN = /^snapshot\.json\..+\.tmp$/;
+
+/** Best-effort removal of snapshot tmp leftovers from crashed runs. Only
+ *  called once a good snapshot.json exists, so a tmp that is still the sole
+ *  surviving projection is never deleted. */
+async function removeStaleSnapshotTmps(dir: string): Promise<void> {
+  try {
+    for (const name of await fs.readdir(dir)) {
+      if (!SNAPSHOT_TMP_PATTERN.test(name)) continue;
+      const full = join(dir, name);
+      try {
+        const stat = await fs.stat(full);
+        if (stat.mtimeMs < PROCESS_EPOCH_MS) await fs.rm(full, { force: true });
+      } catch {
+        // Best-effort cleanup must never fault snapshot writes or recovery.
+      }
+    }
+  } catch {
+    // Ignore unreadable directories.
+  }
+}
+
+/** Read the durable snapshot projection, falling back to the newest
+ *  snapshot.json.<pid>.tmp. A crash between the tmp write and the rename
+ *  (the win32 replace window) leaves a fully serialized snapshot in the tmp
+ *  file, so recovery must not depend on the rename having completed. */
+async function readSnapshotProjection(
+  dir: string,
+): Promise<{
+  parsed: { seq?: unknown; state?: Record<string, unknown> };
+  source: 'snapshot' | 'tmp';
+} | null> {
+  try {
+    return {
+      parsed: JSON.parse(await fs.readFile(join(dir, 'snapshot.json'), 'utf8')),
+      source: 'snapshot',
+    };
+  } catch {
+    // Fall through to the tmp fallback below.
+  }
+  try {
+    let newest: string | null = null;
+    let newestMtime = -Infinity;
+    for (const name of await fs.readdir(dir)) {
+      if (!SNAPSHOT_TMP_PATTERN.test(name)) continue;
+      try {
+        const stat = await fs.stat(join(dir, name));
+        if (stat.mtimeMs > newestMtime) {
+          newestMtime = stat.mtimeMs;
+          newest = name;
+        }
+      } catch {
+        // Skip unreadable candidates.
+      }
+    }
+    if (!newest) return null;
+    return {
+      parsed: JSON.parse(await fs.readFile(join(dir, newest), 'utf8')),
+      source: 'tmp',
+    };
+  } catch {
+    return null;
+  }
+}
+
 function assertBoundedJson(value: unknown): string {
   let nodes = 0;
   const active = new WeakSet<object>();
@@ -251,13 +321,23 @@ export class MeetingRepository {
       const tmp = `${path}.${process.pid}.tmp`;
       await fs.mkdir(dirname(path), { recursive: true, mode: 0o700 });
       await fs.writeFile(tmp, serialized, { encoding: 'utf8', mode: 0o600 });
-      if (process.platform === 'win32') {
-        // Windows does not consistently replace an existing destination with
-        // rename. Snapshot is a rebuildable projection; the journal remains
-        // the source of truth during this brief exact-file replacement.
-        await fs.rm(path, { force: true });
+      try {
+        // rename replaces an existing destination atomically on POSIX and via
+        // MOVEFILE_REPLACE_EXISTING on Windows. Only when Windows refuses the
+        // replacement (file locks, EPERM/EACCES/EEXIST) fall back to
+        // rm + rename — keeping the no-snapshot window confined to that rare
+        // retry path instead of every save.
+        await fs.rename(tmp, path);
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (process.platform === 'win32' && (code === 'EPERM' || code === 'EACCES' || code === 'EEXIST')) {
+          await fs.rm(path, { force: true });
+          await fs.rename(tmp, path);
+        } else {
+          throw error;
+        }
       }
-      await fs.rename(tmp, path);
+      await removeStaleSnapshotTmps(dirname(path));
     });
     const result = run;
     this.tail = result.then(() => undefined, () => undefined);
@@ -365,16 +445,20 @@ export class MeetingRepository {
       for (const entry of entries) {
         if (!entry.isDirectory()) continue;
         try {
-          const raw = await fs.readFile(join(root, entry.name, 'snapshot.json'), 'utf8');
-          const parsed = JSON.parse(raw) as { seq?: unknown; state?: Record<string, unknown> };
-          if (!parsed.state || parsed.state.status !== 'active') continue;
-          const journal = await MeetingRepository.replay(
-            entry.name,
-            join(root, entry.name),
-          );
+          const dir = join(root, entry.name);
+          const journal = await MeetingRepository.replay(entry.name, dir);
           const journalTailSeq = journal.at(-1)?.seq ?? 0;
           const latestTaskStatuses = new Map<string, unknown>();
+          const latestTaskNodes = new Map<string, Record<string, unknown>>();
+          let journalCwd: string | null = null;
           for (const event of journal) {
+            if (
+              (event.type === 'meeting-created' || event.type === 'meeting-recovered')
+              && event.payload && typeof event.payload === 'object'
+              && typeof (event.payload as Record<string, unknown>).cwd === 'string'
+            ) {
+              journalCwd = (event.payload as Record<string, unknown>).cwd as string;
+            }
             if (event.type !== 'event:plan-updated') continue;
             if (!event.payload || typeof event.payload !== 'object') continue;
             const rendererEvent = (event.payload as Record<string, unknown>).event;
@@ -391,27 +475,48 @@ export class MeetingRepository {
               // cannot take a durably accepted task back to a live state.
               if (latestTaskStatuses.get(record.id) === 'accepted') continue;
               latestTaskStatuses.set(record.id, record.status);
+              latestTaskNodes.set(record.id, record);
             }
           }
-          const tasks = Array.isArray(parsed.state.tasks)
+          const projection = await readSnapshotProjection(dir);
+          if (projection?.source === 'snapshot') {
+            // A good snapshot.json makes leftovers from crashed runs garbage.
+            await removeStaleSnapshotTmps(dir);
+          }
+          let parsed = projection?.parsed ?? null;
+          if (!parsed?.state) {
+            // No snapshot projection at all (crash before the first save).
+            // The append-only journal is the source of truth, so rebuild the
+            // minimal recovery state from it instead of dropping the meeting.
+            if (journal.length === 0 || !journalCwd) continue;
+            parsed = {
+              seq: journalTailSeq,
+              state: { status: 'active', cwd: journalCwd, hosts: [], tasks: [] },
+            };
+          }
+          if (!parsed.state || parsed.state.status !== 'active') continue;
+          // A stale/empty snapshot task list falls back to the journal's plan
+          // nodes so tasks planned after the last save still surface.
+          const baseTasks = Array.isArray(parsed.state.tasks) && parsed.state.tasks.length > 0
             ? parsed.state.tasks
-              .filter((task): task is Record<string, unknown> => (
-                Boolean(task && typeof task === 'object' && !Array.isArray(task))
-              ))
-              .map((task) => {
-                const latestStatus = typeof task.id === 'string'
-                  ? latestTaskStatuses.get(task.id)
-                  : undefined;
-                const normalized = {
-                  ...task,
-                  status: normalizeRecoveredTaskStatus(latestStatus ?? task.status),
-                };
-                return {
-                  ...normalized,
-                  recovery: assessTaskRecovery(normalized),
-                };
-              })
-            : [];
+            : [...latestTaskNodes.values()];
+          const tasks = baseTasks
+            .filter((task): task is Record<string, unknown> => (
+              Boolean(task && typeof task === 'object' && !Array.isArray(task))
+            ))
+            .map((task) => {
+              const latestStatus = typeof task.id === 'string'
+                ? latestTaskStatuses.get(task.id)
+                : undefined;
+              const normalized = {
+                ...task,
+                status: normalizeRecoveredTaskStatus(latestStatus ?? task.status),
+              };
+              return {
+                ...normalized,
+                recovery: assessTaskRecovery(normalized),
+              };
+            });
           out.push({
             meetingId: entry.name,
             seq: Math.max(

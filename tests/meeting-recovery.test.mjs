@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, utimesSync, writeFileSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -432,5 +432,108 @@ test('side-effecting recovered tasks send no Backend prompt before user confirma
   } finally {
     await orchestrator.end();
     await rm(`/tmp/meetings/${meetingId}`, { recursive: true, force: true });
+  }
+});
+
+// --- Snapshot durability: rename-first replace, orphan tmp cleanup, and
+// recovery fallbacks (tmp projection / journal rebuild). ---
+
+const snapshotTmps = (dir) => readdirSync(dir).filter((name) => /^snapshot\.json\..+\.tmp$/.test(name));
+
+test('snapshot replaces atomically and reaps only stale orphan tmp files', async () => {
+  const meetingId = `snapshot-tmp-${randomUUID()}`;
+  const dir = `/tmp/meetings/${meetingId}`;
+  try {
+    const repository = new MeetingRepository(meetingId);
+    await repository.snapshot({ status: 'active', cwd: '/workspace', hosts: [], tasks: [] });
+    // rename-first: the tmp was consumed by the rename, never left behind.
+    assert.deepEqual(snapshotTmps(dir), []);
+
+    // A stale tmp from a crashed previous run vs. a fresh concurrent one.
+    const staleTmp = `${dir}/snapshot.json.111.tmp`;
+    const freshTmp = `${dir}/snapshot.json.222.tmp`;
+    writeFileSync(staleTmp, '{}');
+    utimesSync(staleTmp, new Date(Date.now() - 3_600_000), new Date(Date.now() - 3_600_000));
+    writeFileSync(freshTmp, '{}');
+
+    // Replacing an existing snapshot.json must succeed (rename-first path)
+    // and reap only the stale orphan.
+    await repository.snapshot({ status: 'active', cwd: '/workspace', hosts: [], tasks: [], planVersion: 2 });
+    const persisted = JSON.parse(readFileSync(`${dir}/snapshot.json`, 'utf8'));
+    assert.equal(persisted.state.planVersion, 2);
+    assert.equal(existsSync(staleTmp), false, 'stale orphan tmp must be reaped');
+    assert.equal(existsSync(freshTmp), true, 'a fresh tmp may belong to a live writer');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('listRecoverable falls back to the newest snapshot tmp when the rename never landed', async () => {
+  const meetingId = `snapshot-orphan-${randomUUID()}`;
+  const dir = `/tmp/meetings/${meetingId}`;
+  try {
+    // Crash window reproduction: a fully serialized tmp, no snapshot.json.
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(`${dir}/snapshot.json.4242.tmp`, JSON.stringify({
+      schemaVersion: 3,
+      seq: 5,
+      state: {
+        status: 'active',
+        cwd: '/workspace',
+        hosts: [],
+        tasks: [{ id: 'task-1', title: 'Orphan', prompt: 'do it', status: 'running', deps: [] }],
+      },
+    }));
+    const recovered = (await MeetingRepository.listRecoverable()).find((entry) => entry.meetingId === meetingId);
+    assert.ok(recovered, 'the tmp projection must make the meeting recoverable');
+    assert.equal(recovered.seq, 5);
+    assert.equal(recovered.state.status, 'recovering');
+    assert.equal(recovered.state.tasks[0].status, 'interrupted');
+    // The tmp is the sole surviving projection: scanning must not delete it.
+    assert.deepEqual(snapshotTmps(dir), ['snapshot.json.4242.tmp']);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('listRecoverable rebuilds an active meeting from the journal when no projection exists', async () => {
+  const meetingId = `journal-fallback-${randomUUID()}`;
+  const dir = `/tmp/meetings/${meetingId}`;
+  try {
+    // Crash before the first snapshot save: only the journal exists.
+    const repository = new MeetingRepository(meetingId);
+    await repository.append('meeting-created', { cwd: '/workspace' });
+    await repository.append('event:plan-updated', {
+      event: {
+        kind: 'plan-updated',
+        plan: {
+          nodes: [{ id: 'task-1', title: 'Journaled', prompt: 'do it', status: 'running', deps: [] }],
+        },
+      },
+    });
+    assert.equal(existsSync(`${dir}/snapshot.json`), false);
+
+    const recovered = (await MeetingRepository.listRecoverable()).find((entry) => entry.meetingId === meetingId);
+    assert.ok(recovered, 'journal-only meetings must still be recoverable');
+    assert.equal(recovered.state.status, 'recovering');
+    assert.equal(recovered.state.cwd, '/workspace');
+    assert.equal(recovered.seq, 2);
+    assert.equal(recovered.state.tasks[0].id, 'task-1');
+    assert.equal(recovered.state.tasks[0].status, 'interrupted');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a journal without a cwd anchor is not offered for recovery', async () => {
+  const meetingId = `journal-anchorless-${randomUUID()}`;
+  const dir = `/tmp/meetings/${meetingId}`;
+  try {
+    const repository = new MeetingRepository(meetingId);
+    await repository.append('meeting-created', {});
+    const recovered = (await MeetingRepository.listRecoverable()).find((entry) => entry.meetingId === meetingId);
+    assert.equal(recovered, undefined, 'no cwd anchor means no usable recovery state');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
   }
 });
