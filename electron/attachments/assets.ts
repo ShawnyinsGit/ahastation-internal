@@ -1,4 +1,5 @@
 import { promises as fs } from 'node:fs';
+import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { ensureDir, writeAttachmentSafely, maybeAppendGitignore } from './workspace.js';
 
@@ -7,6 +8,12 @@ const ASSETS_DIR = '.vibe-assets';
 export interface AssetEntry {
   name: string;
   sizeBytes: number;
+}
+
+export interface AuthorizedAssetReference {
+  id: string;
+  name: string;
+  contentHash: string;
 }
 
 function timestampSuffix(): string {
@@ -70,6 +77,49 @@ export async function listAssets(cwd: string): Promise<AssetEntry[]> {
     }
     return result;
   } catch {
+    return [];
+  }
+}
+
+/** Return content-addressed references for files already admitted to the
+ * Meeting asset directory. File bytes never enter the Context Package. */
+export async function listAuthorizedAssetReferences(
+  cwd: string,
+  selectedIds?: readonly string[],
+): Promise<AuthorizedAssetReference[]> {
+  const dir = path.join(cwd, ASSETS_DIR);
+  try {
+    const entries = await fs.readdir(dir, { withFileTypes: true });
+    const files = entries
+      .filter((entry) => entry.isFile())
+      .sort((left, right) => left.name.localeCompare(right.name));
+    const byName = new Map(files.map((entry) => [entry.name, entry]));
+    const selected = selectedIds === undefined ? files.map((entry) => entry.name) : [...selectedIds];
+    if (new Set(selected).size !== selected.length) {
+      throw new Error('attachmentIds contains duplicate identifiers');
+    }
+    for (const id of selected) {
+      if (!byName.has(id)) throw new Error(`attachmentIds references unauthorized or missing id: ${id}`);
+    }
+    const references: AuthorizedAssetReference[] = [];
+    for (const id of selected) {
+      const entry = byName.get(id)!;
+      const absolute = path.join(dir, entry.name);
+      try {
+        const bytes = await fs.readFile(absolute);
+        references.push({
+          id: entry.name,
+          name: entry.name,
+          contentHash: createHash('sha256').update(bytes).digest('hex'),
+        });
+      } catch {
+        // An attachment that changes or disappears while resolving is not
+        // authorized into the source. A selected reference will then fail.
+      }
+    }
+    return references;
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith('attachmentIds ')) throw error;
     return [];
   }
 }

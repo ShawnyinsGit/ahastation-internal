@@ -1,6 +1,7 @@
 import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { X } from 'lucide-react';
 import type { DeliveryFileKind, DocumentReadResult } from '../types';
+import { CodePreview } from './CodePreview';
 
 interface FileViewerProps {
   relativePath: string;
@@ -241,7 +242,16 @@ export function FileContent({
     );
   }
 
-  if ((doc.kind === 'text' || doc.kind === 'word') && doc.text !== undefined) {
+  if (doc.kind === 'text' && doc.text !== undefined) {
+    return (
+      <div className="file-viewer-pane">
+        <div className="file-viewer-meta">{sizeLine}{doc.truncated ? ' · truncated' : ''}</div>
+        <CodePreview text={doc.text} path={doc.name || fileName} />
+      </div>
+    );
+  }
+
+  if (doc.kind === 'word' && doc.text !== undefined) {
     return (
       <div className="file-viewer-pane">
         <div className="file-viewer-meta">{sizeLine}{doc.truncated ? ' · truncated' : ''}</div>

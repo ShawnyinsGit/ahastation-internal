@@ -109,8 +109,19 @@ async function makeWorkspace() {
   await mkdir(join(root, 'sub'), { recursive: true });
   await mkdir(outside);
   await writeFile(join(root, 'exists.txt'), 'old');
-  await symlink(outside, join(root, 'escape-link'), 'dir');
-  return { base, root: await realpath(root), outside: await realpath(outside) };
+  let symlinksAvailable = true;
+  try {
+    await symlink(outside, join(root, 'escape-link'), 'dir');
+  } catch (error) {
+    if (error?.code !== 'EPERM') throw error;
+    symlinksAvailable = false;
+  }
+  return {
+    base,
+    root: await realpath(root),
+    outside: await realpath(outside),
+    symlinksAvailable,
+  };
 }
 
 test('resolveConfinedWriteTarget resolves existing files and rejects escapes', async (t) => {
@@ -123,7 +134,9 @@ test('resolveConfinedWriteTarget resolves existing files and rejects escapes', a
 
   assert.equal((await resolveConfinedWriteTarget(ws.root, join(ws.outside, 'x.txt'))).ok, false);
   assert.equal((await resolveConfinedWriteTarget(ws.root, join('..', 'outside', 'x.txt'))).ok, false);
-  assert.equal((await resolveConfinedWriteTarget(ws.root, join('escape-link', 'x.txt'))).ok, false);
+  if (ws.symlinksAvailable) {
+    assert.equal((await resolveConfinedWriteTarget(ws.root, join('escape-link', 'x.txt'))).ok, false);
+  }
 });
 
 test('resolveConfinedWriteTarget allows new files inside the root only', async (t) => {
@@ -149,6 +162,11 @@ test('shikiLangForPath maps known extensions and falls back to null', () => {
   assert.equal(shikiLangForPath('README.md'), 'markdown');
   assert.equal(shikiLangForPath('a/b/c.rs'), 'rust');
   assert.equal(shikiLangForPath('fix.diff'), 'diff');
+  assert.equal(shikiLangForPath('Main.kt'), 'kotlin');
+  assert.equal(shikiLangForPath('App.vue'), 'vue');
+  assert.equal(shikiLangForPath('styles.scss'), 'scss');
+  assert.equal(shikiLangForPath('query.gql'), 'graphql');
+  assert.equal(shikiLangForPath('C:\\proj\\src\\util.ts'), 'typescript');
   assert.equal(shikiLangForPath('archive.unknownext'), null);
   assert.equal(shikiLangForPath('Makefile'), null);
   assert.equal(shikiLangForPath('.gitignore'), null);

@@ -3,8 +3,10 @@ import { mergedSubprocessEnv } from './settings-loader.js';
 import { errorMessage, redactSecrets } from './format-error.js';
 import { classifyToolRisk, type AutoApproveScope } from './auto-approve-policy.js';
 import { randomUUID } from 'node:crypto';
+import type { WorkerAdapterSignal } from './worker-protocol.js';
 import { existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
+import { dirname, join } from 'node:path';
 
 const require_ = createRequire(import.meta.url);
 
@@ -32,6 +34,14 @@ function resolveClaudeBinary(): string | undefined {
   const platform = process.platform;
   const arch = process.arch === 'x64' ? `${platform}-x64` : `${platform}-arm64`;
   const subpkg = `@anthropic-ai/claude-agent-sdk-${arch}/claude`;
+  const packageName = `@anthropic-ai/claude-agent-sdk-${arch}`;
+  const executableName = platform === 'win32' ? 'claude.exe' : 'claude';
+
+  try {
+    const packageJson = require_.resolve(`${packageName}/package.json`);
+    const p = unpackify(join(dirname(packageJson), executableName));
+    if (existsSync(p)) return p;
+  } catch { /* fall through */ }
 
   // 1. Try resolving from the SDK package's own location (handles nested install).
   try {
@@ -67,6 +77,7 @@ type PermissionPending = {
 
 export type SessionEvent =
   | { kind: 'message'; message: SDKMessage }
+  | { kind: 'worker-signal'; signal: WorkerAdapterSignal }
   | { kind: 'permission-request'; id: string; toolName: string; input: Record<string, unknown>; toolUseID: string }
   | { kind: 'auth-required'; error: string }
   | { kind: 'error'; error: string }

@@ -9,6 +9,8 @@ import { formatError } from '../format-error.js';
 import type { AutoApproveScope } from '../auto-approve-policy.js';
 import type { IpcContext } from './context.js';
 import { saveImageToMaterials } from '../materials.js';
+import { z } from 'zod';
+import { planMeetingTaskSchema } from '../meeting-tools.js';
 
 const PERMISSION_MODES = new Set(['default', 'acceptEdits', 'bypassPermissions', 'plan'] as const);
 type PermissionMode = 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan';
@@ -22,6 +24,25 @@ function pickSessionId(payload: unknown): string | undefined {
   if (!payload || typeof payload !== 'object') return undefined;
   const id = (payload as { sessionId?: unknown }).sessionId;
   return typeof id === 'string' && id.length > 0 ? id : undefined;
+}
+
+function deliveryDecisionPayload(payload: unknown, candidateRequired = true):
+  | { ok: true; sessionId?: string; deliveryId: string; candidateId?: string }
+  | { ok: false; error: string } {
+  if (!payload || typeof payload !== 'object') return { ok: false, error: 'invalid payload' };
+  const value = payload as Record<string, unknown>;
+  const deliveryId = typeof value.deliveryId === 'string' ? value.deliveryId : '';
+  const candidateId = typeof value.candidateId === 'string' ? value.candidateId : '';
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  if (!uuid.test(deliveryId) || (candidateRequired ? !uuid.test(candidateId) : Boolean(candidateId) && !uuid.test(candidateId))) {
+    return { ok: false, error: 'invalid delivery identity' };
+  }
+  return {
+    ok: true,
+    sessionId: pickSessionId(payload),
+    deliveryId,
+    ...(candidateId ? { candidateId } : {}),
+  };
 }
 
 export function registerSessionIpc(ctx: IpcContext): void {
@@ -39,9 +60,57 @@ export function registerSessionIpc(ctx: IpcContext): void {
     if (!payload || typeof payload !== 'object') return { ok: false, error: 'invalid payload' };
     const approved = (payload as { approved?: unknown }).approved;
     if (typeof approved !== 'boolean') return { ok: false, error: 'approved must be boolean' };
+    let revisedTasks;
+    if ('tasks' in (payload as Record<string, unknown>)) {
+      const parsed = z.array(planMeetingTaskSchema).min(1).max(20).safeParse(
+        (payload as Record<string, unknown>).tasks,
+      );
+      if (!parsed.success) return { ok: false, error: 'invalid revised plan' };
+      revisedTasks = parsed.data;
+    }
     const slot = ctx.registry.resolve(pickSessionId(payload));
     if (!slot) return { ok: false, error: 'No active session' };
-    return slot.orchestrator.approvePendingPlan(approved);
+    return slot.orchestrator.approvePendingPlan(approved, revisedTasks);
+  });
+
+  ipcMain.handle('session:accept-delivery', async (_e, payload: unknown) => {
+    const parsed = deliveryDecisionPayload(payload);
+    if (!parsed.ok) return parsed;
+    if (!parsed.candidateId) return { ok: false, error: 'candidate is required' };
+    const slot = ctx.registry.resolve(parsed.sessionId);
+    if (!slot) return { ok: false, error: 'No active session' };
+    try {
+      const delivery = await slot.orchestrator.acceptDelivery(
+        parsed.deliveryId,
+        parsed.candidateId,
+      );
+      return { ok: true, delivery };
+    } catch (error) {
+      return { ok: false, error: formatError(error) };
+    }
+  });
+
+  ipcMain.handle('session:return-delivery', async (_e, payload: unknown) => {
+    const parsed = deliveryDecisionPayload(payload, false);
+    if (!parsed.ok) return parsed;
+    const feedback = typeof (payload as Record<string, unknown>).feedback === 'string'
+      ? String((payload as Record<string, unknown>).feedback).trim()
+      : '';
+    if (!feedback || feedback.length > 20_000) {
+      return { ok: false, error: 'feedback must contain 1-20000 characters' };
+    }
+    const slot = ctx.registry.resolve(parsed.sessionId);
+    if (!slot) return { ok: false, error: 'No active session' };
+    try {
+      const delivery = await slot.orchestrator.returnDelivery(
+        parsed.deliveryId,
+        parsed.candidateId,
+        feedback,
+      );
+      return { ok: true, delivery };
+    } catch (error) {
+      return { ok: false, error: formatError(error) };
+    }
   });
   ipcMain.handle('session:user-text', async (_e, payload: { sessionId?: string; text: string }) => {
     const slot = ctx.registry.resolve(pickSessionId(payload));

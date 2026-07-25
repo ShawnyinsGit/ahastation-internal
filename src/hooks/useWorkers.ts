@@ -1,7 +1,15 @@
 import { useCallback, useMemo, useSyncExternalStore } from 'react';
 import { meetingStore, type DeliverySnapshot, type HostGroupState, type WorkerState } from '../lib/meeting-store';
 import type { SpeakHandle } from '../lib/speech-session';
-import type { MeetingPlan, StagedAttachment } from '../types';
+import type {
+  CoordinatorBriefing,
+  FinalMeetingDecision,
+  MeetingDelivery,
+  MeetingPlan,
+  MeetingPlanBrief,
+  PlanMeetingTaskInput,
+  StagedAttachment,
+} from '../types';
 
 export interface UseWorkersResult {
   workers: Map<string, WorkerState>;
@@ -9,27 +17,42 @@ export interface UseWorkersResult {
   hostGroups: Map<string, HostGroupState>;
   coordinatorHostId: string;
   plan: MeetingPlan | null;
+  pendingPlan: PlanMeetingTaskInput[] | null;
+  pendingPlanBrief: MeetingPlanBrief | null;
   running: boolean;
   cwd: string | null;
   lastError: string | null;
   currentDelivery: DeliverySnapshot | null;
   deliveryHistory: DeliverySnapshot[];
+  finalMeetingDelivery: MeetingDelivery | null;
+  finalMeetingDecision: FinalMeetingDecision | null;
+  coordinatorBriefings: CoordinatorBriefing[];
   savedDocuments: string[];
   restartSession: () => Promise<void>;
-  sendText: (text: string) => Promise<void>;
+  sendText: (text: string, options?: { displayText?: string }) => Promise<void>;
   sendImage: (dataUrl: string, caption: string) => Promise<void>;
-  sendAttachments: (staged: StagedAttachment[], text: string) => Promise<{ ok: boolean; error?: string }>;
+  sendAttachments: (
+    staged: StagedAttachment[],
+    text: string,
+    options?: { displayText?: string },
+  ) => Promise<{ ok: boolean; error?: string }>;
   publishDroppedFiles: (files: File[]) => void;
   onDroppedFiles: (cb: (files: File[]) => void) => () => void;
-  resolvePermission: (id: string, decision: 'allow' | 'deny') => Promise<void>;
+  resolvePermission: (id: string, decision: 'allow' | 'deny') => Promise<{ ok: true } | { ok: false; error: string }>;
   interrupt: () => Promise<void>;
   endSession: () => Promise<void>;
   setSpeakCallback: (cb: SpeakHandle | null) => void;
-  acceptDelivery: () => void;
+  acceptDelivery: () => Promise<{ ok: true } | { ok: false; error: string }>;
   reviseDelivery: (feedback: string) => Promise<
     | { ok: true; route: 'worker' | 'talker'; queued?: boolean }
     | { ok: false; error: string }
   >;
+  acceptFinalMeetingDelivery: () => Promise<{ ok: true } | { ok: false; error: string }>;
+  requestFinalMeetingRework: (reason: string) => Promise<{ ok: true } | { ok: false; error: string }>;
+  decidePendingPlan: (
+    approved: boolean,
+    tasks?: PlanMeetingTaskInput[],
+  ) => Promise<{ ok: boolean; error?: string }>;
   toggleHostGroupCollapsed: (hostId: string) => void;
   addHostGroup: (backendId: string) => Promise<{ ok: boolean; hostId?: string; error?: string }>;
   removeHostGroup: (hostId: string) => Promise<{ ok: boolean; error?: string }>;
@@ -52,10 +75,17 @@ export function useWorkers(): UseWorkersResult {
   }, []);
 
   const restartSession = useCallback(() => meetingStore.restartSession(), []);
-  const sendText = useCallback((text: string) => meetingStore.sendText(text), []);
+  const sendText = useCallback(
+    (text: string, options?: { displayText?: string }) => meetingStore.sendText(text, options),
+    [],
+  );
   const sendImage = useCallback((dataUrl: string, caption: string) => meetingStore.sendImage(dataUrl, caption), []);
   const sendAttachments = useCallback(
-    (staged: StagedAttachment[], text: string) => meetingStore.sendAttachments(staged, text),
+    (
+      staged: StagedAttachment[],
+      text: string,
+      options?: { displayText?: string },
+    ) => meetingStore.sendAttachments(staged, text, options),
     [],
   );
   const publishDroppedFiles = useCallback((files: File[]) => meetingStore.publishDroppedFiles(files), []);
@@ -72,6 +102,19 @@ export function useWorkers(): UseWorkersResult {
   const acceptDelivery = useCallback(() => meetingStore.acceptDelivery(), []);
   const reviseDelivery = useCallback(
     (feedback: string) => meetingStore.reviseDelivery(feedback),
+    [],
+  );
+  const acceptFinalMeetingDelivery = useCallback(
+    () => meetingStore.acceptFinalMeetingDelivery(),
+    [],
+  );
+  const requestFinalMeetingRework = useCallback(
+    (reason: string) => meetingStore.requestFinalMeetingRework(reason),
+    [],
+  );
+  const decidePendingPlan = useCallback(
+    (approved: boolean, tasks?: PlanMeetingTaskInput[]) =>
+      meetingStore.decidePendingPlan(approved, tasks),
     [],
   );
   const toggleHostGroupCollapsed = useCallback(
@@ -99,11 +142,16 @@ export function useWorkers(): UseWorkersResult {
     hostGroups: state.hostGroups,
     coordinatorHostId: state.coordinatorHostId,
     plan: state.plan,
+    pendingPlan: state.pendingPlan,
+    pendingPlanBrief: state.pendingPlanBrief,
     running: state.running,
     cwd,
     lastError: state.lastError,
     currentDelivery: state.currentDelivery,
     deliveryHistory: state.deliveryHistory,
+    finalMeetingDelivery: state.finalMeetingDelivery,
+    finalMeetingDecision: state.finalMeetingDecision,
+    coordinatorBriefings: state.coordinatorBriefings,
     savedDocuments: state.savedDocuments,
     restartSession,
     sendText,
@@ -117,6 +165,9 @@ export function useWorkers(): UseWorkersResult {
     setSpeakCallback,
     acceptDelivery,
     reviseDelivery,
+    acceptFinalMeetingDelivery,
+    requestFinalMeetingRework,
+    decidePendingPlan,
     toggleHostGroupCollapsed,
     addHostGroup,
     removeHostGroup,

@@ -7,7 +7,7 @@ import {
 } from '../lib/microphone-ui-state';
 
 // Below this many samples (~0.3s @ 16 kHz) we skip the voice-lock gate
-// entirely — embeddings on very short clips are unreliable and we'd rather
+// entirely - embeddings on very short clips are unreliable and we'd rather
 // pass through brief responses ("ok", "yes") than reject them.
 const MIN_SAMPLES_FOR_GATE = 4800;
 const VOICE_LOCK_THRESHOLD = 0.5;
@@ -43,21 +43,21 @@ interface UseVoiceCaptureOptions {
   onBargeIn?: () => void;
   lang?: 'auto' | 'zh' | 'en';
   // When true, VAD stays alive but all speech segments are silently dropped.
-  // Used for spacebar mute — avoids the 200-500ms VAD destroy/recreate cost.
+  // Used for spacebar mute - avoids the 200-500ms VAD destroy/recreate cost.
   paused?: boolean;
   // When true, drop any speech segment that starts during this window. Used to
-  // ignore the mic while TTS is playing back through the speakers — otherwise
+  // ignore the mic while TTS is playing back through the speakers - otherwise
   // the VAD trips on its own output, fires barge-in (cutting Claude off), and
   // transcribes the playback as if the user said it.
   suppressed?: boolean;
   // Voice-lock gate: if enabled and an enrolled embedding is provided, each
   // captured segment is embedded and compared against the enrollment via
-  // cosine similarity. Below threshold → dropped before transcription.
+  // cosine similarity. Below threshold -> dropped before transcription.
   voiceLockEnabled?: boolean;
   voicePrintEmbedding?: Float32Array | null;
   onVoiceLockReject?: () => void;
   // Enrollment tap. When set, every clean speech segment is handed to the tap
-  // instead of being transcribed — used by the voice-lock panel to collect
+  // instead of being transcribed - used by the voice-lock panel to collect
   // samples for enrollment without polluting the chat transcript. The gate is
   // also bypassed in this mode (enrollment runs before we know the voice).
   tapSegment?: (samples: Float32Array) => void;
@@ -102,7 +102,7 @@ export function useVoiceCapture({
   const vadRef = useRef<MicVAD | null>(null);
   // Hold the MediaStream the VAD's getStream callback produced so we can
   // explicitly stop its tracks on teardown. MicVAD.destroy() releases its own
-  // graph nodes but on some browsers does NOT stop the underlying mic tracks —
+  // graph nodes but on some browsers does NOT stop the underlying mic tracks -
   // the OS mic indicator stays lit and a subsequent getUserMedia can hit a
   // "device busy" state until the page is reloaded. Walking getTracks() and
   // calling stop() after destroy() resolves is what actually frees the device.
@@ -121,7 +121,7 @@ export function useVoiceCapture({
   const voicePrintEmbeddingRef = useRef(voicePrintEmbedding);
   // Mirror lang so swapping zh⇄en⇄auto doesn't tear down MicVAD (which
   // re-downloads the worklet + onnx model and re-prompts for mic on some
-  // browsers). The transcribePcm call inside onSpeechEnd reads the ref.
+  // browsers). The stream-start call inside onSpeechEnd reads the ref.
   const langRef = useRef(lang);
   // Tracks whether the in-flight speech segment started while suppressed
   // (TTS was playing). Read at speech-end to apply the barge-in duration
@@ -133,6 +133,17 @@ export function useVoiceCapture({
   // gate barge-in by average confidence (a single high spike isn't enough).
   const segmentFrameCountRef = useRef(0);
   const segmentProbSumRef = useRef(0);
+  // Streaming ASR state. The renderer opens a Xunfei WebSocket on speech
+  // start and pushes VAD frames in real time; on speech end it requests the
+  // final transcript. The "live" flag gates whether frames are sent (only
+  // after the stream has actually opened). The suppressed/voice-lock paths
+  // defer stream start to speech-end, then replay the completed segment.
+  const cloudLiveFramesRef = useRef(false);
+  const cloudStreamAttemptedRef = useRef(false);
+  const cloudStreamStartRef = useRef<Promise<
+    | { ok: true; sessionId: string }
+    | { ok: false; error: string }
+  > | null>(null);
 
   const queueRelease = useCallback((vad: MicVAD | null, stream: MediaStream | null) => {
     const previous = teardownRef.current;
@@ -154,7 +165,7 @@ export function useVoiceCapture({
     tapSegmentRef.current = tapSegment;
     // When a tap is installed mid-segment (typical for enrollment: user opens
     // the panel and clicks Start while Claude's greeting echo has already
-    // tripped VAD with suppressedRef=true → segmentSuppressedRef=true), clear
+    // tripped VAD with suppressedRef=true -> segmentSuppressedRef=true), clear
     // the stale suppression flag so the in-flight segment's eventual
     // onSpeechEnd routes the audio to the tap instead of dropping it.
     if (tapSegment) {
@@ -183,7 +194,8 @@ export function useVoiceCapture({
     setRetryVersion((version) => version + 1);
   }, []);
 
-  // Check whisper availability once on mount.
+  // Check ASR availability once on mount - reports whether Xunfei credentials
+  // are configured in settings.
   useEffect(() => {
     let cancelled = false;
     window.vibeMeet
@@ -201,7 +213,11 @@ export function useVoiceCapture({
 
   useEffect(() => {
     if (!enabled) {
-      // Tear down any existing VAD.
+      // Tear down any existing VAD + in-flight ASR stream.
+      cloudLiveFramesRef.current = false;
+      cloudStreamAttemptedRef.current = false;
+      cloudStreamStartRef.current = null;
+      void window.vibeMeet.cancelAsrStream();
       const v = vadRef.current;
       const stream = micStreamRef.current;
       vadRef.current = null;
@@ -234,7 +250,7 @@ export function useVoiceCapture({
         if (cancelled) return;
         if (!granted) {
           setPermissionDenied(true);
-          setLastError('Microphone permission denied — please enable in System Settings');
+          setLastError('Microphone permission denied - please enable in System Settings');
           setActive(false);
           setStatus('permission-denied');
           return;
@@ -247,7 +263,7 @@ export function useVoiceCapture({
           model: 'v5',
           baseAssetPath: VAD_ASSET_BASE,
           onnxWASMBasePath: VAD_ASSET_BASE,
-          // Explicit AEC/NS/AGC so the speaker→mic loop is dampened. Browsers
+          // Explicit AEC/NS/AGC so the speaker->mic loop is dampened. Browsers
           // default these on for `{audio: true}`, but the lib's default
           // getStream doesn't pass them through, and without AEC the VAD
           // trips on Claude's own TTS output coming back through the mic.
@@ -260,7 +276,7 @@ export function useVoiceCapture({
               },
             });
             // Stash the stream so the effect cleanup can stop its tracks
-            // after vad.destroy() — MicVAD.destroy() doesn't always release
+            // after vad.destroy() - MicVAD.destroy() doesn't always release
             // the underlying mic device on its own.
             micStreamRef.current = s;
             return s;
@@ -272,7 +288,7 @@ export function useVoiceCapture({
           preSpeechPadMs: 256,
           onSpeechStart: () => {
             if (pausedRef.current) return;
-            // Enrollment is a user-driven capture — never let TTS suppression
+            // Enrollment is a user-driven capture - never let TTS suppression
             // swallow it, otherwise the panel hangs at "waiting for mic" while
             // Claude is mid-greeting. Barge-in is also pointless here: the
             // user isn't trying to interrupt, they're recording themselves.
@@ -286,16 +302,46 @@ export function useVoiceCapture({
             // firing barge-in here would let a single VAD trip from AEC
             // residue cut Claude off mid-sentence.
             segmentSuppressedRef.current = suppressedRef.current && !tapping;
+            cloudLiveFramesRef.current = false;
+            cloudStreamAttemptedRef.current = false;
+            cloudStreamStartRef.current = null;
+            // Open the streaming ASR WebSocket immediately so frames flow in
+            // real time. Suppressed speech (TTS playing) and voice-lock paths
+            // can't upload before their end-of-segment gate - they defer the
+            // stream to onSpeechEnd and replay the completed segment there.
+            if (
+              !tapping
+              && !segmentSuppressedRef.current
+              && !voiceLockEnabledRef.current
+            ) {
+              cloudLiveFramesRef.current = true;
+              cloudStreamAttemptedRef.current = true;
+              const start = window.vibeMeet.startAsrStream(langRef.current, true);
+              cloudStreamStartRef.current = start;
+              void start.then((result) => {
+                if (!result.ok) {
+                  cloudLiveFramesRef.current = false;
+                  setLastError(result.error);
+                }
+              }).catch((error: unknown) => {
+                cloudLiveFramesRef.current = false;
+                setLastError(String((error as Error)?.message ?? error));
+              });
+            }
             setListening(true);
             if (!tapping && !segmentSuppressedRef.current) {
-              // TTS isn't playing — fire barge-in immediately so the next
+              // TTS isn't playing - fire barge-in immediately so the next
               // assistant utterance (if one starts mid-segment) gets cut off
               // without waiting for speech-end.
               onBargeInRef.current?.();
             }
           },
           onSpeechEnd: async (audio: Float32Array) => {
+            cloudLiveFramesRef.current = false;
             if (pausedRef.current) {
+              if (cloudStreamAttemptedRef.current) void window.vibeMeet.cancelAsrStream();
+              cloudStreamAttemptedRef.current = false;
+              cloudStreamStartRef.current = null;
               setListening(false);
               return;
             }
@@ -317,6 +363,8 @@ export function useVoiceCapture({
             const tap = tapSegmentRef.current;
             if (tap) {
               segmentSuppressedRef.current = false;
+              cloudStreamAttemptedRef.current = false;
+              cloudStreamStartRef.current = null;
               try { tap(audio); } catch (e) { setLastError(String((e as Error)?.message ?? e)); }
               return;
             }
@@ -325,9 +373,9 @@ export function useVoiceCapture({
               // Re-check suppression at speech-end. If TTS has already stopped
               // by the time the user finished speaking (common when their
               // reply starts mid-utterance and ends after playback finishes),
-              // don't apply the barge-in DROP gate — just clear the latch and
+              // don't apply the barge-in DROP gate - just clear the latch and
               // fall through to the normal voice-lock + transcribe path so the
-              // short reply ("OK", "嗯", "好的") still reaches whisper.
+              // short reply ("OK", "嗯", "好的") still reaches ASR.
               if (!suppressedRef.current) {
                 segmentSuppressedRef.current = false;
                 segmentFrameCountRef.current = 0;
@@ -335,7 +383,7 @@ export function useVoiceCapture({
               } else {
                 segmentSuppressedRef.current = false;
                 // Segment started during TTS playback AND TTS is still playing
-                // at speech-end — so this audio is either the AI's own voice
+                // at speech-end - so this audio is either the AI's own voice
                 // looping back through the mic (echo) or a real interruption.
                 const frames = segmentFrameCountRef.current;
                 const avgProb = frames > 0 ? segmentProbSumRef.current / frames : 0;
@@ -346,9 +394,9 @@ export function useVoiceCapture({
                 if (lockOn && enrolled) {
                   // Voice-lock is the authoritative echo filter during playback:
                   // the AI's TTS voice won't match the enrolled user, so a
-                  // sub-threshold similarity means echo → drop silently (no
+                  // sub-threshold similarity means echo -> drop silently (no
                   // barge-in, no transcript). Only a match counts as a real
-                  // interrupt. No short-clip bypass here — during playback an
+                  // interrupt. No short-clip bypass here - during playback an
                   // unverifiable clip is far likelier echo than a real barge-in,
                   // so anything we can't positively identify as the user drops.
                   let matched = false;
@@ -365,12 +413,12 @@ export function useVoiceCapture({
                         decision: matched ? 'INTERRUPT' : 'DROP(echo)',
                       });
                     } else {
-                      console.info('[barge-in] voice-lock echo gate: unverifiable clip during TTS → DROP', {
+                      console.info('[barge-in] voice-lock echo gate: unverifiable clip during TTS -> DROP', {
                         durationSec: +(audio.length / 16000).toFixed(2),
                       });
                     }
                   } catch (e) {
-                    console.error('[barge-in] echo embedding failed → DROP to be safe:', e);
+                    console.error('[barge-in] echo embedding failed -> DROP to be safe:', e);
                   }
                   if (!matched) {
                     return;
@@ -380,9 +428,9 @@ export function useVoiceCapture({
                   bargeVerified = true;
                   onBargeInRef.current?.();
                 } else {
-                  // No enrolled voiceprint to compare against — fall back to the
+                  // No enrolled voiceprint to compare against - fall back to the
                   // duration + average-confidence heuristic. Enough audio AND
-                  // sustained high speech probability → real interrupt;
+                  // sustained high speech probability -> real interrupt;
                   // otherwise drop as echo/throat-clear/cough.
                   const longEnough = audio.length >= MIN_SAMPLES_FOR_BARGE_IN;
                   const confident = avgProb >= MIN_AVG_PROB_FOR_BARGE_IN;
@@ -409,7 +457,7 @@ export function useVoiceCapture({
             }
 
             // Voice-lock gate: drop segments that don't match the enrolled
-            // speaker. Skip the gate on very short clips — embeddings on
+            // speaker. Skip the gate on very short clips - embeddings on
             // <0.5s of audio are too noisy to act on, and forcing the user to
             // re-say "yes"/"ok" hurts UX more than letting a stray short
             // utterance through.
@@ -418,7 +466,7 @@ export function useVoiceCapture({
             const durationSec = audio.length / 16000;
             if (bargeVerified) {
               // Already confirmed as the enrolled user by the suppressed-segment
-              // echo gate above — skip the redundant embed + compare.
+              // echo gate above - skip the redundant embed + compare.
               console.info('[voice-lock] barge-in already verified, passing', {
                 durationSec: +durationSec.toFixed(2),
               });
@@ -456,28 +504,47 @@ export function useVoiceCapture({
                   console.warn('[voice-lock] embedSpeaker returned null (segment likely too short post-fbank), passing through');
                 }
               } catch (e) {
-                // Embedding failed — historically we let the segment through so
+                // Embedding failed - historically we let the segment through so
                 // a flaky model load wouldn't silently swallow legitimate
                 // speech. But that also masks a misconfigured gate (the user
                 // thinks they're protected when they aren't), so log loudly.
-                console.error('[voice-lock] embedding failed, passing through — gate is NOT enforcing:', e);
+                console.error('[voice-lock] embedding failed, passing through - gate is NOT enforcing:', e);
               }
             }
 
-            // No renderer-side overlap guard: the main-process single-flight
-            // queue in whisper.ts serializes work and resolves IPC calls in
-            // submission order, so rapid-fire segments end up in the user's
-            // transcript in the order they were spoken.
+            // Resolve the streaming ASR session. If we opened it on
+            // speech-start the frames already flowed live; otherwise (suppressed
+            // or voice-lock path) open it now and replay the completed segment
+            // in 512-sample frames so the transcript still covers the whole
+            // utterance.
             try {
-              // ipcRenderer.invoke uses structured clone (not Transferable), so
-              // the buffer is *copied* across the bridge — it isn't detached.
-              // We still allocate our own copy here because VAD reuses the
-              // same Float32Array for the next segment, and structured clone
-              // happens after this call returns; without a copy, a fast
-              // follow-up segment could mutate the buffer mid-clone.
-              const copy = new Float32Array(audio.length);
-              copy.set(audio);
-              const r = await window.vibeMeet.transcribePcm(copy.buffer, langRef.current);
+              let r:
+                | { ok: true; text: string }
+                | { ok: false; error: string };
+              let started:
+                | { ok: true; sessionId: string }
+                | { ok: false; error: string };
+              if (cloudStreamAttemptedRef.current && cloudStreamStartRef.current) {
+                started = await cloudStreamStartRef.current;
+              } else {
+                started = await window.vibeMeet.startAsrStream(langRef.current, false);
+                if (started.ok) {
+                  const VAD_FRAME_SAMPLES = 512;
+                  for (let offset = 0; offset < audio.length; offset += VAD_FRAME_SAMPLES) {
+                    const end = Math.min(audio.length, offset + VAD_FRAME_SAMPLES);
+                    const frame = new Float32Array(end - offset);
+                    frame.set(audio.subarray(offset, end));
+                    window.vibeMeet.sendAsrStreamFrame(frame.buffer, true);
+                  }
+                }
+              }
+              cloudStreamAttemptedRef.current = false;
+              cloudStreamStartRef.current = null;
+              if (!started.ok) {
+                r = started;
+              } else {
+                r = await window.vibeMeet.finishAsrStream(started.sessionId);
+              }
               if (r.ok && r.text.trim()) {
                 onTranscriptRef.current(r.text.trim());
               } else if (!r.ok) {
@@ -488,12 +555,29 @@ export function useVoiceCapture({
             }
           },
           onVADMisfire: () => {
+            cloudLiveFramesRef.current = false;
+            if (cloudStreamAttemptedRef.current) void window.vibeMeet.cancelAsrStream();
+            cloudStreamAttemptedRef.current = false;
+            cloudStreamStartRef.current = null;
             segmentSuppressedRef.current = false;
             segmentFrameCountRef.current = 0;
             segmentProbSumRef.current = 0;
             setListening(false);
           },
-          onFrameProcessed: (probs) => {
+          onFrameProcessed: (probs, frame) => {
+            // Push the VAD frame to the streaming ASR WebSocket while a live
+            // stream is accepting audio. The copy is needed because the VAD
+            // reuses the frame buffer and ipcRenderer.send serializes
+            // asynchronously.
+            if (
+              !pausedRef.current
+              && tapSegmentRef.current == null
+              && cloudLiveFramesRef.current
+            ) {
+              const copy = new Float32Array(frame.length);
+              copy.set(frame);
+              window.vibeMeet.sendAsrStreamFrame(copy.buffer, true);
+            }
             // Cheap UI signal: smoothed speech probability for the mic meter.
             setSpeechLevel((prev) => prev * 0.6 + probs.isSpeech * 0.4);
             // Accumulate per-segment stats used by the barge-in gate at
@@ -533,7 +617,7 @@ export function useVoiceCapture({
         );
         if (cancelled) return;
         setPermissionDenied(isPerm);
-        setLastError(isPerm ? 'Microphone permission denied — please enable in System Settings' : `Mic init failed: ${msg}`);
+        setLastError(isPerm ? 'Microphone permission denied - please enable in System Settings' : `Mic init failed: ${msg}`);
         setActive(false);
         setStatus(isPerm ? 'permission-denied' : 'failed');
       }
@@ -542,6 +626,10 @@ export function useVoiceCapture({
 
     return () => {
       cancelled = true;
+      cloudLiveFramesRef.current = false;
+      cloudStreamAttemptedRef.current = false;
+      cloudStreamStartRef.current = null;
+      void window.vibeMeet.cancelAsrStream();
       const stream = micStreamRef.current;
       micStreamRef.current = null;
       void queueRelease(createdVad, stream);

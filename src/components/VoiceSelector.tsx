@@ -7,7 +7,7 @@
 import { listChineseVoices, tierLabel, type ListedVoice } from '../lib/voice-quality';
 import type { SpeechFilterMode } from '../lib/speech-format';
 import type { HandheldOverride } from '../lib/handheld-mode';
-import type { AsrProvider, CloudAsrSettings } from '../types';
+import type { XfyunAsrCredentials } from '../types';
 
 interface VoiceSelectorProps {
   voices: SpeechSynthesisVoice[];
@@ -22,11 +22,9 @@ interface VoiceSelectorProps {
   onChangeReportMode: (enabled: boolean) => void;
   handheldMode: HandheldOverride;
   onChangeHandheldMode: (mode: HandheldOverride) => void;
-  asrProvider: AsrProvider;
-  onChangeAsrProvider: (provider: AsrProvider) => void;
-  cloudAsr: CloudAsrSettings;
-  onCloudAsrInput: (patch: Partial<CloudAsrSettings>) => void;
-  onCloudAsrCommit: () => void;
+  xfyunAsr: XfyunAsrCredentials;
+  onXfyunAsrInput: (patch: Partial<XfyunAsrCredentials>) => void;
+  onXfyunAsrCommit: () => void;
 }
 
 function describeVoice(v: ListedVoice): string {
@@ -47,11 +45,9 @@ export function VoiceSelector({
   onChangeReportMode,
   handheldMode,
   onChangeHandheldMode,
-  asrProvider,
-  onChangeAsrProvider,
-  cloudAsr,
-  onCloudAsrInput,
-  onCloudAsrCommit,
+  xfyunAsr,
+  onXfyunAsrInput,
+  onXfyunAsrCommit,
 }: VoiceSelectorProps) {
   const chineseVoices = listChineseVoices(voices);
   const hasPremium = chineseVoices.some((v) => v.tier !== 'default');
@@ -116,65 +112,48 @@ export function VoiceSelector({
 
       <div className="drawer-settings-row" style={{ marginTop: 12 }}>
         <div className="drawer-settings-label">
-          <div className="drawer-settings-title">ASR 提供商</div>
+          <div className="drawer-settings-title">讯飞 ASR</div>
           <div className="drawer-settings-hint">
-            {asrProvider === 'cloud'
-              ? '云端 API 转写，适合无法运行本地模型的设备'
-              : '本地 whisper 转写，离线可用'}
+            讯飞 IAT 流式语音转写。填写下方三项凭证后失焦自动保存，未配置时语音识别不可用。
           </div>
-        </div>
-        <div className="handheld-mode-switch" role="group" aria-label="ASR 提供商">
-          {(['local', 'cloud'] as const).map((p) => (
-            <button
-              key={p}
-              type="button"
-              className={`handheld-mode-option ${asrProvider === p ? 'handheld-mode-option-active' : ''}`}
-              aria-pressed={asrProvider === p}
-              onClick={() => onChangeAsrProvider(p)}
-            >
-              {p === 'local' ? '本地' : '云端'}
-            </button>
-          ))}
         </div>
       </div>
 
-      {asrProvider === 'cloud' && (
-        <div className="asr-cloud-fields">
-          <input
-            className="asr-cloud-input"
-            type="text"
-            value={cloudAsr.baseUrl}
-            placeholder="Base URL（默认 https://api.openai.com/v1）"
-            aria-label="云端 ASR Base URL"
-            onChange={(e) => onCloudAsrInput({ baseUrl: e.target.value })}
-            onBlur={onCloudAsrCommit}
-          />
-          <input
-            className="asr-cloud-input"
-            type="password"
-            value={cloudAsr.apiKey}
-            placeholder="API Key"
-            aria-label="云端 ASR API Key"
-            autoComplete="off"
-            onChange={(e) => onCloudAsrInput({ apiKey: e.target.value })}
-            onBlur={onCloudAsrCommit}
-          />
-          <input
-            className="asr-cloud-input"
-            type="text"
-            value={cloudAsr.model}
-            placeholder="模型（默认 whisper-1）"
-            aria-label="云端 ASR 模型"
-            onChange={(e) => onCloudAsrInput({ model: e.target.value })}
-            onBlur={onCloudAsrCommit}
-          />
-          <div className="drawer-settings-hint">
-            兼容 OpenAI /audio/transcriptions 的端点都可用，例如 OpenAI（whisper-1）、
-            Groq（https://api.groq.com/openai/v1，whisper-large-v3）、硅基流动。
-            失焦自动保存；云端失败不会自动回退本地。
-          </div>
+      <div className="asr-cloud-fields">
+        <input
+          className="asr-cloud-input"
+          type="text"
+          value={xfyunAsr.appId}
+          placeholder="AppID"
+          aria-label="讯飞 AppID"
+          onChange={(e) => onXfyunAsrInput({ appId: e.target.value })}
+          onBlur={onXfyunAsrCommit}
+        />
+        <input
+          className="asr-cloud-input"
+          type="password"
+          value={xfyunAsr.apiKey}
+          placeholder="API Key"
+          aria-label="讯飞 API Key"
+          autoComplete="off"
+          onChange={(e) => onXfyunAsrInput({ apiKey: e.target.value })}
+          onBlur={onXfyunAsrCommit}
+        />
+        <input
+          className="asr-cloud-input"
+          type="password"
+          value={xfyunAsr.apiSecret}
+          placeholder="API Secret"
+          aria-label="讯飞 API Secret"
+          autoComplete="off"
+          onChange={(e) => onXfyunAsrInput({ apiSecret: e.target.value })}
+          onBlur={onXfyunAsrCommit}
+        />
+        <div className="drawer-settings-hint">
+          在讯飞开放平台控制台获取「语音听写」服务的 AppID、API Key、API Secret。
+          凭证保存在本地 settings.json；单次识别上限 55 秒。
         </div>
-      )}
+      </div>
 
       <div className="drawer-settings-row" style={{ marginTop: 12 }}>
         <div className="drawer-settings-label">

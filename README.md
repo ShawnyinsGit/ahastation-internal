@@ -7,10 +7,13 @@
 ## 核心特性
 
 - **会议模式（默认）** — 语音优先的会议界面：员工磁贴（状态/speaking/权限卡）、屏幕共享与快照、会议级 Coordinator 编排多员工并行交付
+- **会议内可见任务协作** — Coordinator 规划/审查/集成；Worker 在隔离 worktree 执行；高风险始终用户确认；最终 Meeting 验收才发布到用户基线
+- **审查必须走完** — 冻结候选交给 Coordinator 后进入受驱动的审查回合：未覆盖完就按回合续推，审查期其它会议工具一律拒绝；停滞则暂停并交回用户，绝不自动判过
+- **稳定 Worker 门禁** — Claude Code / Codex 需通过真实纵切烟测才标为 stable；OpenCode / Kimi 首发保持 experimental
 - **员工独立编辑器窗口** — 每个数字员工一扇：文件树、代码查看（shiki 高亮）与编辑保存、Diff/Todo/活动实时面板、PTY 终端（xterm.js）
 - **权限桥** — 工具调用的审批统一走会议 UI，destructive 操作落 macOS 原生确认框（防 renderer 伪造）；fail-closed 超时
 - **陪伴屏** — 像素风虚拟会议室悬浮窗：每个员工一个角色一个工位，状态动画 + NPC 气泡 + 吉祥物聚合提醒（"3 人工作中 · 1 人卡住 · 1 条待审批"）
-- **语音链路** — 本地 whisper.cpp ASR（Apple Silicon 实测）+ 系统 TTS；VAD barge-in 打断、声纹锁
+- **语音链路** — 讯飞 IAT 流式 ASR + 系统 TTS；VAD barge-in 打断、声纹锁
 - **掌机模式** — 小屏布局（chip 条/底部抽屉/审批模态卡）、编辑器 App 内 overlay（语音不断）、双屏热插拔迁移（外接显示器 = 桌面模式，内置屏 = 陪伴屏）
 - **会话恢复** — append-only journal，重启后会议与员工会话可恢复（只读再激活）
 
@@ -25,11 +28,25 @@
 ```bash
 npm ci
 npm run dev          # vite + electron 开发模式
-npm test             # 256 项 node 测试（先构建 electron 侧）
+npm test             # 全量 node 测试（先构建 electron 侧）
 # 双侧 typecheck
-node node_modules/typescript/bin/tsc --noEmit -p tsconfig.json
-node node_modules/typescript/bin/tsc --noEmit -p tsconfig.electron.json
+npm run typecheck
 ```
+
+### 真实 Worker 稳定性烟测（付费，默认保护）
+
+```bash
+# 显式启用后才会调用真实 Claude / Codex Worker
+set AHASTATION_REAL_WORKER_SMOKE=1
+npm run test:real-workers
+```
+
+覆盖：WorkReport、Steering interrupt/resume、高风险权限桥、规范化决策、
+审查集成与最终 Meeting 发布。OpenCode / Kimi 不因此升为 stable。
+
+烟测**不会替会议提交审查结论**：它从不调用 `submitDeliveryChunkReview` /
+`completeDeliveryReview`，只断言 Coordinator 自己调用了这些 MCP 工具并把覆盖率
+走完。审查中途停住就是失败，不会被脚本补一刀盖过去。
 
 ## E2E 冒烟（OpenCode 后端全链）
 

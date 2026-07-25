@@ -130,7 +130,318 @@ export interface IdeRegistryState {
 
 export type AgentSource = 'talker' | string;
 
-export type WorkerStatus = 'pending' | 'running' | 'interrupted' | 'done' | 'failed';
+export const MEETING_TASK_STATUSES = [
+  'draft',
+  'pending',
+  'running',
+  'verifying',
+  'coordinator-reviewing',
+  'integration-queued',
+  'integrating',
+  'accepted',
+  'blocked',
+  'reworking',
+  'integration-conflict',
+  'budget-paused',
+  'interrupted',
+  'failed',
+  'cancelled',
+] as const;
+
+export type MeetingTaskStatus = (typeof MEETING_TASK_STATUSES)[number];
+
+export type WorkerStatus =
+  | 'pending'
+  | 'running'
+  | 'verifying'
+  | 'reviewing'
+  | 'coordinator-reviewing'
+  | 'awaiting-acceptance'
+  | 'integration-queued'
+  | 'integrating'
+  | 'integration-conflict'
+  | 'reworking'
+  | 'budget-paused'
+  | 'accepted'
+  | 'interrupted'
+  | 'done'
+  | 'failed';
+
+export interface TaskExecutionProfile {
+  schemaVersion: 1;
+  backendId: string;
+  modelPreference?: string;
+  workMode: 'fast' | 'balanced' | 'deep';
+  contextMode: 'minimal' | 'meeting-summary' | 'selected-history' | 'full-visible-history';
+  timeoutMs: number;
+  maxTokenBudget: number;
+}
+
+export interface TaskBudget {
+  schemaVersion: 1;
+  maxAttempts: number;
+  maxTotalTokens: number;
+  maxTotalDurationMs: number;
+  maxStagnantAttempts: number;
+}
+
+export interface BackendEffectiveProfile {
+  schemaVersion: 1;
+  backendId: string;
+  runtimeVersion: string;
+  model: string;
+  nativeReasoning?: Record<string, unknown>;
+  unsupported: string[];
+  downgraded: string[];
+  capabilityHash: string;
+}
+
+export interface ContextPackage {
+  schemaVersion: 1;
+  taskId: string;
+  attempt: number;
+  mode: 'minimal' | 'meeting-summary' | 'selected-history' | 'full-visible-history';
+  messages: Array<{ id: string; role: 'user' | 'assistant'; text: string }>;
+  decisions: Array<{ id: string; summary: string }>;
+  dependencyReports: Array<{ taskId: string; reportHash: string; summary: string }>;
+  attachments: Array<{ id: string; name: string; contentHash: string }>;
+  byteLength: number;
+  packageHash: string;
+}
+
+export interface TaskAuthorityGrant {
+  schemaVersion: 1;
+  taskId: string;
+  attempt: number;
+  planVersion: number;
+  approvalDecisionId: string;
+  authorityRequestHash: string;
+  workspaceIdentityHash: string;
+  workspaceRoot: string;
+  writePaths: string[];
+  allowedToolKinds: string[];
+  allowedWorkingDirectories: string[];
+  allowedCommands: string[][];
+  allowedEnvironmentKeys: string[];
+  maxCommandTimeoutMs: number;
+  allowedNetworkHosts: string[];
+  approvedAt: number;
+  expiresAt: number;
+  grantHash: string;
+}
+
+export interface TaskMessage {
+  schemaVersion: 1;
+  id: string;
+  seq: number;
+  taskId: string;
+  attempt: number;
+  sender: 'user' | 'coordinator' | 'worker' | 'system';
+  kind:
+    | 'instruction'
+    | 'follow-up'
+    | 'steer'
+    | 'interrupt'
+    | 'status-request'
+    | 'progress'
+    | 'question'
+    | 'approval-request'
+    | 'approval-response';
+  replyTo?: string;
+  payload: unknown;
+  status: 'queued' | 'delivered' | 'acknowledged' | 'failed';
+  timestamp: number;
+}
+
+export interface RendererTaskEvent {
+  schemaVersion: 1;
+  eventId: string;
+  seq: number;
+  previousSeq: number;
+  timestamp: number;
+  taskId: string;
+  attempt?: number;
+  type: string;
+  data: unknown;
+}
+
+export interface RendererTaskSnapshot {
+  schemaVersion: 1;
+  sessionId: string;
+  meetingId: string;
+  task: {
+    id: string;
+    title: string;
+    prompt: string;
+    deps: string[];
+    status: string;
+    backendId: string;
+    attempt: number;
+    summary?: string;
+    requestedProfile?: TaskExecutionProfile;
+    effectiveProfile?: BackendEffectiveProfile;
+    context?: {
+      mode?: string;
+      messageCount: number;
+      decisionCount: number;
+      dependencyReportCount: number;
+      attachmentCount: number;
+      byteLength?: number;
+      packageHash?: string;
+    };
+    authority?: {
+      allowedToolKinds: string[];
+      writePathCount: number;
+      commandCount: number;
+      networkHostCount: number;
+      hasEnvironmentAccess: boolean;
+      expiresAt?: number;
+    };
+    workspace?: {
+      kind?: string;
+      branch?: string;
+      sourceRevision?: string;
+      managed?: boolean;
+      diagnostic?: string;
+    };
+    acceptanceCriteria?: unknown[];
+    budget?: TaskBudget;
+    budgetState?: {
+      attempts: number;
+      totalTokens: number;
+      totalDurationMs: number;
+      stagnantAttempts: number;
+      reason?: string;
+    };
+    recovery?: {
+      classification: string;
+      reasonCode: string;
+      allowedActions: string[];
+      autoResume: boolean;
+    };
+  };
+  mailbox: TaskMessage[];
+  mailboxTruncated: boolean;
+  attempts: Array<{
+    attempt: number;
+    backendId: string;
+    status: string;
+    startedAt?: number;
+    finishedAt?: number;
+    durationMs?: number;
+    tokenCost?: number;
+    report?: WorkReport;
+    verification?: unknown;
+    reviewCoverage?: unknown;
+    candidateCommit?: string;
+    failureFingerprint?: string | null;
+    delivery?: DeliveryView;
+  }>;
+  diagnostics: Array<{ code: string; message: string }>;
+  reviewEvidence?: {
+    reviewId: string;
+    status: string;
+    pending: Array<{
+      chunkId: string;
+      chunkHash: string;
+      path: string;
+      kind: string;
+      byteLength: number;
+      lineCount: number;
+    }>;
+    /** Chunks the Coordinator still owes a verdict. Non-empty means review is unfinished. */
+    uncoveredChunkIds: string[];
+    pauseReason?: string;
+  };
+  lastSeq: number;
+}
+
+export interface TasksApi {
+  getSnapshot: (
+    sessionId: string,
+    taskId: string,
+  ) => Promise<
+    | { ok: true; value: RendererTaskSnapshot }
+    | { ok: false; error: string; code: string }
+  >;
+  getEvents: (
+    sessionId: string,
+    taskId: string,
+    afterSeq: number,
+    limit: number,
+  ) => Promise<
+    | {
+        ok: true;
+        value: {
+          events: RendererTaskEvent[];
+          nextAfterSeq: number;
+          hasMore: boolean;
+        };
+      }
+    | { ok: false; error: string; code: string }
+  >;
+  onEvent: (
+    sessionId: string,
+    taskId: string,
+    afterSeq: number,
+    listener: (event: RendererTaskEvent) => void,
+  ) => () => void;
+  followUp: (
+    sessionId: string,
+    taskId: string,
+    text: string,
+  ) => Promise<{ ok: boolean; error?: string; message?: TaskMessage }>;
+  steer: (
+    sessionId: string,
+    taskId: string,
+    text: string,
+  ) => Promise<{ ok: boolean; error?: string; queued?: boolean }>;
+  interrupt: (
+    sessionId: string,
+    taskId: string,
+    reason?: string,
+  ) => Promise<{ ok: boolean; error?: string }>;
+  extendBudget: (
+    sessionId: string,
+    taskId: string,
+    expectedPlanVersion: number,
+    budget: TaskBudget,
+  ) => Promise<{
+    ok: boolean;
+    error?: string;
+    planVersion?: number;
+    budget?: TaskBudget;
+  }>;
+  confirmReviewEvidence: (
+    sessionId: string,
+    taskId: string,
+    reviewId: string,
+    chunkId: string,
+    chunkHash: string,
+  ) => Promise<{ ok: boolean; error?: string; review?: unknown }>;
+  resumeReview: (
+    sessionId: string,
+    taskId: string,
+    reviewId: string,
+  ) => Promise<{ ok: boolean; error?: string; review?: unknown }>;
+}
+
+export interface TaskWorkspaceSnapshot {
+  kind: 'read-only' | 'git-worktree' | 'shared-locked';
+  cwd: string;
+  branch?: string;
+  sourceRevision: string;
+  lockKeys: string[];
+  baseline?: {
+    kind: 'git-clean' | 'git-dirty' | 'non-git';
+    revision: string;
+    changedPaths: string[];
+    untrackedPaths: string[];
+    truncated: boolean;
+  };
+  managed?: boolean;
+  diagnostic?: 'dirty-base-visible-read-only' | 'shared-locked-compatibility-only';
+}
 
 export type WorkerSpecialty =
   | 'general'
@@ -157,18 +468,304 @@ export interface MeetingPlanNode {
   title: string;
   status: WorkerStatus;
   deps: string[];
+  supersedesTaskId?: string;
+  executorBackendId?: string;
+  writePaths?: string[];
+  executionProfile?: TaskExecutionProfile;
+  contextSelection?: TaskContextSelection;
+  workspaceMode?: TaskWorkspaceMode;
+  authorityRequest?: TaskAuthorityRequest;
+  budget?: TaskBudget;
+  budgetState?: {
+    attempts: number;
+    totalTokens: number;
+    totalDurationMs: number;
+    stagnantAttempts: number;
+    reason?: string;
+  };
+  workspaceDiagnostic?: {
+    code: 'dirty-workspace-write-blocked' | 'git-worktree-requires-repository';
+    message: string;
+    baseline: {
+      kind: 'git-clean' | 'git-dirty' | 'non-git';
+      revision: string;
+      changedPaths: string[];
+      untrackedPaths: string[];
+      truncated: boolean;
+    };
+    actions: Array<'handle-outside-ahastation' | 'revise-to-shared-locked' | 'cancel-task'>;
+  };
+  recovery?: {
+    classification: string;
+    reasonCode: string;
+    allowedActions: string[];
+    autoResume: boolean;
+  };
 }
 
 export interface MeetingPlan {
+  version: number;
   nodes: MeetingPlanNode[];
+}
+
+export interface CoordinatorBriefing {
+  id: string;
+  timestamp: number;
+  kind: 'delivery-ready' | 'accepted' | 'failed' | 'stalled' | 'capacity' | 'workspace-blocked';
+  title: string;
+  summary: string;
+  completedTasks: number;
+  failedTasks: number;
+  files: number;
+  testsPassed: number;
+  testsFailed: number;
+  blockers: string[];
+  recommendedAction: 'continue' | 'review' | 'rework' | 'revise-plan' | 'request-user-decision';
+  workerId?: string;
+  taskId?: string;
+  capacity?: { running: number; limit: number; waiting: number };
 }
 
 /** One file delivered by a worker turn. Path is absolute; the renderer
  *  fetches contents via `documents.read`. */
 export interface WorkerDeliveryFile {
   path: string;
+  snapshotPath?: string;
+  /** Legacy recovery field from builds that stored snapshots in the project. */
   snapshotRelativePath?: string;
+  sizeBytes?: number;
+  sha256?: string;
+  previewStatus?: 'copied' | 'too-large' | 'missing' | 'invalid' | 'copy-failed';
 }
+
+export interface WorkReport {
+  status: 'completed' | 'partial' | 'blocked';
+  summary: string;
+  files: Array<{ path: string; action: 'created' | 'modified' | 'deleted' }>;
+  tests: Array<{
+    command: string;
+    status: 'passed' | 'failed' | 'not-run';
+    summary?: string;
+  }>;
+  unresolved: Array<{ code: string; message: string; blocking: boolean }>;
+}
+
+export interface TaskAttemptRecord {
+  schemaVersion: 1;
+  attempt: number;
+  backendId: string;
+  backendSessionId?: string;
+  contextPackageHash: string;
+  grantHash: string;
+  baseRevision: string;
+  workspace: TaskWorkspaceSnapshot | null;
+  messageSeqStart: number;
+  messageSeqEnd?: number;
+  report?: WorkReport;
+  verification?: {
+    status: 'passed' | 'failed' | 'not-run';
+    checks: Array<{
+      name: string;
+      status: 'passed' | 'failed' | 'not-run';
+      summary?: string;
+    }>;
+  };
+  reviewCoverage?: {
+    totalChunks: number;
+    reviewedChunks: number;
+    complete: boolean;
+  };
+  candidateCommit?: string;
+  failureFingerprint?: string | null;
+  tokenCost: number;
+  durationMs: number;
+  startedAt: number;
+  finishedAt?: number;
+}
+
+export interface MeetingTaskRecord {
+  schemaVersion: 1;
+  id: string;
+  title: string;
+  prompt: string;
+  deps: string[];
+  status: MeetingTaskStatus;
+  planVersion: number;
+  requestedProfile: TaskExecutionProfile;
+  effectiveProfile?: BackendEffectiveProfile;
+  contextPackage: ContextPackage;
+  authorityGrant: TaskAuthorityGrant;
+  workspace: TaskWorkspaceSnapshot | null;
+  currentAttempt: number;
+  attempts: TaskAttemptRecord[];
+  mailboxCursor: number;
+  eventCursor: number;
+}
+
+export type WorkerAdapterSignal =
+  | { kind: 'progress'; message: string; percent?: number }
+  | {
+      kind: 'tool';
+      toolName: string;
+      phase: 'started' | 'completed' | 'failed';
+      detail?: string;
+      callId?: string;
+      output?: string;
+      exitCode?: number;
+      durationMs?: number;
+    }
+  | { kind: 'delivery'; report: WorkReport }
+  | { kind: 'failed'; code: string; message: string; retryable: boolean }
+  | { kind: 'ended'; reason: 'completed' | 'interrupted' | 'crashed' };
+
+/** One Bash/command execution projected for the CLI execution view. */
+export interface CommandRun {
+  id: string;
+  command: string;
+  status: 'running' | 'completed' | 'failed';
+  output?: string;
+  exitCode?: number;
+  durationMs?: number;
+  startedAt: number;
+  endedAt?: number;
+  backendId?: string;
+  source?: AgentSource;
+}
+
+export interface WorkerEventV2 {
+  schemaVersion: 2;
+  eventId: string;
+  seq: number;
+  timestamp: number;
+  meetingId: string;
+  taskId: string;
+  attempt: number;
+  workerId: string;
+  backendId: string;
+  payload: WorkerAdapterSignal;
+}
+
+export interface DeliveryView {
+  id: string;
+  meetingId: string;
+  status:
+    | 'awaiting-spec-approval'
+    | 'preparing-workspace'
+    | 'executing'
+    | 'verifying'
+    | 'reviewing'
+    | 'coordinator-reviewing'
+    | 'awaiting-delivery-acceptance'
+    | 'integration-queued'
+    | 'integrating'
+    | 'integration-conflict'
+    | 'accepted'
+    | 'reworking'
+    | 'interrupted'
+    | 'failed'
+    | 'cancelled';
+  spec: {
+    version: number;
+    objective: string;
+    acceptanceCriteria: Array<{
+      id: string;
+      description: string;
+      verification:
+        | { kind: 'command'; argv: string[]; timeoutMs?: number }
+        | { kind: 'manual' };
+    }>;
+  };
+  sourceRevision: string;
+  workspace: string;
+  attempt: number;
+  attempts: Array<{
+    attempt: number;
+    report: WorkReport;
+    verification?: { passed: boolean; checks: unknown[]; error?: string };
+    review?: { passed: boolean; findings: unknown[] };
+    outcome:
+      | 'reported'
+      | 'worker-incomplete'
+      | 'verification-failed'
+      | 'review-failed'
+      | 'awaiting-acceptance'
+      | 'returned'
+      | 'accepted';
+    feedback?: string;
+    updatedAt: number;
+  }>;
+  candidate?: {
+    id: string;
+    attempt: number;
+    report: WorkReport;
+    verification: { passed: boolean; checks: unknown[]; error?: string };
+    review: { passed: boolean; findings: unknown[] };
+  };
+  integration?: Record<string, unknown>;
+  error?: string;
+  updatedAt: number;
+}
+
+export interface MeetingDelivery {
+  schemaVersion: 1;
+  id: string;
+  meetingId: string;
+  planVersion: number;
+  integrationHead: string;
+  expectedUserBaseRevision: string;
+  publicationState: 'meeting-branch-only' | 'published';
+  tasks: Array<{
+    taskId: string;
+    title: string;
+    attempt: number;
+    deliveryId: string;
+    candidateId: string;
+    candidateCommit: string;
+    integratedCommit: string;
+    reviewHash: string;
+    verification: { passed: true; checks: Array<{ summary: string }> };
+    review: { passed: true; findings: Array<{ summary: string }> };
+    approvalDecisionId?: string;
+    limitations: string[];
+  }>;
+  changedFiles: Array<{
+    taskId: string;
+    commit: string;
+    path: string;
+    previousPath?: string;
+    status: string;
+    evidenceKind: string;
+    additions: number | null;
+    deletions: number | null;
+    requiresUserConfirmation: boolean;
+  }>;
+  approvals: Array<{ taskId: string; decisionId: string }>;
+  unresolvedWork: Array<{ taskId: string; title: string; status: string; reason: string }>;
+  meetingVerification: {
+    passed: true;
+    integrationHead: string;
+    checks: Array<{ taskId: string; summary: string }>;
+  };
+  contentHash: string;
+}
+
+export type FinalMeetingDecision =
+  | {
+      kind: 'accept';
+      deliveryId: string;
+      contentHash: string;
+      integrationHead: string;
+      decidedAt: number;
+    }
+  | {
+      kind: 'rework';
+      deliveryId: string;
+      contentHash: string;
+      reason: string;
+      planVersion: number;
+      taskIds: string[];
+      decidedAt: number;
+    };
 
 /** Every event from main is tagged with the sessionId of the slot that
  *  emitted it. Renderer's multi-slot store routes the event to the right
@@ -183,9 +780,20 @@ export type RendererEvent =
   | { kind: 'worker-spawned'; workerId: string; title: string; deps: string[]; specialty: WorkerSpecialty; source?: AgentSource; sessionId?: string; hostId?: string }
   | { kind: 'worker-ended'; workerId: string; status: WorkerStatus; summary?: string; source?: AgentSource; sessionId?: string; hostId?: string }
   | { kind: 'worker-stalled'; workerId: string; title: string; idleMs: number; currentTool: string | null; source?: AgentSource; sessionId?: string; hostId?: string }
-  | { kind: 'worker-delivery'; workerId: string; title: string; summary: string; taskId: string; files: WorkerDeliveryFile[]; source?: AgentSource; sessionId?: string; hostId?: string }
+  | { kind: 'worker-delivery'; workerId: string; title: string; summary: string; taskId: string; deliveryId: string; files: WorkerDeliveryFile[]; source?: AgentSource; sessionId?: string; hostId?: string }
+  | { kind: 'worker-event'; event: WorkerEventV2; source?: AgentSource; sessionId?: string; hostId?: string }
+  | { kind: 'delivery-status'; workerId: string; taskId: string; delivery: DeliveryView; source?: AgentSource; sessionId?: string; hostId?: string }
+  | { kind: 'meeting-delivery-updated'; delivery: MeetingDelivery | null; decision: FinalMeetingDecision | null; source?: AgentSource; sessionId?: string; hostId?: string }
+  | { kind: 'coordinator-briefing'; briefing: CoordinatorBriefing; source?: AgentSource; sessionId?: string; hostId?: string }
   | { kind: 'plan-updated'; plan: MeetingPlan; source?: AgentSource; sessionId?: string; hostId?: string }
-  | { kind: 'plan-proposed'; tasks: PlanMeetingTaskInput[]; source?: AgentSource; sessionId?: string; hostId?: string }
+  | {
+    kind: 'plan-proposed';
+    tasks: PlanMeetingTaskInput[];
+    brief?: MeetingPlanBrief;
+    source?: AgentSource;
+    sessionId?: string;
+    hostId?: string;
+  }
   | { kind: 'coordinator-failed'; hostId: string; candidateHostId: string | null; error?: string; source?: AgentSource; sessionId?: string }
   | { kind: 'decision-pending'; decisionId: string; question: string; path: string; recommendedTitle: string; calendarOk: boolean; remindersOk: boolean; source?: AgentSource; sessionId?: string; hostId?: string }
   | { kind: 'decision-resolved'; decisionId: string; question: string; path: string; conclusion: string; source?: AgentSource; sessionId?: string; hostId?: string }
@@ -280,8 +888,22 @@ export interface BackendInfo {
   supportsPermissions: boolean;
   supportsCoordinator: boolean;
   supportsWorkers: boolean;
+  workerImplementation: boolean;
+  workerRuntimeState:
+    | 'available'
+    | 'needs-install'
+    | 'needs-login'
+    | 'version-incompatible'
+    | 'contract-disabled'
+    | 'diagnostic-failed';
+  workerRuntimeReason: string;
+  version: string | null;
+  expectedVersion: string | null;
   /** Custom avatar image as base64 data URL. */
   customAvatar: string | null;
+  /** Release tier for the Worker contract. 'experimental' backends must be
+   *  labeled as such in the UI even when their structural gates pass. */
+  workerReleaseTier: 'stable' | 'experimental' | 'blocked';
 }
 
 export interface BackendAuthApi {
@@ -410,7 +1032,12 @@ export interface SessionsApi {
   resolveRecoveredTask: (
     sessionId: string | null,
     taskId: string,
-    action: 'continue' | 'retry' | 'complete' | 'abandon',
+    action:
+      | 'continue-read-only'
+      | 'continue-side-effecting'
+      | 'retry-attempt'
+      | 'resolve-integration-conflict'
+      | 'abandon-task',
   ) => Promise<{ ok: true } | { ok: false; error: string }>;
   addHost: (
     sessionId: string | null,
@@ -488,12 +1115,10 @@ export type ListDirResult =
   | { ok: true; path: string; parent: string | null; entries: DirListEntry[] }
   | { ok: false; error: string };
 
-export type AsrProvider = 'local' | 'cloud';
-
-export interface CloudAsrSettings {
-  baseUrl: string;
+export interface XfyunAsrCredentials {
+  appId: string;
   apiKey: string;
-  model: string;
+  apiSecret: string;
 }
 
 export interface VibeMeetApi {
@@ -510,7 +1135,38 @@ export interface VibeMeetApi {
   setPermissionMode: (sessionId: string | null, mode: string) => Promise<{ ok: boolean }>;
   setAutoApprove: (scope: AutoApproveScope) => Promise<{ ok: boolean; autoApproveScope?: AutoApproveScope }>;
   setOrchestrationMode: (sessionId: string | null, enabled: boolean) => Promise<{ ok: boolean; error?: string }>;
-  approvePlan: (sessionId: string | null, approved: boolean) => Promise<{ ok: boolean; error?: string }>;
+  approvePlan: (
+    sessionId: string | null,
+    approved: boolean,
+    tasks?: PlanMeetingTaskInput[],
+  ) => Promise<{ ok: boolean; error?: string }>;
+  acceptDelivery: (
+    sessionId: string | null,
+    deliveryId: string,
+    candidateId: string,
+  ) => Promise<{ ok: true; delivery: DeliveryView } | { ok: false; error: string }>;
+  returnDelivery: (
+    sessionId: string | null,
+    deliveryId: string,
+    candidateId: string | undefined,
+    feedback: string,
+  ) => Promise<{ ok: true; delivery: DeliveryView } | { ok: false; error: string }>;
+  meetingDelivery: {
+    get: (
+      sessionId: string | null,
+    ) => Promise<{ ok: true; delivery: MeetingDelivery | null; decision: FinalMeetingDecision | null } | { ok: false; error: string }>;
+    accept: (
+      sessionId: string | null,
+      deliveryId: string,
+      contentHash: string,
+    ) => Promise<{ ok: true; delivery: MeetingDelivery } | { ok: false; error: string }>;
+    requestRework: (
+      sessionId: string | null,
+      deliveryId: string,
+      contentHash: string,
+      reason: string,
+    ) => Promise<{ ok: true; planVersion: number; taskIds: string[] } | { ok: false; error: string }>;
+  };
   endSession: (sessionId: string | null) => Promise<{ ok: boolean }>;
   pickCwd: () => Promise<string | null>;
   listDir: (path: string | null, showHidden?: boolean) => Promise<ListDirResult>;
@@ -518,8 +1174,8 @@ export interface VibeMeetApi {
   getVoiceConfig: () => Promise<{ enabled: boolean; voicePrint: VoicePrint | null }>;
   setVoiceLockEnabled: (on: boolean) => Promise<{ ok: boolean }>;
   setVoicePrint: (vp: VoicePrint | null) => Promise<{ ok: boolean }>;
-  getVoicePref: () => Promise<{ selectedVoiceName: string | null; guidanceDismissed: boolean; speechFilterMode: 'strict' | 'off'; voicePolishEnabled: boolean; reportModeEnabled: boolean; handheldMode: 'auto' | 'handheld' | 'desktop'; asrProvider: AsrProvider; cloudAsr: CloudAsrSettings }>;
-  setVoicePref: (patch: { selectedVoiceName?: string | null; guidanceDismissed?: boolean; speechFilterMode?: 'strict' | 'off'; voicePolishEnabled?: boolean; reportModeEnabled?: boolean; handheldMode?: 'auto' | 'handheld' | 'desktop'; asrProvider?: AsrProvider; cloudAsr?: Partial<CloudAsrSettings> }) => Promise<{ ok: boolean; error?: string }>;
+  getVoicePref: () => Promise<{ selectedVoiceName: string | null; guidanceDismissed: boolean; speechFilterMode: 'strict' | 'off'; voicePolishEnabled: boolean; reportModeEnabled: boolean; handheldMode: 'auto' | 'handheld' | 'desktop'; xfyunAsr: XfyunAsrCredentials }>;
+  setVoicePref: (patch: { selectedVoiceName?: string | null; guidanceDismissed?: boolean; speechFilterMode?: 'strict' | 'off'; voicePolishEnabled?: boolean; reportModeEnabled?: boolean; handheldMode?: 'auto' | 'handheld' | 'desktop'; xfyunAsr?: Partial<XfyunAsrCredentials> }) => Promise<{ ok: boolean; error?: string }>;
   openVoiceSettings: () => Promise<{ ok: boolean }>;
   useSystemPicker: () => Promise<boolean>;
   getDesktopSources: () => Promise<
@@ -531,10 +1187,38 @@ export interface VibeMeetApi {
   relaunchApp: () => Promise<void>;
   requestMicPermission: () => Promise<boolean>;
   asrAvailable: () => Promise<{ ok: boolean; available: boolean }>;
-  transcribePcm: (
-    pcm: ArrayBuffer,
+  deviceDiagnostics: () => Promise<
+    | {
+        ok: true;
+        diagnostics: {
+          capturedAt: number;
+          platform: string;
+          arch: string;
+          kernel: string;
+          totalMemoryBytes: number;
+          electronVersion: string;
+          sessionType: string;
+          gpu: { available: boolean; status: Record<string, string> };
+          audio: {
+            microphone: 'granted' | 'denied' | 'available' | 'unavailable' | 'unknown';
+            speaker: 'available' | 'unknown';
+            xfyun: boolean;
+          };
+          workspace: { git: boolean; worktree: boolean; version: string | null };
+          capacity: { hosts: number; workers: number };
+        };
+      }
+    | { ok: false; error: string }
+  >;
+  startAsrStream: (
     lang?: 'auto' | 'zh' | 'en',
+    includePreRoll?: boolean,
+  ) => Promise<{ ok: true; sessionId: string } | { ok: false; error: string }>;
+  sendAsrStreamFrame: (pcm: ArrayBuffer, live: boolean) => void;
+  finishAsrStream: (
+    sessionId: string,
   ) => Promise<{ ok: true; text: string } | { ok: false; error: string }>;
+  cancelAsrStream: (sessionId?: string) => Promise<{ ok: boolean }>;
   polishAsrText: (
     text: string,
   ) => Promise<{ ok: true; text: string } | { ok: false; error: string; text: string }>;
@@ -546,6 +1230,7 @@ export interface VibeMeetApi {
     open: (path: string) => Promise<{ ok: boolean; error?: string }>;
   };
   documents: DocumentsApi;
+  tasks: TasksApi;
   transcripts: TranscriptsApi;
   accessibility: {
     check: () => Promise<{ granted: boolean }>;
@@ -576,6 +1261,8 @@ export interface VibeMeetApi {
   appVersion: () => Promise<string>;
   onUpdateAvailable: (cb: (info: { latest: string; url: string }) => void) => () => void;
   companion: CompanionApi;
+  /** Floating AhaBar window bridge (preload-companion.cjs only). */
+  ahabar?: AhaBarApi;
   ideFiles: {
     list: (path?: string) => Promise<{ ok: true; entries: FileEntry[] } | { ok: false; error: string }>;
     read: (path: string) => Promise<{ ok: true; file: FileContent } | { ok: false; error: string }>;
@@ -606,6 +1293,10 @@ export interface VibeMeetApi {
     workerId: string,
     addendum: string,
   ) => Promise<{ ok: true; queued: boolean } | { ok: false; error: string; reason?: string }>;
+  interruptWorker: (
+    sessionId: string | null,
+    workerId: string,
+  ) => Promise<{ ok: true } | { ok: false; error: string }>;
   onEvent: (cb: (e: RendererEvent) => void) => () => void;
 }
 
@@ -638,13 +1329,48 @@ export interface CompanionState {
 }
 
 export interface CompanionApi {
-  toggle: () => Promise<{ ok: boolean; open?: boolean; error?: string }>;
+  toggle: (opts?: { view?: 'ahabar' | 'companion' }) => Promise<{ ok: boolean; open?: boolean; error?: string }>;
   ttsState: (active: boolean) => void;
   /** Companion-window bridge only (preload-companion.cjs). */
   getState?: () => Promise<{ ok: true; state: CompanionState } | { ok: false; error: string }>;
   onEvent?: (cb: (state: CompanionState) => void) => () => void;
   getPrefs?: () => Promise<{ ok: boolean; soundEnabled?: boolean }>;
   setSound?: (soundEnabled: boolean) => Promise<{ ok: boolean; error?: string }>;
+}
+
+export type ApprovalGesture = 'low' | 'mid' | 'high';
+
+export interface AhaBarPending {
+  id: string;
+  sessionId: string;
+  hostId: string;
+  source: string;
+  toolName: string;
+  target: string;
+  risk: ApprovalGesture;
+  arrivedAt: number;
+}
+
+export interface AhaBarState {
+  sessionId: string | null;
+  cwd: string | null;
+  projectName: string | null;
+  runningCount: number;
+  pending: AhaBarPending[];
+  topPending: AhaBarPending | null;
+  hardwareTakenOver: boolean;
+}
+
+export interface AhaBarApi {
+  getState: () => Promise<{ ok: true; state: AhaBarState } | { ok: false; error: string }>;
+  onEvent: (cb: (state: AhaBarState) => void) => () => void;
+  resolvePermission: (
+    id: string,
+    decision: 'allow' | 'deny',
+  ) => Promise<{ ok: boolean; error?: string }>;
+  focusMain: () => Promise<{ ok: boolean }>;
+  setExpanded: (expanded: boolean) => Promise<{ ok: boolean }>;
+  setGhost: (ghost: boolean) => Promise<{ ok: boolean }>;
 }
 
 export interface TranscriptsApi {
@@ -740,6 +1466,21 @@ export interface ActivityEntry {
   actionPath?: string;
 }
 
+/** Human-readable plan document accompanying a worker DAG. */
+export interface MeetingPlanStep {
+  title: string;
+  detail: string;
+  taskId?: string;
+}
+
+export interface MeetingPlanBrief {
+  goal: string;
+  approach?: string;
+  steps: MeetingPlanStep[];
+  risks: string[];
+  openQuestions: string[];
+}
+
 /** Renderer-side input for the manual Plan Meeting flow. The main process
  * validates the same shape before installing it into the scheduler. */
 export interface PlanMeetingTaskInput {
@@ -748,6 +1489,40 @@ export interface PlanMeetingTaskInput {
   prompt: string;
   deps: string[];
   executorBackendId?: string;
+  writePaths?: string[];
+  executionProfile?: TaskExecutionProfile;
+  contextSelection?: TaskContextSelection;
+  workspaceMode?: TaskWorkspaceMode;
+  authorityRequest?: TaskAuthorityRequest;
+  requiresDecision?: boolean;
+  budget?: TaskBudget;
+  acceptanceCriteria?: Array<{
+    id: string;
+    description: string;
+    verification:
+      | { kind: 'command'; argv: string[]; timeoutMs?: number }
+      | { kind: 'manual' };
+  }>;
+}
+
+export type TaskWorkspaceMode = 'read-only' | 'git-worktree' | 'shared-locked';
+
+export interface TaskContextSelection {
+  mode: TaskExecutionProfile['contextMode'];
+  messageIds: string[];
+  decisionIds: string[];
+  dependencyTaskIds: string[];
+  attachmentIds: string[];
+}
+
+export interface TaskAuthorityRequest {
+  writePaths: string[];
+  toolKinds: string[];
+  workingDirectories: string[];
+  commands: string[][];
+  environmentKeys: string[];
+  maxCommandTimeoutMs: number;
+  networkHosts: string[];
 }
 
 export interface PendingPermission {

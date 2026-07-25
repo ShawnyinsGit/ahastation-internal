@@ -2,10 +2,13 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ChevronDown, ChevronRight, Terminal } from 'lucide-react';
 import type {
   ActivityEntry,
+  CoordinatorBriefing,
   TranscriptEntry,
   WorkerSpecialty,
   WorkerStatus,
   WorkerTaskHistoryEntry,
+  WorkerEventV2,
+  WorkReport,
 } from '../types';
 import type { DeliverySnapshot } from '../lib/meeting-store';
 import { BackendAvatar } from './BackendAvatar';
@@ -45,11 +48,21 @@ interface ClaudeWorkspaceProps {
   lastText?: string;
   startedAt?: number | null;
   pendingPermissionTool?: string | null;
+  backendId?: string;
+  attempt?: number;
+  workerEvents?: WorkerEventV2[];
+  workReport?: WorkReport;
+  coordinatorBriefings?: CoordinatorBriefing[];
   deliveryHistory?: DeliverySnapshot[];
   onAcceptDelivery?: () => void;
+  onInterruptTask?: () => Promise<{ ok: true } | { ok: false; error: string }>;
+  onSteerTask?: (instruction: string) => Promise<{ ok: true; queued: boolean } | { ok: false; error: string }>;
+  onOpenWorkspace?: () => Promise<{ ok: boolean; error?: string }>;
   onOpenInTerminal?: () => void;
-  /** Whether this workspace represents a talker (shows terminal button in hero). */
+  /** Whether this workspace represents a talker. */
   isTalker?: boolean;
+  /** High-fidelity Bash/command log for the CLI execution view. */
+  commandLog?: import('../types').CommandRun[];
 }
 
 const dotColor: Record<ActivityEntry['kind'], string> = {
@@ -65,27 +78,47 @@ const taskStatusTone: Record<CurrentTaskStatus, 'idle' | 'waiting' | 'working' |
   pending: 'waiting',
   interrupted: 'waiting',
   running: 'working',
+  verifying: 'working',
+  reviewing: 'working',
+  'coordinator-reviewing': 'working',
+  'awaiting-acceptance': 'waiting',
+  'integration-queued': 'waiting',
+  integrating: 'working',
+  'integration-conflict': 'failed',
+  reworking: 'working',
+  'budget-paused': 'waiting',
+  accepted: 'done',
   done: 'done',
   failed: 'failed',
   speaking: 'speaking',
 };
 
 const taskStatusLabel: Record<CurrentTaskStatus, string> = {
-  idle: 'Idle',
-  pending: 'Pending',
-  interrupted: 'Interrupted',
-  running: 'Running',
-  done: 'Done',
-  failed: 'Failed',
-  speaking: 'Speaking',
+  idle: '空闲',
+  pending: '等待调度',
+  interrupted: '已中断',
+  running: '执行中',
+  verifying: '校验中',
+  reviewing: '评审中',
+  'coordinator-reviewing': 'Coordinator 审查中',
+  'awaiting-acceptance': '等待验收',
+  'integration-queued': '等待集成',
+  integrating: '集成中',
+  'integration-conflict': '集成冲突',
+  reworking: '需要返工',
+  'budget-paused': '预算暂停',
+  accepted: '已接受',
+  done: '已完成',
+  failed: '失败',
+  speaking: '发言中',
 };
 
 function statusFor(speaking: boolean, awaitingPermission: boolean, running: boolean, hasRecentTool: boolean): { label: string; tone: 'speaking' | 'working' | 'waiting' | 'idle' | 'off' } {
-  if (!running) return { label: 'Offline', tone: 'off' };
-  if (awaitingPermission) return { label: 'Waiting for your approval', tone: 'waiting' };
-  if (speaking) return { label: 'Speaking', tone: 'speaking' };
-  if (hasRecentTool) return { label: 'Working', tone: 'working' };
-  return { label: 'Listening', tone: 'idle' };
+  if (!running) return { label: '离线', tone: 'off' };
+  if (awaitingPermission) return { label: '等待权限', tone: 'waiting' };
+  if (speaking) return { label: '发言中', tone: 'speaking' };
+  if (hasRecentTool) return { label: '执行中', tone: 'working' };
+  return { label: '倾听中', tone: 'idle' };
 }
 
 function formatHistoryTime(ts: number): string {
@@ -143,10 +176,19 @@ export const ClaudeWorkspace = memo(function ClaudeWorkspace({
   lastText,
   startedAt,
   pendingPermissionTool,
+  backendId,
+  attempt,
+  workerEvents,
+  workReport,
+  coordinatorBriefings,
   deliveryHistory,
   onAcceptDelivery,
+  onInterruptTask,
+  onSteerTask,
+  onOpenWorkspace,
   onOpenInTerminal,
   isTalker,
+  commandLog,
 }: ClaudeWorkspaceProps) {
   const lastAssistant = useMemo(() => [...transcript].reverse().find((t) => t.role === 'assistant'), [transcript]);
   const latestToolCall = useMemo(
@@ -178,6 +220,11 @@ export const ClaudeWorkspace = memo(function ClaudeWorkspace({
 
   // Per-row expand/collapse for the current task card and each feed row.
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [instruction, setInstruction] = useState('');
+  const [taskAction, setTaskAction] = useState<{ pending: boolean; message: string }>({
+    pending: false,
+    message: '',
+  });
   const toggleExpand = useCallback((key: string) => {
     setExpanded((prev) => {
       const next = new Set(prev);
@@ -277,17 +324,23 @@ export const ClaudeWorkspace = memo(function ClaudeWorkspace({
         </header>
       )}
 
-      {isTalker && onOpenInTerminal && (
+      {onOpenInTerminal && ((commandLog && commandLog.length > 0) || running || isTalker) && (
         <div className={`workspace-terminal-btn-row${hideHero ? ' workspace-terminal-btn-row--compact' : ''}`}>
           <button
             type="button"
             className="workspace-hero-terminal-btn"
             onClick={onOpenInTerminal}
-            title="Open terminal"
-            aria-label="Open terminal"
+            title="查看真实 CLI 执行情况"
+            aria-label="Open CLI execution view"
           >
             <Terminal size={14} />
-            <span className="workspace-terminal-btn-label">Terminal</span>
+            <span className="workspace-terminal-btn-label">
+              {backendId === 'codex'
+                ? 'Codex CLI'
+                : backendId === 'claude-code'
+                  ? 'Claude CLI'
+                  : 'Terminal'}
+            </span>
           </button>
         </div>
       )}
@@ -336,6 +389,18 @@ export const ClaudeWorkspace = memo(function ClaudeWorkspace({
                     <span className="workspace-task-detail-value">{taskDeps.join(', ')}</span>
                   </div>
                 )}
+                {backendId && (
+                  <div className="workspace-task-detail-row">
+                    <span className="workspace-task-detail-label">Backend</span>
+                    <span className="workspace-task-detail-value">{backendId}</span>
+                  </div>
+                )}
+                {attempt && (
+                  <div className="workspace-task-detail-row">
+                    <span className="workspace-task-detail-label">Attempt</span>
+                    <span className="workspace-task-detail-value">{attempt}</span>
+                  </div>
+                )}
                 {startedAt && (
                   <div className="workspace-task-detail-row">
                     <span className="workspace-task-detail-label">Started</span>
@@ -354,6 +419,156 @@ export const ClaudeWorkspace = memo(function ClaudeWorkspace({
               </div>
             )}
           </button>
+        </section>
+      )}
+
+      {workerEvents && workerEvents.length > 0 && (
+        <section className="workspace-feed workspace-worker-events">
+          <div className="workspace-feed-label">事件时间线</div>
+          <ol className="worker-event-timeline">
+            {[...workerEvents].slice(-30).reverse().map((event) => {
+              const signal = event.payload;
+              const title = signal.kind === 'progress'
+                ? signal.message
+                : signal.kind === 'tool'
+                  ? `${signal.toolName} · ${signal.phase}`
+                  : signal.kind === 'delivery'
+                    ? 'WorkReport 已提交'
+                    : signal.kind === 'failed'
+                      ? `${signal.code} · ${signal.message}`
+                      : `执行结束 · ${signal.reason}`;
+              return (
+                <li key={event.eventId}>
+                  <span className={`worker-event-kind is-${signal.kind}`}>{signal.kind}</span>
+                  <div>
+                    <strong>{title}</strong>
+                    <small>seq {event.seq} · attempt {event.attempt} · {formatHistoryTime(event.timestamp)}</small>
+                  </div>
+                </li>
+              );
+            })}
+          </ol>
+        </section>
+      )}
+
+      {showCurrentTask && (onInterruptTask || onSteerTask || onOpenWorkspace) && (
+        <section className="task-inspector-actions" aria-label="任务操作">
+          {onSteerTask && (
+            <div className="task-inspector-steer">
+              <label htmlFor={`worker-instruction-${name}`}>追加指令</label>
+              <textarea
+                id={`worker-instruction-${name}`}
+                value={instruction}
+                onChange={(event) => setInstruction(event.target.value)}
+                placeholder="说明下一步、修正方向或约束…"
+                disabled={taskAction.pending}
+              />
+              <button
+                type="button"
+                disabled={taskAction.pending || !instruction.trim()}
+                onClick={() => {
+                  const text = instruction.trim();
+                  if (!text) return;
+                  setTaskAction({ pending: true, message: '' });
+                  void onSteerTask(text).then((result) => {
+                    if (result.ok) {
+                      setInstruction('');
+                      setTaskAction({
+                        pending: false,
+                        message: result.queued ? '指令已排队，等待 Worker 就绪。' : '指令已发送。',
+                      });
+                    } else {
+                      setTaskAction({ pending: false, message: result.error });
+                    }
+                  });
+                }}
+              >
+                发送指令
+              </button>
+            </div>
+          )}
+          <div className="task-inspector-action-row">
+            {onInterruptTask && (
+              <button
+                type="button"
+                className="is-danger"
+                disabled={taskAction.pending}
+                onClick={() => {
+                  setTaskAction({ pending: true, message: '' });
+                  void onInterruptTask().then((result) => {
+                    setTaskAction({
+                      pending: false,
+                      message: result.ok ? '中断请求已确认。' : result.error,
+                    });
+                  });
+                }}
+              >
+                中断 Worker
+              </button>
+            )}
+            {onOpenWorkspace && (
+              <button
+                type="button"
+                disabled={taskAction.pending}
+                onClick={() => {
+                  setTaskAction({ pending: true, message: '' });
+                  void onOpenWorkspace().then((result) => {
+                    setTaskAction({
+                      pending: false,
+                      message: result.ok ? '已打开工作区。' : (result.error ?? '无法打开工作区。'),
+                    });
+                  });
+                }}
+              >
+                打开工作区
+              </button>
+            )}
+          </div>
+          {taskAction.message && <p role="status">{taskAction.message}</p>}
+        </section>
+      )}
+
+      {workReport && (
+        <section className="workspace-feed workspace-work-report">
+          <div className="workspace-feed-label">WorkReport</div>
+          <div className="workspace-report-card">
+            <div><strong>{workReport.status}</strong><span>{workReport.summary}</span></div>
+            <small>
+              {workReport.files.length} files · {workReport.tests.length} tests · {workReport.unresolved.length} unresolved
+            </small>
+          </div>
+        </section>
+      )}
+
+      {coordinatorBriefings && coordinatorBriefings.length > 0 && (
+        <section className="workspace-feed coordinator-briefings" aria-live="polite">
+          <div className="workspace-feed-label">结构化 Briefing</div>
+          <div className="coordinator-briefing-list">
+            {[...coordinatorBriefings].slice(-6).reverse().map((briefing) => (
+              <article className={`coordinator-briefing-card is-${briefing.kind}`} key={briefing.id}>
+                <header>
+                  <strong>{briefing.title}</strong>
+                  <time>{formatHistoryTime(briefing.timestamp)}</time>
+                </header>
+                <p>{briefing.summary}</p>
+                <dl>
+                  <div><dt>已接受</dt><dd>{briefing.completedTasks}</dd></div>
+                  <div><dt>失败</dt><dd>{briefing.failedTasks}</dd></div>
+                  <div><dt>文件</dt><dd>{briefing.files}</dd></div>
+                  <div><dt>测试</dt><dd>{briefing.testsPassed} / {briefing.testsFailed}</dd></div>
+                </dl>
+                {briefing.capacity && (
+                  <p className="coordinator-briefing-capacity">
+                    容量 {briefing.capacity.running}/{briefing.capacity.limit} · 等待 {briefing.capacity.waiting}
+                  </p>
+                )}
+                {briefing.blockers.length > 0 && (
+                  <ul>{briefing.blockers.map((blocker) => <li key={blocker}>{blocker}</li>)}</ul>
+                )}
+                <footer>建议：{briefing.recommendedAction}</footer>
+              </article>
+            ))}
+          </div>
         </section>
       )}
 
@@ -376,9 +591,30 @@ export const ClaudeWorkspace = memo(function ClaudeWorkspace({
             {[...deliveryHistory].reverse().map((d) => {
               const key = `delivery-${d.taskId}`;
               const isOpen = expanded.has(key);
-              const isPending = d.status === 'pending';
-              const statusPill = d.status === 'accepted' ? 'done' : d.status === 'revised' ? 'working' : 'pending';
-              const statusLabel = d.status === 'accepted' ? 'Accepted' : d.status === 'revised' ? 'Revised' : `${d.files.length} files`;
+              const isPending = d.status === 'awaiting-delivery-acceptance';
+              const isReworking = d.status === 'reworking';
+              const isIntegrating = d.status === 'integration-queued' || d.status === 'integrating';
+              const isConflict = d.status === 'integration-conflict';
+              const statusPill = d.status === 'accepted'
+                ? 'done'
+                : isReworking || isIntegrating
+                  ? 'working'
+                  : 'pending';
+              const statusLabel = d.status === 'accepted'
+                ? 'Accepted'
+                : isReworking
+                  ? 'Needs rework'
+                  : isConflict
+                    ? 'Integration conflict'
+                    : d.status === 'integration-queued'
+                      ? 'Queued for integration'
+                      : d.status === 'integrating'
+                        ? 'Integrating'
+                  : d.status === 'verifying'
+                    ? 'Verifying'
+                    : d.status === 'reviewing'
+                      ? 'Reviewing'
+                      : `${d.files.length} files`;
               return (
                 <div
                   key={key}
@@ -394,7 +630,16 @@ export const ClaudeWorkspace = memo(function ClaudeWorkspace({
                   }}
                   aria-expanded={isOpen}
                 >
-                  <span className="workspace-feed-dot" style={{ background: d.status === 'accepted' ? '#9ae29a' : d.status === 'revised' ? '#f5c542' : '#7cc6ff' }} />
+                  <span
+                    className="workspace-feed-dot"
+                    style={{
+                      background: d.status === 'accepted'
+                        ? '#9ae29a'
+                        : isReworking || isConflict
+                          ? '#f5c542'
+                          : '#7cc6ff',
+                    }}
+                  />
                   <div className="workspace-feed-text">
                     <div className="workspace-feed-title">
                       <span className="workspace-feed-title-text">{d.title}</span>

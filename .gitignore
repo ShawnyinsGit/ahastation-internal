@@ -7,9 +7,12 @@ release/
 .vite/
 .asset-cache/
 build/whisper/
+build/whisper-*/
 build/claude-defaults/
 audit/
 screenshot/
 deliveries/
 .vibe-materials/
-build/whisper-*/
+.vibe-assets/
+.vibe-attachments/
+.vibe-docs/

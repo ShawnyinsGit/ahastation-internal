@@ -44,12 +44,18 @@ async function makeWorkspace() {
   await writeFile(join(root, 'hello.txt'), 'hello');
   await writeFile(join(root, 'sub', 'inner.txt'), 'inner');
   await writeFile(join(outside, 'secret.txt'), 'top-secret');
-  await symlink(outside, join(root, 'escape-link'), 'dir');
-  await symlink(join(root, 'sub'), join(root, 'inside-link'), 'dir');
+  let symlinksAvailable = true;
+  try {
+    await symlink(outside, join(root, 'escape-link'), 'dir');
+    await symlink(join(root, 'sub'), join(root, 'inside-link'), 'dir');
+  } catch (error) {
+    if (error?.code !== 'EPERM') throw error;
+    symlinksAvailable = false;
+  }
   // macOS /var → /private/var: always compare against the realpath'd root.
   const realRoot = await realpath(root);
   const realOutside = await realpath(outside);
-  return { base, root: realRoot, outside: realOutside };
+  return { base, root: realRoot, outside: realOutside, symlinksAvailable };
 }
 
 test('resolveConfinedPath resolves the root and normal in-tree files', async (t) => {
@@ -86,6 +92,10 @@ test('resolveConfinedPath rejects absolute paths outside the root', async (t) =>
 test('resolveConfinedPath rejects symlink escapes (the opencode-files hole)', async (t) => {
   const ws = await makeWorkspace();
   t.after(() => rm(ws.base, { recursive: true, force: true }));
+  if (!ws.symlinksAvailable) {
+    t.skip('Windows Developer Mode or symlink privilege is unavailable');
+    return;
+  }
 
   // Symlink inside the root pointing at a directory outside it — the old
   // isPathSafe check passed this because it never resolved symlinks.
@@ -100,6 +110,10 @@ test('resolveConfinedPath rejects symlink escapes (the opencode-files hole)', as
 test('resolveConfinedPath allows symlinks that stay inside the root', async (t) => {
   const ws = await makeWorkspace();
   t.after(() => rm(ws.base, { recursive: true, force: true }));
+  if (!ws.symlinksAvailable) {
+    t.skip('Windows Developer Mode or symlink privilege is unavailable');
+    return;
+  }
 
   const result = await resolveConfinedPath(ws.root, join('inside-link', 'inner.txt'));
   assert.equal(result.ok, true);

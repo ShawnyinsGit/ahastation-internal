@@ -1,5 +1,10 @@
 # 黑客松作战包：LubanCat RK3588 点亮 + 冒烟验证 + 分工
 
+> **历史归档，禁止作为当前部署手册执行。** OpenCode ARM64、静态
+> whisper.cpp、四 Worker 契约和 Debian 11 发布门现已实现；当前唯一
+> 权威手册是 [`RK3588_DEPLOYMENT.md`](./RK3588_DEPLOYMENT.md)。尤其不要
+> 使用本文旧版的 `--no-sandbox` 或“仅 Kimi”降级步骤。
+
 > 版本 v1　日期 2026-07-21　目标：**今晚在野火 LubanCat RK3588 真机上跑通 AhaMeet 会议**
 > 团队 4 人。总原则：**阶梯验收，逐级通过即停，不恋战**。
 

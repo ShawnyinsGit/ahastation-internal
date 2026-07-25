@@ -31,7 +31,7 @@ function genId(): string {
 const ACTIVITY_TAB_ID = 'activity-default';
 
 const initialState: StageWindowState = {
-  windows: [{ id: ACTIVITY_TAB_ID, type: 'activity', title: '活动' }],
+  windows: [{ id: ACTIVITY_TAB_ID, type: 'activity', title: '工作区' }],
   activeWindowId: ACTIVITY_TAB_ID,
 };
 

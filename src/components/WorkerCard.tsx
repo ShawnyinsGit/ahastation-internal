@@ -1,8 +1,6 @@
 import { useEffect, useState } from 'react';
-import type { KeyboardEvent } from 'react';
-import { Bell } from 'lucide-react';
+import { AlertTriangle, Bell, RotateCcw, Terminal } from 'lucide-react';
 import type { WorkerState } from '../lib/meeting-store';
-import type { WorkerSpecialty } from '../types';
 import { BackendAvatar } from './BackendAvatar';
 
 interface WorkerCardProps {
@@ -13,6 +11,8 @@ interface WorkerCardProps {
   speaking?: boolean;
   onSelect?: () => void;
   onResolvePermission: (id: string, decision: 'allow' | 'deny') => void;
+  /** Open the high-fidelity CLI execution view for this worker. */
+  onOpenTerminal?: () => void;
   /** Backend icon identifier for per-backend avatar rendering. */
   iconId?: string;
   /** Custom avatar image URL (overrides iconId). */
@@ -24,6 +24,16 @@ const statusTone: Record<WorkerState['status'], 'idle' | 'waiting' | 'working' |
   pending: 'waiting',
   interrupted: 'waiting',
   running: 'working',
+  verifying: 'working',
+  reviewing: 'working',
+  'coordinator-reviewing': 'working',
+  'awaiting-acceptance': 'waiting',
+  'integration-queued': 'waiting',
+  integrating: 'working',
+  'integration-conflict': 'failed',
+  reworking: 'working',
+  'budget-paused': 'waiting',
+  accepted: 'done',
   done: 'done',
   failed: 'failed',
 };
@@ -34,18 +44,37 @@ function avatarInitial(title: string): string {
   return trim.slice(0, 1).toUpperCase();
 }
 
+function formatUpdateTime(timestamp: number): string {
+  if (!timestamp) return '尚无活动';
+  return new Intl.DateTimeFormat('zh-CN', {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  }).format(timestamp);
+}
+
 /** Human-readable status label shown below the avatar. */
 function statusLabel(worker: WorkerState, speaking: boolean): string {
-  if (speaking) return 'Speaking';
-  if (worker.pendingPermission) return 'Waiting';
-  if (worker.currentTool) return 'Thinking';
+  if (speaking) return '发言中';
+  if (worker.pendingPermission) return '等待权限';
+  if (worker.currentTool) return '执行中';
   switch (worker.status) {
-    case 'running': return 'Running';
-    case 'pending': return 'Pending';
-    case 'interrupted': return 'Interrupted';
-    case 'done':    return 'Done';
-    case 'failed':  return 'Failed';
-    default:        return 'Idle';
+    case 'running': return '执行中';
+    case 'verifying': return '校验中';
+    case 'reviewing': return '评审中';
+    case 'coordinator-reviewing': return 'Coordinator 审查中';
+    case 'awaiting-acceptance': return '等待验收';
+    case 'integration-queued': return '等待集成';
+    case 'integrating': return '集成中';
+    case 'integration-conflict': return '集成冲突';
+    case 'reworking': return '需要返工';
+    case 'budget-paused': return '预算暂停';
+    case 'accepted': return '已接受';
+    case 'pending': return '等待调度';
+    case 'interrupted': return '已中断';
+    case 'done':    return '已完成';
+    case 'failed':  return '失败';
+    default:        return '空闲';
   }
 }
 
@@ -58,6 +87,7 @@ export function WorkerCard({
   speaking,
   onSelect,
   onResolvePermission,
+  onOpenTerminal,
   iconId,
   customAvatar,
 }: WorkerCardProps) {
@@ -74,19 +104,19 @@ export function WorkerCard({
   }, [lastTs]);
 
   const avatarSize = mode === 'gallery' ? 56 : 32;
-  const avatar = isTalker ? (
-    <BackendAvatar iconId={iconId ?? 'claude'} size={avatarSize} speaking={Boolean(speaking)} customAvatar={customAvatar} />
+  const avatar = iconId ? (
+    <BackendAvatar iconId={iconId} size={avatarSize} speaking={Boolean(speaking)} customAvatar={customAvatar} />
+  ) : isTalker ? (
+    <BackendAvatar iconId="claude" size={avatarSize} speaking={Boolean(speaking)} customAvatar={customAvatar} />
   ) : (
     <span className="worker-card-initial">{avatarInitial(worker.title)}</span>
   );
-
-  const handleKey = (e: KeyboardEvent<HTMLDivElement>) => {
-    if (!onSelect) return;
-    if (e.key === 'Enter' || e.key === ' ') {
-      e.preventDefault();
-      onSelect();
-    }
-  };
+  const latestActivity = worker.activity.at(-1);
+  const updateTimestamp = latestActivity?.ts ?? worker.endedAt ?? worker.startedAt ?? 0;
+  const currentStep = worker.currentTool
+    ? `工具：${worker.currentTool}`
+    : worker.lastText || latestActivity?.title || '等待下一步';
+  const reportBlocked = worker.workReport?.status === 'blocked';
 
   const className = [
     'worker-card',
@@ -103,45 +133,81 @@ export function WorkerCard({
     const roleName = isTalker ? 'Talker' : 'Worker';
 
     return (
-      <div
-        className={className}
-        role={onSelect ? 'button' : undefined}
-        tabIndex={onSelect ? 0 : undefined}
-        onClick={onSelect}
-        onKeyDown={onSelect ? handleKey : undefined}
-      >
+      <div className={className} role="group" aria-label={`${worker.title}，${label}`}>
         {/* Role badge — top-right */}
         <div className="tile-role-badge">{roleName}</div>
+        {onOpenTerminal && (
+          <button
+            type="button"
+            className="worker-card-terminal-btn"
+            onClick={(e) => { e.stopPropagation(); onOpenTerminal(); }}
+            title="查看真实 CLI 执行情况"
+            aria-label="打开 CLI 执行视图"
+          >
+            <Terminal size={12} />
+          </button>
+        )}
 
-        <div className={`worker-card-stage worker-card-stage-centered ${isTalker ? 'worker-card-stage-talker' : 'worker-card-stage-worker'}`}>
-          <div className={`worker-card-avatar worker-card-avatar-${isTalker ? 'talker' : 'worker'}`}>
-            {avatar}
+        <button
+          type="button"
+          className="worker-card-select-surface"
+          onClick={onSelect}
+          disabled={!onSelect}
+          aria-label={`查看任务：${worker.title}`}
+        >
+          <div className={`worker-card-stage worker-card-stage-centered ${isTalker ? 'worker-card-stage-talker' : 'worker-card-stage-worker'}`}>
+            <div className={`worker-card-avatar worker-card-avatar-${isTalker ? 'talker' : 'worker'}`}>
+              {avatar}
+            </div>
+            {/* Status below avatar */}
+            <div className="worker-card-status-badge">
+              <span className={`worker-card-pill worker-card-pill-${tone}`}>{label}</span>
+              {worker.pendingPermission && (
+                <span className="worker-card-icon worker-card-icon-perm" title="等待权限" aria-label="等待权限">
+                  <Bell size={11} />
+                </span>
+              )}
+            </div>
           </div>
-          {/* Status below avatar */}
-          <div className="worker-card-status-badge">
-            <span className={`worker-card-pill worker-card-pill-${tone}`}>{label}</span>
-            {worker.pendingPermission && (
-              <span className="worker-card-icon worker-card-icon-perm" title="Awaiting approval" aria-label="Awaiting approval">
-                <Bell size={11} />
-              </span>
-            )}
-          </div>
-        </div>
+
+          {!isTalker && (
+            <div className="worker-card-gallery-detail">
+              <div className="worker-card-gallery-title" title={worker.title}>{worker.title}</div>
+              <div className="worker-card-gallery-step" title={currentStep}>{currentStep}</div>
+              <div className="worker-card-gallery-meta">
+                <span>attempt {worker.attempt ?? 1}</span>
+                <time dateTime={updateTimestamp ? new Date(updateTimestamp).toISOString() : undefined}>
+                  {formatUpdateTime(updateTimestamp)}
+                </time>
+              </div>
+              <div className="worker-card-gallery-flags" aria-label="任务提示">
+                {worker.pendingPermission && <span className="is-permission"><Bell size={11} />等待权限</span>}
+                {worker.status === 'reworking' && <span className="is-rework"><RotateCcw size={11} />返工</span>}
+                {reportBlocked && <span className="is-blocked"><AlertTriangle size={11} />阻塞</span>}
+                {worker.status === 'failed' && <span className="is-failed"><AlertTriangle size={11} />失败</span>}
+              </div>
+            </div>
+          )}
+        </button>
 
         {/* Permission approval inline */}
         {worker.pendingPermission && (
           <div className="worker-card-perm">
             <div className="worker-card-perm-text">
-              <span className="worker-card-perm-label">Allow</span>{' '}
-              <span className="worker-card-perm-tool">{worker.pendingPermission.toolName}</span>?
+              是否允许 <span className="worker-card-perm-tool">{worker.pendingPermission.toolName}</span>？
             </div>
+            {worker.permissionError && (
+              <div className="worker-card-perm-error" role="alert">{worker.permissionError}</div>
+            )}
             <div className="worker-card-perm-actions">
               <button type="button" className="worker-card-perm-allow"
+                disabled={worker.resolvingPermissionId === worker.pendingPermission.id}
                 onClick={(e) => { e.stopPropagation(); if (worker.pendingPermission) onResolvePermission(worker.pendingPermission.id, 'allow'); }}
-              >Allow</button>
+              >允许</button>
               <button type="button" className="worker-card-perm-deny"
+                disabled={worker.resolvingPermissionId === worker.pendingPermission.id}
                 onClick={(e) => { e.stopPropagation(); if (worker.pendingPermission) onResolvePermission(worker.pendingPermission.id, 'deny'); }}
-              >Deny</button>
+              >拒绝</button>
             </div>
           </div>
         )}
@@ -151,43 +217,49 @@ export function WorkerCard({
 
   // sidebar mode — horizontal layout
   return (
-    <div
-      className={className}
-      role={onSelect ? 'button' : undefined}
-      tabIndex={onSelect ? 0 : undefined}
-      onClick={onSelect}
-      onKeyDown={onSelect ? handleKey : undefined}
-    >
-      <div className="worker-card-header">
-        <div className={`worker-card-avatar worker-card-avatar-${isTalker ? 'talker' : 'worker'}`}>
-          {avatar}
-        </div>
-        <div className="worker-card-titleblock">
-          <div className="worker-card-title" title={worker.title}>{worker.title}</div>
-          <div className="worker-card-meta">
-            <span className={`worker-card-pill worker-card-pill-${tone}`}>{worker.status}</span>
-            {worker.pendingPermission && (
-              <span className="worker-card-icon worker-card-icon-perm" title="Awaiting approval" aria-label="Awaiting approval">
-                <Bell size={12} />
-              </span>
-            )}
+    <div className={className} role="group" aria-label={`${worker.title}，${statusLabel(worker, Boolean(speaking))}`}>
+      <button
+        type="button"
+        className="worker-card-select-surface worker-card-select-surface-sidebar"
+        onClick={onSelect}
+        disabled={!onSelect}
+        aria-label={`查看任务：${worker.title}`}
+      >
+        <div className="worker-card-header">
+          <div className={`worker-card-avatar worker-card-avatar-${isTalker ? 'talker' : 'worker'}`}>
+            {avatar}
+          </div>
+          <div className="worker-card-titleblock">
+            <div className="worker-card-title" title={worker.title}>{worker.title}</div>
+            <div className="worker-card-meta">
+              <span className={`worker-card-pill worker-card-pill-${tone}`}>{statusLabel(worker, Boolean(speaking))}</span>
+              {worker.pendingPermission && (
+                <span className="worker-card-icon worker-card-icon-perm" title="等待权限" aria-label="等待权限">
+                  <Bell size={12} />
+                </span>
+              )}
+            </div>
           </div>
         </div>
-      </div>
+      </button>
 
       {worker.pendingPermission && (
         <div className="worker-card-perm">
           <div className="worker-card-perm-text">
-            <span className="worker-card-perm-label">Allow</span>{' '}
-            <span className="worker-card-perm-tool">{worker.pendingPermission.toolName}</span>?
+            是否允许 <span className="worker-card-perm-tool">{worker.pendingPermission.toolName}</span>？
           </div>
+          {worker.permissionError && (
+            <div className="worker-card-perm-error" role="alert">{worker.permissionError}</div>
+          )}
           <div className="worker-card-perm-actions">
             <button type="button" className="worker-card-perm-allow"
+              disabled={worker.resolvingPermissionId === worker.pendingPermission.id}
               onClick={(e) => { e.stopPropagation(); if (worker.pendingPermission) onResolvePermission(worker.pendingPermission.id, 'allow'); }}
-            >Allow</button>
+            >允许</button>
             <button type="button" className="worker-card-perm-deny"
+              disabled={worker.resolvingPermissionId === worker.pendingPermission.id}
               onClick={(e) => { e.stopPropagation(); if (worker.pendingPermission) onResolvePermission(worker.pendingPermission.id, 'deny'); }}
-            >Deny</button>
+            >拒绝</button>
           </div>
         </div>
       )}

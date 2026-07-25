@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "id": "candidate-fixture",
+  "deliveryId": "delivery-fixture",
+  "taskId": "task-fixture",
+  "attempt": 1,
+  "workspace": "C:/workspace",
+  "baseRevision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "commit": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "tree": "cccccccccccccccccccccccccccccccccccccccc",
+  "reportHash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "verificationHash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "diffHash": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+  "reportedPaths": ["src/app.ts"],
+  "createdAt": 1,
+  "manifest": {
+    "schemaVersion": 1,
+    "baseRevision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "candidateRevision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "diffHash": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "files": [{
+      "path": "src/app.ts",
+      "status": "modified",
+      "additions": 1,
+      "deletions": 0,
+      "oldMode": "100644",
+      "newMode": "100644",
+      "kind": "text",
+      "chunkIds": ["fixture-chunk-1"],
+      "requiresUserConfirmation": false
+    }],
+    "chunks": [{
+      "id": "fixture-chunk-1",
+      "index": 0,
+      "path": "src/app.ts",
+      "kind": "text",
+      "hash": "1111111111111111111111111111111111111111111111111111111111111111",
+      "lineCount": 1,
+      "byteLength": 8,
+      "content": "+change\n",
+      "requiresUserConfirmation": false
+    }],
+    "totalAdditions": 1,
+    "totalDeletions": 0
+  }
+}

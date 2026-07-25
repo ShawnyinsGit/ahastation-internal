@@ -3,22 +3,46 @@ import type {
   AgentSource,
   AttachmentMeta,
   AutoApproveScope,
+  CommandRun,
+  CoordinatorBriefing,
   MeetingPlan,
+  MeetingPlanBrief,
+  PlanMeetingTaskInput,
+  RendererTaskSnapshot,
   OpenTabMeta,
   PendingPermission,
   RecentCwdMeta,
   RendererEvent,
   StagedAttachment,
   TranscriptEntry,
+  DeliveryView,
+  FinalMeetingDecision,
+  MeetingDelivery,
+  WorkReport,
+  WorkerEventV2,
   WorkerDeliveryFile,
   WorkerSpecialty,
   WorkerStatus,
   WorkerTaskHistoryEntry,
 } from '../types';
-import { MEETING_TOOL_NAMES } from '../../electron/meeting-tools';
+import { MEETING_TOOL_NAMES } from '../../electron/meeting-tool-names';
 import { redactSecrets } from '../../electron/format-error';
+import {
+  columnForTask,
+  projectNameFromCwd,
+  resolveBoardTaskStatus,
+  WORKER_STATUS_LABEL,
+  type TaskColumnId,
+} from './task-columns';
 import { extractText, extractToolUses, uid } from './sdk-message';
 import { isSpeechActive, type SpeakHandle } from './speech-session';
+import { reduceWorkerEvent, upsertCommandLog } from './worker-event-reducer';
+import {
+  hydrateTaskProjection,
+  reduceTaskEvent,
+  type TaskInspectorProjection,
+} from './task-event-reducer';
+import { isAffirmativeDeliveryFeedback } from './delivery-feedback';
 
 const MAX_TRANSCRIPT = 500;
 const MAX_ACTIVITY = 500;
@@ -108,6 +132,11 @@ export interface WorkerState {
   transcript: TranscriptEntry[];
   activity: ActivityEntry[];
   pendingPermission: PendingPermission | null;
+  /** Permission id currently awaiting an IPC decision reply. Buttons must stay
+   *  disabled while set so a slow or failed reply cannot be double-submitted. */
+  resolvingPermissionId: string | null;
+  /** Last permission IPC error surfaced to the user; cleared on the next attempt. */
+  permissionError: string | null;
   currentTool: string | null;
   currentToolInput: string | null;
   lastText: string;
@@ -118,27 +147,44 @@ export interface WorkerState {
   taskHistory: WorkerTaskHistoryEntry[];
   /** Host group this worker belongs to. Defaults to 'default'. */
   hostId: string;
+  backendId?: string;
+  attempt?: number;
+  eventSeq?: number;
+  workReport?: WorkReport;
+  workerEvents?: WorkerEventV2[];
+  /** High-fidelity Bash/command execution log for the CLI view. */
+  commandLog: CommandRun[];
 }
 
 /** Snapshot of one worker's delivered artifacts, displayed in the ScreenStage
- *  "delivery acceptance" panel. Pushed by a `worker-delivery` event from main
- *  when the worker calls `task_done`. Cleared by the user accepting or by a
- *  new delivery from any worker (only the most recent delivery is staged). */
-export type DeliveryStatus = 'pending' | 'accepted' | 'revised';
+ *  delivery acceptance panel. Main emits it only after a schema-valid
+ *  WorkReport passes into DeliveryHarness; legacy task_done cannot create it.
+ *  It is cleared by acceptance or replaced by a newer reviewed delivery. */
+export type DeliveryStatus = DeliveryView['status'] | 'legacy-pending';
 
 export interface DeliverySnapshot {
   workerId: AgentSource;
   title: string;
   summary: string;
   taskId: string;
+  deliveryId: string;
+  candidateId: string | null;
   files: WorkerDeliveryFile[];
   receivedAt: number;
   status: DeliveryStatus;
+  attempt: number;
+  report?: WorkReport;
+  verification?: { passed: boolean; checks: unknown[]; error?: string };
+  review?: { passed: boolean; findings: unknown[] };
+  error?: string;
+  view?: DeliveryView;
 }
 
 export interface MeetingState {
   workers: Map<AgentSource, WorkerState>;
   plan: MeetingPlan | null;
+  pendingPlan: PlanMeetingTaskInput[] | null;
+  pendingPlanBrief: MeetingPlanBrief | null;
   running: boolean;
   lastError: string | null;
   /** Most recent delivery awaiting user acceptance. Null when nothing is
@@ -146,6 +192,9 @@ export interface MeetingState {
    *  freshest one. */
   currentDelivery: DeliverySnapshot | null;
   deliveryHistory: DeliverySnapshot[];
+  finalMeetingDelivery: MeetingDelivery | null;
+  finalMeetingDecision: FinalMeetingDecision | null;
+  coordinatorBriefings: CoordinatorBriefing[];
   /** Paths of documents saved via the save_document MCP tool. The renderer
    *  watches this array and auto-opens each new path as a file tab. */
   savedDocuments: string[];
@@ -153,6 +202,15 @@ export interface MeetingState {
    *  owns one host agent (the "talker" for that group) plus its workers. */
   hostGroups: Map<string, HostGroupState>;
   coordinatorHostId: string;
+  /** A pending coordinator-takeover prompt surfaced when the coordinator host
+   *  died and a candidate replacement is ready. Non-blocking: the renderer
+   *  presents it and the user transfers via the participant panel
+   *  (`setCoordinator` clears this). */
+  pendingCoordinatorTakeover?: {
+    failedHostId: string;
+    candidateHostId: string;
+    error?: string;
+  };
 }
 
 /** One host group: a host agent + its worker pool. Collapsible in the
@@ -212,6 +270,43 @@ type PendingInputItem =
 export interface LobbyData {
   active: TabMeta[];
   recent: RecentCwdMeta[];
+}
+
+/** One plan node, flattened out of its slot and tagged with the project it
+ *  belongs to. The cross-project board consumes these instead of reaching into
+ *  slot state, so it stays independent of how many Orchestrators are alive. */
+export interface AggregatedTask {
+  /** Unique across projects — plan node ids are only unique within a slot. */
+  key: string;
+  sessionId: string;
+  cwd: string;
+  projectName: string;
+  taskId: string;
+  title: string;
+  status: WorkerStatus;
+  column: TaskColumnId;
+  statusLabel: string;
+  backendId: string | null;
+  deps: string[];
+  attempt: number;
+  /** Why this task is parked on the user, or null when nothing is blocking. */
+  blockedReason: string | null;
+}
+
+/** A plan the coordinator proposed that the user hasn't approved yet. Surfaced
+ *  on the board so the 待批准 column reflects meeting-level approvals too, not
+ *  just per-task permission prompts. */
+export interface PendingPlanSummary {
+  sessionId: string;
+  cwd: string;
+  projectName: string;
+  taskCount: number;
+  goal?: string;
+}
+
+export interface CrossProjectTasks {
+  tasks: AggregatedTask[];
+  pendingPlans: PendingPlanSummary[];
 }
 
 interface SlotInternal {
@@ -285,6 +380,8 @@ function createTalkerState(): WorkerState {
     transcript: [],
     activity: [],
     pendingPermission: null,
+    resolvingPermissionId: null,
+    permissionError: null,
     currentTool: null,
     currentToolInput: null,
     lastText: '',
@@ -294,6 +391,7 @@ function createTalkerState(): WorkerState {
     startedAt: null,
     taskHistory: [],
     hostId: 'default',
+    commandLog: [],
   };
 }
 
@@ -312,10 +410,15 @@ function emptyState(defaultBackendId: string = 'claude-code'): MeetingState {
   return {
     workers,
     plan: null,
+    pendingPlan: null,
+    pendingPlanBrief: null,
     running: false,
     lastError: null,
     currentDelivery: null,
     deliveryHistory: [],
+    finalMeetingDelivery: null,
+    finalMeetingDecision: null,
+    coordinatorBriefings: [],
     savedDocuments: [],
     hostGroups,
     coordinatorHostId: 'default',
@@ -368,6 +471,10 @@ class MeetingStore {
   private cachedActiveCwdFresh = false;
   /** Lobby projection cache. Invalidated whenever tabs or recents change. */
   private cachedLobbyData: LobbyData | null = null;
+  /** Cross-project task board projection. Shares the tab cache's invalidation
+   *  because notify() nudges tab listeners for every slot, active or not —
+   *  which is exactly the granularity the board needs. */
+  private cachedCrossProjectTasks: CrossProjectTasks | null = null;
 
   private listeners = new Set<Listener>();
   private tabListeners = new Set<Listener>();
@@ -379,6 +486,10 @@ class MeetingStore {
   private speakCallback: SpeakHandle | null = null;
   private subscribed = false;
   private unsubscribeEvents: (() => void) | null = null;
+  private taskInspectorProjections = new Map<string, TaskInspectorProjection>();
+  private taskInspectorSubscriptions = new Map<string, () => void>();
+  private taskInspectorGenerations = new Map<string, number>();
+  private taskInspectorListeners = new Set<Listener>();
 
   // Proactive-announcement queue (see ANNOUNCE_* constants). Mirrors the
   // trust-mode scope pushed down from App so we can stay quiet about
@@ -423,6 +534,96 @@ class MeetingStore {
     this.ensureSubscribed();
     return () => { this.tabListeners.delete(listener); };
   };
+
+  subscribeTaskInspectors = (listener: Listener): (() => void) => {
+    this.taskInspectorListeners.add(listener);
+    return () => {
+      this.taskInspectorListeners.delete(listener);
+    };
+  };
+
+  getTaskInspectorProjection(
+    sessionId: string,
+    taskId: string,
+  ): TaskInspectorProjection | null {
+    return this.taskInspectorProjections.get(this.taskInspectorKey(sessionId, taskId)) ?? null;
+  }
+
+  /** Snapshot -> bounded replay -> atomic subscription hydration used by the
+   * docked Task Inspector. A detected task-event chain gap restarts from a
+   * fresh snapshot instead of speculatively reducing incomplete state. */
+  async openTaskInspector(sessionId: string, taskId: string): Promise<{
+    ok: true;
+    snapshot: RendererTaskSnapshot;
+  } | { ok: false; error: string }> {
+    const key = this.taskInspectorKey(sessionId, taskId);
+    const generation = (this.taskInspectorGenerations.get(key) ?? 0) + 1;
+    this.taskInspectorGenerations.set(key, generation);
+    this.taskInspectorSubscriptions.get(key)?.();
+    this.taskInspectorSubscriptions.delete(key);
+
+    const snapshotResult = await window.vibeMeet.tasks.getSnapshot(sessionId, taskId);
+    if (!snapshotResult.ok) return { ok: false, error: snapshotResult.error };
+    if (this.taskInspectorGenerations.get(key) !== generation) {
+      return { ok: false, error: 'Task Inspector hydration was superseded' };
+    }
+    let projection = hydrateTaskProjection(snapshotResult.value);
+    this.taskInspectorProjections.set(key, projection);
+    this.notifyTaskInspectorListeners();
+
+    let cursor = projection.lastSeq;
+    for (;;) {
+      const page = await window.vibeMeet.tasks.getEvents(sessionId, taskId, cursor, 500);
+      if (!page.ok) return { ok: false, error: page.error };
+      if (this.taskInspectorGenerations.get(key) !== generation) {
+        return { ok: false, error: 'Task Inspector hydration was superseded' };
+      }
+      for (const event of page.value.events) {
+        projection = reduceTaskEvent(projection, event);
+        if (projection.needsRefresh) {
+          return this.refreshTaskInspector(sessionId, taskId, key, generation);
+        }
+      }
+      cursor = page.value.nextAfterSeq;
+      this.taskInspectorProjections.set(key, projection);
+      if (!page.value.hasMore) break;
+    }
+
+    const unsubscribe = window.vibeMeet.tasks.onEvent(
+      sessionId,
+      taskId,
+      projection.lastSeq,
+      (event) => {
+        if (this.taskInspectorGenerations.get(key) !== generation) return;
+        const current = this.taskInspectorProjections.get(key);
+        if (!current) return;
+        const next = reduceTaskEvent(current, event);
+        this.taskInspectorProjections.set(key, next);
+        this.notifyTaskInspectorListeners();
+        if (next.needsRefresh) {
+          this.taskInspectorSubscriptions.get(key)?.();
+          this.taskInspectorSubscriptions.delete(key);
+          void this.openTaskInspector(sessionId, taskId);
+        }
+      },
+    );
+    if (this.taskInspectorGenerations.get(key) !== generation) {
+      unsubscribe();
+      return { ok: false, error: 'Task Inspector hydration was superseded' };
+    }
+    this.taskInspectorSubscriptions.set(key, unsubscribe);
+    this.notifyTaskInspectorListeners();
+    return { ok: true, snapshot: projection.snapshot };
+  }
+
+  closeTaskInspector(sessionId: string, taskId: string): void {
+    const key = this.taskInspectorKey(sessionId, taskId);
+    this.taskInspectorGenerations.set(key, (this.taskInspectorGenerations.get(key) ?? 0) + 1);
+    this.taskInspectorSubscriptions.get(key)?.();
+    this.taskInspectorSubscriptions.delete(key);
+    this.taskInspectorProjections.delete(key);
+    this.notifyTaskInspectorListeners();
+  }
 
   getTabs = (): TabMeta[] => {
     if (this.cachedTabs) return this.cachedTabs;
@@ -478,6 +679,7 @@ class MeetingStore {
     this.cachedTabs = null;
     this.cachedActiveCwdFresh = false;
     this.cachedLobbyData = null;
+    this.cachedCrossProjectTasks = null;
   }
 
   /** Returns whichever sessionId we should pass to main for active-tab calls.
@@ -496,6 +698,67 @@ class MeetingStore {
       recent: this.recentCwds,
     };
     return this.cachedLobbyData;
+  };
+
+  /** Flatten every live slot's plan into one cross-project task list. This is
+   *  the seam that lets the UI present a single meeting while execution stays
+   *  one-Orchestrator-per-cwd: the board reads this, never the slot map.
+   *  Placeholder slots are skipped — they have no plan until resumed. */
+  getCrossProjectTasks = (): CrossProjectTasks => {
+    if (this.cachedCrossProjectTasks) return this.cachedCrossProjectTasks;
+
+    const tasks: AggregatedTask[] = [];
+    const pendingPlans: PendingPlanSummary[] = [];
+
+    for (const slot of this.slots.values()) {
+      if (slot.placeholder) continue;
+      const projectName = projectNameFromCwd(slot.cwd);
+
+      if (slot.state.pendingPlan && slot.state.pendingPlan.length > 0) {
+        pendingPlans.push({
+          sessionId: slot.id,
+          cwd: slot.cwd,
+          projectName,
+          taskCount: slot.state.pendingPlan.length,
+          goal: slot.state.pendingPlanBrief?.goal,
+        });
+      }
+
+      for (const node of slot.state.plan?.nodes ?? []) {
+        const worker = slot.state.workers.get(node.id);
+        // Live worker status wins: delivery-status updates the worker map
+        // before plan-updated replaces plan.nodes, so the board would lag
+        // the in-meeting task list if it only read the plan snapshot.
+        const status = resolveBoardTaskStatus(node.status, worker?.status);
+        const blockedReason = worker?.pendingPermission
+          ? '等待权限'
+          : node.workspaceDiagnostic
+            ? node.workspaceDiagnostic.message
+            : status === 'budget-paused'
+              ? '预算耗尽，需要续额'
+              : status === 'integration-conflict'
+                ? '集成冲突待处理'
+                : null;
+        tasks.push({
+          key: `${slot.id}\u0000${node.id}`,
+          sessionId: slot.id,
+          cwd: slot.cwd,
+          projectName,
+          taskId: node.id,
+          title: node.title,
+          status,
+          column: columnForTask(status, Boolean(worker?.pendingPermission || node.workspaceDiagnostic)),
+          statusLabel: WORKER_STATUS_LABEL[status],
+          backendId: worker?.backendId ?? node.executorBackendId ?? null,
+          deps: node.deps,
+          attempt: worker?.attempt ?? 1,
+          blockedReason,
+        });
+      }
+    }
+
+    this.cachedCrossProjectTasks = { tasks, pendingPlans };
+    return this.cachedCrossProjectTasks;
   };
 
   setSpeakCallback(cb: SpeakHandle | null) {
@@ -597,12 +860,43 @@ class MeetingStore {
       }
       this.unsubscribeEvents = null;
     }
+    for (const unsubscribe of this.taskInspectorSubscriptions.values()) {
+      try { unsubscribe(); } catch { /* one broken task subscription is isolated */ }
+    }
+    this.taskInspectorSubscriptions.clear();
+    this.taskInspectorProjections.clear();
+    this.taskInspectorGenerations.clear();
     // C2: the announce retry timer holds a window.setTimeout handle; without
     // this a dispose() mid-retry leaks the timer (and would fire into a
     // torn-down store).
     this.announceQueue = [];
     this.clearAnnounceTimer();
     this.subscribed = false;
+  }
+
+  private taskInspectorKey(sessionId: string, taskId: string): string {
+    return `${sessionId}\u0000${taskId}`;
+  }
+
+  private notifyTaskInspectorListeners(): void {
+    for (const listener of this.taskInspectorListeners) {
+      try { listener(); } catch { /* one bad inspector listener is isolated */ }
+    }
+  }
+
+  private refreshTaskInspector(
+    sessionId: string,
+    taskId: string,
+    key: string,
+    generation: number,
+  ): Promise<
+    { ok: true; snapshot: RendererTaskSnapshot }
+    | { ok: false; error: string }
+  > {
+    if (this.taskInspectorGenerations.get(key) !== generation) {
+      return Promise.resolve({ ok: false, error: 'Task Inspector hydration was superseded' });
+    }
+    return this.openTaskInspector(sessionId, taskId);
   }
 
   private notify(slotId: string) {
@@ -1043,9 +1337,12 @@ class MeetingStore {
               currentTool: null,
               currentToolInput: null,
               pendingPermission: null,
+              resolvingPermissionId: null,
+              permissionError: null,
               lastText: '',
               activity: isReassign ? [] : existing.activity,
               transcript: isReassign ? [] : existing.transcript,
+              commandLog: isReassign ? [] : (existing.commandLog ?? []),
               taskHistory: archivedHistory,
               hostId,
             }
@@ -1058,6 +1355,8 @@ class MeetingStore {
               transcript: [],
               activity: [],
               pendingPermission: null,
+              resolvingPermissionId: null,
+              permissionError: null,
               currentTool: null,
               currentToolInput: null,
               lastText: '',
@@ -1067,6 +1366,7 @@ class MeetingStore {
               startedAt: now,
               taskHistory: [],
               hostId,
+              commandLog: [],
             };
         workers.set(e.workerId, next);
 
@@ -1123,21 +1423,137 @@ class MeetingStore {
       }
       return;
     }
-    if (e.kind === 'worker-delivery') {
-      const snapshot: DeliverySnapshot = {
-        workerId: e.workerId,
-        title: e.title,
-        summary: e.summary,
-        taskId: e.taskId,
-        files: e.files,
-        receivedAt: Date.now(),
-        status: 'pending',
-      };
-      const MAX_DELIVERY_HISTORY = 20;
+    if (e.kind === 'coordinator-briefing') {
       this.mutateSlot(slot.id, (s) => ({
         ...s,
-        currentDelivery: snapshot,
-        deliveryHistory: [...s.deliveryHistory, snapshot].slice(-MAX_DELIVERY_HISTORY),
+        coordinatorBriefings: [...s.coordinatorBriefings, e.briefing].slice(-50),
+      }));
+      this.bumpUnread(slot);
+      return;
+    }
+    if (e.kind === 'worker-delivery') {
+      const MAX_DELIVERY_HISTORY = 20;
+      this.mutateSlot(slot.id, (s) => {
+        const prior = s.deliveryHistory.find((item) => item.deliveryId === e.deliveryId);
+        const snapshot: DeliverySnapshot = prior
+          ? {
+              ...prior,
+              title: e.title,
+              summary: e.summary,
+              files: e.files,
+              receivedAt: Date.now(),
+            }
+          : {
+              workerId: e.workerId,
+              title: e.title,
+              summary: e.summary,
+              taskId: e.taskId,
+              deliveryId: e.deliveryId,
+              candidateId: null,
+              files: e.files,
+              receivedAt: Date.now(),
+              status: 'legacy-pending',
+              attempt: 1,
+            };
+        const deliveryHistory = prior
+          ? s.deliveryHistory.map((item) => item.deliveryId === e.deliveryId ? snapshot : item)
+          : [...s.deliveryHistory, snapshot].slice(-MAX_DELIVERY_HISTORY);
+        return {
+          ...s,
+          currentDelivery: snapshot.status === 'accepted' ? null : snapshot,
+          deliveryHistory,
+        };
+      });
+      this.bumpUnread(slot);
+      return;
+    }
+    if (e.kind === 'worker-event') {
+      const incoming = e.event;
+      this.updateWorker(slot, incoming.workerId, (worker) =>
+        reduceWorkerEvent(worker, incoming, e.source) as WorkerState);
+      return;
+    }
+    if (e.kind === 'delivery-status') {
+      const delivery = e.delivery;
+      const statusMap: Partial<Record<DeliveryView['status'], WorkerStatus>> = {
+        'preparing-workspace': 'running',
+        executing: 'running',
+        verifying: 'verifying',
+        reviewing: 'reviewing',
+        'coordinator-reviewing': 'coordinator-reviewing',
+        'awaiting-delivery-acceptance': 'awaiting-acceptance',
+        'integration-queued': 'integration-queued',
+        integrating: 'integrating',
+        'integration-conflict': 'integration-conflict',
+        reworking: 'reworking',
+        accepted: 'accepted',
+        interrupted: 'interrupted',
+        failed: 'failed',
+        cancelled: 'failed',
+      };
+      const workerStatus = statusMap[delivery.status];
+      if (workerStatus) {
+        this.updateWorker(slot, e.workerId, (worker) => ({
+          ...worker,
+          status: workerStatus,
+          attempt: delivery.attempt,
+          summary: delivery.candidate?.report.summary ?? worker.summary,
+        }));
+      }
+      const MAX_DELIVERY_HISTORY = 20;
+      this.mutateSlot(slot.id, (s) => {
+        const worker = s.workers.get(e.workerId);
+        const prior = s.deliveryHistory.find((item) => item.deliveryId === delivery.id);
+        const latestAttempt = delivery.attempts.at(-1);
+        const snapshot: DeliverySnapshot = {
+          workerId: e.workerId,
+          title: prior?.title ?? worker?.title ?? e.taskId,
+          summary: delivery.candidate?.report.summary
+            ?? latestAttempt?.report.summary
+            ?? worker?.workReport?.summary
+            ?? prior?.summary
+            ?? '',
+          taskId: e.taskId,
+          deliveryId: delivery.id,
+          candidateId: delivery.candidate?.id ?? null,
+          files: prior?.files ?? [],
+          receivedAt: delivery.updatedAt,
+          status: delivery.status,
+          attempt: delivery.attempt,
+          report: delivery.candidate?.report ?? latestAttempt?.report ?? worker?.workReport ?? prior?.report,
+          verification: delivery.candidate?.verification ?? latestAttempt?.verification,
+          review: delivery.candidate?.review ?? latestAttempt?.review,
+          error: delivery.error,
+          view: delivery,
+        };
+        const deliveryHistory = prior
+          ? s.deliveryHistory.map((item) => item.deliveryId === delivery.id ? snapshot : item)
+          : [...s.deliveryHistory, snapshot].slice(-MAX_DELIVERY_HISTORY);
+        const visible = [
+          'verifying',
+          'reviewing',
+          'coordinator-reviewing',
+          'awaiting-delivery-acceptance',
+          'integration-queued',
+          'integrating',
+          'integration-conflict',
+          'reworking',
+        ]
+          .includes(delivery.status);
+        const currentDelivery = visible
+          ? snapshot
+          : s.currentDelivery?.deliveryId === delivery.id
+            ? null
+            : s.currentDelivery;
+        return { ...s, currentDelivery, deliveryHistory };
+      });
+      return;
+    }
+    if (e.kind === 'meeting-delivery-updated') {
+      this.mutateSlot(slot.id, (s) => ({
+        ...s,
+        finalMeetingDelivery: e.delivery ? structuredClone(e.delivery) : null,
+        finalMeetingDecision: e.decision ? structuredClone(e.decision) : null,
       }));
       this.bumpUnread(slot);
       return;
@@ -1147,15 +1563,39 @@ class MeetingStore {
       return;
     }
     if (e.kind === 'plan-proposed') {
-      const summary = e.tasks
-        .map((task) => `• ${task.title} → ${task.executorBackendId ?? 'coordinator backend'}`)
-        .join('\n');
-      const approved = window.confirm(`Host 提议了 ${e.tasks.length} 个任务：\n\n${summary}\n\n是否启动这些 Worker？`);
-      void window.vibeMeet.approvePlan(slot.id, approved).then((result) => {
-        if (!result.ok) {
-          this.mutateSlot(slot.id, (s) => ({ ...s, lastError: result.error ?? 'Plan approval failed' }));
-        }
-      });
+      this.mutateSlot(slot.id, (s) => ({
+        ...s,
+        pendingPlan: e.tasks.map((task) => ({
+          ...task,
+          deps: [...task.deps],
+          acceptanceCriteria: task.acceptanceCriteria?.map((criterion) => ({
+            ...criterion,
+            verification: criterion.verification.kind === 'command'
+              ? { ...criterion.verification, argv: [...criterion.verification.argv] }
+              : { kind: 'manual' },
+          })),
+        })),
+        pendingPlanBrief: e.brief
+          ? {
+            goal: e.brief.goal,
+            approach: e.brief.approach,
+            steps: e.brief.steps.map((step) => ({ ...step })),
+            risks: [...e.brief.risks],
+            openQuestions: [...e.brief.openQuestions],
+          }
+          : {
+            goal: e.tasks.length === 1
+              ? e.tasks[0]!.title
+              : `完成 ${e.tasks.length} 项协作任务`,
+            steps: e.tasks.map((task) => ({
+              title: task.title,
+              detail: task.prompt,
+              taskId: task.id,
+            })),
+            risks: [],
+            openQuestions: [],
+          },
+      }));
       return;
     }
     if (e.kind === 'auth-required') {
@@ -1205,11 +1645,25 @@ class MeetingStore {
         this.mutateSlot(slot.id, (s) => ({ ...s, running: false, lastError: e.error ?? 'Coordinator exited and no replacement is ready.' }));
         return;
       }
-      const approved = window.confirm(`当前主持人 ${e.hostId} 已退出。是否由 ${e.candidateHostId} 接管？\n\n已有 Worker 会继续运行。`);
-      if (approved) {
-        void this.setCoordinator(e.candidateHostId);
-      } else {
-        this.mutateSlot(slot.id, (s) => ({ ...s, lastError: '新任务调度已暂停，等待选择主持人。' }));
+      // Non-blocking: surface the takeover prompt as slot state + an
+      // announcement. The previous window.confirm ran on the single
+      // session:event listener and froze all worker/permission event
+      // processing (and tripped the ASR idle watchdog) while the modal was
+      // up. The user transfers via the participant panel (setCoordinator),
+      // which clears pendingCoordinatorTakeover.
+      const candidateHostId = e.candidateHostId;
+      this.mutateSlot(slot.id, (s) => ({
+        ...s,
+        pendingCoordinatorTakeover: {
+          failedHostId: e.hostId,
+          candidateHostId,
+          error: e.error,
+        },
+        lastError: `主持人 ${e.hostId} 已退出，可在参与者面板选 ${candidateHostId} 接管`,
+      }));
+      this.bumpUnread(slot);
+      if (slot.id === this.activeId) {
+        this.announce(`主持人 ${e.hostId} 已退出。可在参与者面板选择 ${e.candidateHostId} 接管，已有 Worker 会继续运行。`);
       }
       return;
     }
@@ -1217,6 +1671,10 @@ class MeetingStore {
       this.updateWorker(slot, source, (w) => ({
         ...w,
         pendingPermission: { id: e.id, toolName: e.toolName, input: e.input, toolUseID: e.toolUseID },
+        // A fresh request means any prior reply landed elsewhere; reset the
+        // in-flight resolver state so the new card is interactive again.
+        resolvingPermissionId: null,
+        permissionError: null,
         activity: appendCapped(
           w.activity,
           [{
@@ -1247,7 +1705,9 @@ class MeetingStore {
       // permission.replied from any end, broker fail-closed timeout, or
       // session teardown (PermissionBroker auto-reject).
       this.updateWorker(slot, source, (w) => (
-        w.pendingPermission?.id === e.id ? { ...w, pendingPermission: null } : w
+        w.pendingPermission?.id === e.id
+          ? { ...w, pendingPermission: null, resolvingPermissionId: null, permissionError: null }
+          : w
       ), e.hostId);
       return;
     }
@@ -1337,7 +1797,11 @@ class MeetingStore {
     if (!slot) return { ok: false, error: 'No active session' };
     const result = await window.vibeMeet.sessions.setCoordinator(slot.id, hostId);
     if (!result.ok) return result;
-    this.mutateSlot(slot.id, (s) => ({ ...s, coordinatorHostId: result.coordinatorHostId }));
+    this.mutateSlot(slot.id, (s) => ({
+      ...s,
+      coordinatorHostId: result.coordinatorHostId,
+      pendingCoordinatorTakeover: undefined,
+    }));
     return { ok: true };
   }
 
@@ -1387,6 +1851,8 @@ class MeetingStore {
       transcript: [],
       activity: [],
       pendingPermission: null,
+      resolvingPermissionId: null,
+      permissionError: null,
       currentTool: null,
       currentToolInput: null,
       lastText: '',
@@ -1396,6 +1862,7 @@ class MeetingStore {
       startedAt: null,
       taskHistory: [],
       hostId: hostId ?? 'default',
+      commandLog: [],
     };
   }
 
@@ -1591,10 +2058,26 @@ class MeetingStore {
             const input = typeof last.input === 'object' && last.input !== null
               ? JSON.stringify(last.input).slice(0, 80)
               : String(last.input ?? '');
+            const now = Date.now();
+            let commandLog = next.commandLog ?? [];
+            for (const t of visible) {
+              if (t.name !== 'Bash' && t.name !== 'bash') continue;
+              const command = typeof t.input?.command === 'string'
+                ? t.input.command
+                : undefined;
+              commandLog = upsertCommandLog(commandLog, {
+                callId: typeof t.id === 'string' ? t.id : undefined,
+                command,
+                phase: 'started',
+                timestamp: now,
+                source,
+              });
+            }
             next = {
               ...next,
               currentTool: last.name,
               currentToolInput: input,
+              commandLog,
               activity: appendCapped(
                 next.activity,
                 visible.map((t) => ({
@@ -1602,7 +2085,7 @@ class MeetingStore {
                   kind: 'tool-call' as const,
                   title: `Tool: ${t.name}`,
                   detail: JSON.stringify(t.input).slice(0, 200),
-                  ts: Date.now(),
+                  ts: now,
                   source,
                 })),
                 MAX_ACTIVITY,
@@ -1621,26 +2104,58 @@ class MeetingStore {
       const content = msg?.message?.content;
       if (!Array.isArray(content)) return;
       const results = content.filter((b: any) => b?.type === 'tool_result');
-      if (results.length === 0 || source === 'talker') return;
-      this.updateWorker(slot, source, (w) => ({
-        ...w,
-        currentTool: null,
-        currentToolInput: null,
-        activity: appendCapped(
-          w.activity,
-          results.map((r: any) => ({
-            id: uid(),
-            kind: 'tool-result' as const,
-            title: `Tool result${r.is_error ? ' (error)' : ''}`,
-            detail: typeof r.content === 'string'
-              ? r.content.slice(0, 300)
-              : JSON.stringify(r.content).slice(0, 300),
-            ts: Date.now(),
-            source,
-          })),
-          MAX_ACTIVITY,
-        ),
-      }));
+      if (results.length === 0) return;
+      // Talkers also project Bash results into commandLog so the CLI view
+      // covers host/coordinator shells, not only Workers.
+      this.updateWorker(slot, source, (w) => {
+        const now = Date.now();
+        let commandLog = w.commandLog ?? [];
+        for (const r of results) {
+          const callId = typeof r.tool_use_id === 'string' ? r.tool_use_id : undefined;
+          const matched = callId
+            ? commandLog.find((entry) => entry.id === callId)
+            : undefined;
+          // Only complete Bash entries (or anonymous results when we have no id).
+          if (matched || !callId) {
+            const rawOutput = typeof r.content === 'string'
+              ? r.content
+              : r.content != null
+                ? JSON.stringify(r.content)
+                : undefined;
+            commandLog = upsertCommandLog(commandLog, {
+              callId,
+              command: matched?.command,
+              phase: r.is_error ? 'failed' : 'completed',
+              output: rawOutput,
+              timestamp: now,
+              source,
+            });
+          }
+        }
+        if (source === 'talker') {
+          return { ...w, currentTool: null, currentToolInput: null, commandLog };
+        }
+        return {
+          ...w,
+          currentTool: null,
+          currentToolInput: null,
+          commandLog,
+          activity: appendCapped(
+            w.activity,
+            results.map((r: any) => ({
+              id: uid(),
+              kind: 'tool-result' as const,
+              title: `Tool result${r.is_error ? ' (error)' : ''}`,
+              detail: typeof r.content === 'string'
+                ? r.content.slice(0, 300)
+                : JSON.stringify(r.content).slice(0, 300),
+              ts: now,
+              source,
+            })),
+            MAX_ACTIVITY,
+          ),
+        };
+      }, hostId);
       return;
     }
     if (type === 'result') {
@@ -1806,13 +2321,16 @@ class MeetingStore {
     return slot;
   }
 
-  async sendText(text: string) {
+  async sendText(text: string, options?: { displayText?: string }) {
     if (!text.trim()) return;
     const slot = this.activeLiveSlot();
     if (!slot) return;
     if (slot.status === 'failed') return;
     const entryId = uid();
-    const entry: TranscriptEntry = { id: entryId, role: 'user', text, ts: Date.now() };
+    // displayText keeps mode directives (e.g. multi-agent) out of the chat bubble
+    // while still shipping the full prompt to the model.
+    const visible = (options?.displayText ?? text).trim() || text;
+    const entry: TranscriptEntry = { id: entryId, role: 'user', text: visible, ts: Date.now() };
     this.updateWorker(slot, 'talker', (w) => ({
       ...w,
       transcript: appendCapped(w.transcript, [entry], MAX_TRANSCRIPT),
@@ -1879,13 +2397,17 @@ class MeetingStore {
   async sendAttachments(
     staged: StagedAttachment[],
     text: string,
+    options?: { displayText?: string },
   ): Promise<{ ok: boolean; error?: string }> {
     if (staged.length === 0 && !text.trim()) return { ok: false, error: 'Nothing to send' };
     const slot = this.activeLiveSlot();
     if (!slot) return { ok: false, error: 'No active session' };
     if (slot.status === 'failed') return { ok: false, error: 'Session failed to start' };
     const meta: AttachmentMeta[] = staged.map((a) => ({ name: a.name, kind: a.kind, sizeBytes: a.sizeBytes }));
-    const transcriptText = text.trim().length > 0 ? text : `Sent ${staged.length} file${staged.length === 1 ? '' : 's'}`;
+    const visibleRaw = options?.displayText ?? text;
+    const transcriptText = visibleRaw.trim().length > 0
+      ? visibleRaw.trim()
+      : `Sent ${staged.length} file${staged.length === 1 ? '' : 's'}`;
     const entryId = uid();
     const entry: TranscriptEntry = {
       id: entryId,
@@ -1954,25 +2476,58 @@ class MeetingStore {
     return () => { this.droppedFileListeners.delete(cb); };
   }
 
-  async resolvePermission(id: string, decision: 'allow' | 'deny') {
+  async resolvePermission(id: string, decision: 'allow' | 'deny'): Promise<{ ok: true } | { ok: false; error: string }> {
     const sessionId = this.effectiveSessionId();
-    if (!sessionId) return;
+    if (!sessionId) return { ok: false, error: 'No active session' };
     const slot = this.slots.get(sessionId);
-    if (!slot) return;
-    try {
-      await window.vibeMeet.resolvePermission(sessionId, id, decision);
-    } catch (err) {
-      console.error('[meeting-store] resolvePermission IPC failed:', err);
-    }
+    if (!slot) return { ok: false, error: 'No active session' };
+
+    // Mark the permission as resolving so every permission card (WorkerCard
+    // inline, PermissionCard in drawer/modal/inspector) disables its buttons
+    // for the same id atomically. Clear any stale error from a prior attempt.
     this.mutateSlot(slot.id, (s) => {
       const workers = new Map(s.workers);
       for (const [key, w] of workers) {
         if (w.pendingPermission?.id === id) {
-          workers.set(key, { ...w, pendingPermission: null });
+          workers.set(key, { ...w, resolvingPermissionId: id, permissionError: null });
         }
       }
       return { ...s, workers };
     });
+
+    try {
+      await window.vibeMeet.resolvePermission(sessionId, id, decision);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('[meeting-store] resolvePermission IPC failed:', err);
+      // Do NOT clear pendingPermission: the worker is still blocked waiting
+      // for a reply, and no permission-cancelled event will arrive. Surface
+      // the error so the user can retry instead of seeing the card vanish.
+      this.mutateSlot(slot.id, (s) => {
+        const workers = new Map(s.workers);
+        for (const [key, w] of workers) {
+          if (w.pendingPermission?.id === id) {
+            workers.set(key, { ...w, resolvingPermissionId: null, permissionError: `权限答复发送失败：${msg}` });
+          }
+        }
+        return { ...s, workers };
+      });
+      return { ok: false, error: msg };
+    }
+
+    // Success: clear the resolver flag. The pending card itself is cleared by
+    // the permission-cancelled event from the main process; clearing it here
+    // too gives snappy feedback and is idempotent when the event arrives.
+    this.mutateSlot(slot.id, (s) => {
+      const workers = new Map(s.workers);
+      for (const [key, w] of workers) {
+        if (w.pendingPermission?.id === id) {
+          workers.set(key, { ...w, pendingPermission: null, resolvingPermissionId: null, permissionError: null });
+        }
+      }
+      return { ...s, workers };
+    });
+    return { ok: true };
   }
 
   async interrupt() {
@@ -2012,22 +2567,32 @@ class MeetingStore {
 
   // --- Delivery acceptance --------------------------------------------------
 
-  /** Dismiss the staged delivery — user signed off on the work. We don't
-   *  echo anything back to the worker; the absence of feedback IS the
-   *  acceptance signal (worker has already been disposed by markTaskDone). */
-  acceptDelivery() {
+  /** Submit an authoritative acceptance decision to main. The renderer does
+   *  not clear or mark anything locally; it waits for the journal-backed
+   *  delivery-status event emitted by the Orchestrator. */
+  async acceptDelivery(): Promise<{ ok: true } | { ok: false; error: string }> {
     const id = this.effectiveSessionId();
-    if (!id) return;
+    if (!id) return { ok: false, error: 'No active session' };
     const slot = this.slots.get(id);
-    if (!slot || !slot.state.currentDelivery) return;
-    const taskId = slot.state.currentDelivery.taskId;
-    this.mutateSlot(slot.id, (s) => ({
-      ...s,
-      currentDelivery: null,
-      deliveryHistory: s.deliveryHistory.map((d) =>
-        d.taskId === taskId ? { ...d, status: 'accepted' as const } : d,
-      ),
-    }));
+    const delivery = slot?.state.currentDelivery;
+    if (!delivery?.deliveryId) {
+      return { ok: false, error: 'Delivery is not ready for acceptance' };
+    }
+    // Awaiting acceptance uses the live candidate; reworking can revive the
+    // last report via a stable synthetic id the harness recognizes.
+    const candidateId = delivery.candidateId
+      ?? (delivery.status === 'reworking' && delivery.report
+        ? `accept-last-${delivery.deliveryId}`
+        : null);
+    if (!candidateId) {
+      return { ok: false, error: 'Delivery is not ready for acceptance' };
+    }
+    const result = await window.vibeMeet.acceptDelivery(
+      id,
+      delivery.deliveryId,
+      candidateId,
+    );
+    return result.ok ? { ok: true } : result;
   }
 
   /** Push revision feedback back into the meeting. Tries the worker's
@@ -2046,70 +2611,90 @@ class MeetingStore {
       return { ok: false, error: 'No delivery staged' };
     }
     const delivery = slot.state.currentDelivery;
-    const workerId = delivery.workerId;
-
-    const directRes = await window.vibeMeet.steerWorker(id, workerId, trimmed);
-    if (directRes.ok) {
-      this.markDeliveryRevised(slot, workerId, trimmed);
-      return { ok: true, route: 'worker', queued: directRes.queued };
+    if (!delivery.deliveryId) {
+      return { ok: false, error: 'Delivery is not ready to be returned' };
     }
-
-    // Worker already torn down (status='done'/'failed' or session gone) —
-    // route through the talker so it can re-delegate. We append a transcript
-    // entry that mirrors what the user sees so the chat history shows the
-    // request, and we let the talker decide how to dispatch it.
-    const fileLine = delivery.files.length > 0
-      ? `\n相关文件:\n${delivery.files.map((f) => `  - ${f.path}`).join('\n')}`
-      : '';
-    const synthetic = [
-      `刚才 ${workerId}「${delivery.title}」交付的内容我看过了，需要继续改:`,
+    if (delivery.status !== 'awaiting-delivery-acceptance' && delivery.status !== 'reworking') {
+      return { ok: false, error: 'Delivery is not ready to be returned' };
+    }
+    // "可以了 / OK / LGTM" means Accept, not another rework loop.
+    if (isAffirmativeDeliveryFeedback(trimmed)) {
+      const accepted = await this.acceptDelivery();
+      return accepted.ok
+        ? { ok: true, route: 'talker' }
+        : { ok: false, error: accepted.error };
+    }
+    const result = await window.vibeMeet.returnDelivery(
+      id,
+      delivery.deliveryId,
+      delivery.candidateId ?? undefined,
       trimmed,
-      fileLine,
-      '请把这条修改意见交回去（可以复用同一个 worker，也可以重新派活）。',
-    ].filter(Boolean).join('\n');
-
-    await window.vibeMeet.sendUserText(id, synthetic);
-    const revisionEntry: TranscriptEntry = {
-      id: uid(),
-      role: 'user',
-      text: `[对 ${delivery.title} 的修改意见] ${trimmed}`,
-      ts: Date.now(),
-    };
-    this.updateWorker(slot, 'talker', (w) => ({
-      ...w,
-      transcript: appendCapped(w.transcript, [revisionEntry], MAX_TRANSCRIPT),
-    }));
-    this.persistTalkerEntry(slot, revisionEntry);
-    this.markDeliveryRevised(slot, workerId, trimmed);
-    return { ok: true, route: 'talker' };
+    );
+    return result.ok
+      ? { ok: true, route: 'worker' }
+      : { ok: false, error: result.error };
   }
 
-  private markDeliveryRevised(slot: SlotInternal, workerId: AgentSource, feedback: string) {
-    const taskId = slot.state.currentDelivery?.taskId;
-    this.mutateSlot(slot.id, (s) => ({
-      ...s,
-      currentDelivery: null,
-      deliveryHistory: taskId
-        ? s.deliveryHistory.map((d) =>
-            d.taskId === taskId ? { ...d, status: 'revised' as const } : d,
-          )
-        : s.deliveryHistory,
+  async acceptFinalMeetingDelivery(): Promise<{ ok: true } | { ok: false; error: string }> {
+    const id = this.effectiveSessionId();
+    if (!id) return { ok: false, error: 'No active session' };
+    const delivery = this.slots.get(id)?.state.finalMeetingDelivery;
+    if (!delivery || delivery.publicationState !== 'meeting-branch-only') {
+      return { ok: false, error: 'Final Meeting delivery is not ready' };
+    }
+    const result = await window.vibeMeet.meetingDelivery.accept(
+      id,
+      delivery.id,
+      delivery.contentHash,
+    );
+    if (!result.ok) return result;
+    this.mutateSlot(id, (state) => ({
+      ...state,
+      finalMeetingDelivery: result.delivery,
     }));
-    this.updateWorker(slot, workerId, (w) => ({
-      ...w,
-      activity: appendCapped(
-        w.activity,
-        [{
-          id: uid(),
-          kind: 'system',
-          title: '用户提出修改意见',
-          detail: feedback.slice(0, 300),
-          ts: Date.now(),
-          source: workerId,
-        }],
-        MAX_ACTIVITY,
-      ),
-    }));
+    return { ok: true };
+  }
+
+  async requestFinalMeetingRework(
+    reason: string,
+  ): Promise<{ ok: true } | { ok: false; error: string }> {
+    const id = this.effectiveSessionId();
+    if (!id) return { ok: false, error: 'No active session' };
+    const delivery = this.slots.get(id)?.state.finalMeetingDelivery;
+    const normalized = reason.trim();
+    if (!delivery) return { ok: false, error: 'Final Meeting delivery is not ready' };
+    if (!normalized) return { ok: false, error: 'Rework reason is required' };
+    const result = await window.vibeMeet.meetingDelivery.requestRework(
+      id,
+      delivery.id,
+      delivery.contentHash,
+      normalized,
+    );
+    return result.ok ? { ok: true } : result;
+  }
+
+  async decidePendingPlan(
+    approved: boolean,
+    tasks?: PlanMeetingTaskInput[],
+  ): Promise<{ ok: boolean; error?: string }> {
+    const id = this.effectiveSessionId();
+    if (!id) return { ok: false, error: 'No active session' };
+    const slot = this.slots.get(id);
+    if (!slot?.state.pendingPlan) return { ok: false, error: 'No pending plan' };
+    const result = await window.vibeMeet.approvePlan(id, approved, tasks);
+    if (result.ok) {
+      this.mutateSlot(id, (state) => ({
+        ...state,
+        pendingPlan: null,
+        pendingPlanBrief: null,
+      }));
+    } else {
+      this.mutateSlot(id, (state) => ({
+        ...state,
+        lastError: result.error ?? 'Plan approval failed',
+      }));
+    }
+    return result;
   }
 
   // ===========================================================================

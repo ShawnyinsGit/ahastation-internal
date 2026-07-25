@@ -14,6 +14,10 @@
 
 import { ClaudeSession, type SessionEvent } from './claude-session.js';
 import type { BackendSession } from './backends/cli-backend.js';
+import type {
+  NativePermissionRequest,
+  PermissionNormalizationResult,
+} from './backends/canonical-execution.js';
 import type { AutoApproveScope } from './auto-approve-policy.js';
 import type { BrowserTabManager } from './browser-tab-manager.js';
 import {
@@ -27,6 +31,7 @@ import { WorkerScheduler, type SessionFactory } from './worker-scheduler.js';
 import {
   TALKER_PROMPT,
   COORDINATOR_ROLE_PROMPT,
+  COORDINATOR_REVIEW_PROMPT,
   EXPERT_ROLE_PROMPT,
   REPORT_MODE_SUFFIX,
 } from './orchestrator-prompts.js';
@@ -46,6 +51,19 @@ import type {
 } from './orchestrator-types.js';
 import type { SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { TaskWorkspaceManager } from './task-workspace.js';
+import type { DeliveryHarness } from './delivery-harness.js';
+import type {
+  AuthorizedMeetingContextSource,
+  ContextSelection,
+} from './task-context.js';
+import type { ContextPackage, TaskAuthorityGrant } from './task-collaboration.js';
+import type {
+  BackendEffectiveProfile,
+  TaskExecutionProfile,
+} from './task-collaboration.js';
+import type { BackendRuntime } from './backends/task-profile.js';
+import type { PlanMeetingTask } from './meeting-tools.js';
+import type { TaskMailbox } from './task-mailbox.js';
 
 export interface HostGroupOpts {
   /** Unique identifier for this host group. Default = 'default'. */
@@ -73,6 +91,64 @@ export interface HostGroupOpts {
   getSpeechFilterMode: () => 'strict' | 'off';
   isCoordinator: () => boolean;
   workspaceManager?: TaskWorkspaceManager;
+  meetingId: string;
+  deliveryHarness: DeliveryHarness;
+  deliveryArtifactRoot?: string;
+  flushEvents?: () => Promise<void>;
+  /** Latest durably accepted Meeting integration head. New dependency-released
+   * task worktrees branch from this head rather than the unchanged user base. */
+  getIntegrationHead?: () => string | undefined;
+  initialPlanVersion?: number;
+  getAuthorizedTaskContextSource: (
+    taskId: string,
+    selection: ContextSelection,
+  ) => Promise<AuthorizedMeetingContextSource>;
+  persistContextPackage: (contextPackage: ContextPackage) => Promise<void>;
+  compileTaskProfile?: (
+    requested: TaskExecutionProfile,
+  ) => Promise<{
+    runtime: BackendRuntime;
+    effectiveProfile: BackendEffectiveProfile;
+  }>;
+  persistTaskProfile?: (input: {
+    taskId: string;
+    attempt: number;
+    requestedProfile: TaskExecutionProfile;
+    runtime: BackendRuntime;
+    effectiveProfile: BackendEffectiveProfile;
+  }) => Promise<void>;
+  taskProfileCompilerRequired?: boolean;
+  compileTaskAuthority?: (input: {
+    taskId: string;
+    attempt: number;
+    planVersion: number;
+    approvalDecisionId: string;
+    workspaceRoot: string;
+    authorityRequest: PlanMeetingTask['authorityRequest'];
+    approvedAt: number;
+  }) => TaskAuthorityGrant;
+  persistTaskAuthority?: (input: {
+    taskId: string;
+    attempt: number;
+    authorityGrant: TaskAuthorityGrant;
+  }) => Promise<void>;
+  normalizePermissionRequest?: (
+    backendId: string,
+    native: NativePermissionRequest,
+  ) => PermissionNormalizationResult;
+  persistPermissionDecision?: (input: {
+    taskId: string;
+    attempt: number;
+    nativeRequestId: string;
+    decision: 'allow' | 'ask-user' | 'deny';
+    reason: string;
+    safeInput: Record<string, unknown>;
+    grantHash?: string;
+  }) => Promise<void>;
+  taskAuthorityCompilerRequired?: boolean;
+  /** Shared Meeting mailbox; every Worker instruction is journaled here
+   * before a Backend session receives it. */
+  taskMailbox?: TaskMailbox;
 }
 
 export class HostGroup {
@@ -99,6 +175,7 @@ export class HostGroup {
 
   /** Talker transcript for recap. Accumulates user+assistant text turns. */
   private talkerTranscript: TalkerTurn[] = [];
+  private talkerTurnSeq = 0;
 
   constructor(opts: HostGroupOpts) {
     this.id = opts.id;
@@ -137,7 +214,28 @@ export class HostGroup {
       sessionFactory: this.sessionFactory,
       resolveSessionFactory: opts.resolveWorkerSessionFactory,
       workspaceManager: opts.workspaceManager,
-      buildWorkerMcp: (workerId) => buildWorkerMcp(this.bridge, workerId, this.cwd),
+      meetingId: opts.meetingId,
+      defaultBackendId: opts.backendId,
+      deliveryHarness: opts.deliveryHarness,
+      deliveryArtifactRoot: opts.deliveryArtifactRoot,
+      flushEvents: opts.flushEvents,
+      getIntegrationHead: opts.getIntegrationHead,
+      initialPlanVersion: opts.initialPlanVersion,
+      getAuthorizedTaskContextSource: opts.getAuthorizedTaskContextSource,
+      persistContextPackage: opts.persistContextPackage,
+      contextCompilerRequired: true,
+      compileTaskProfile: opts.compileTaskProfile,
+      persistTaskProfile: opts.persistTaskProfile,
+      taskProfileCompilerRequired: opts.taskProfileCompilerRequired,
+      compileTaskAuthority: opts.compileTaskAuthority,
+      persistTaskAuthority: opts.persistTaskAuthority,
+      normalizePermissionRequest: opts.normalizePermissionRequest,
+      persistPermissionDecision: opts.persistPermissionDecision,
+      taskAuthorityCompilerRequired: opts.taskAuthorityCompilerRequired,
+      taskMailbox: opts.taskMailbox,
+      buildWorkerMcp: (workerId, attempt) => (
+        buildWorkerMcp(this.bridge, workerId, this.cwd, attempt)
+      ),
       buildComputerUseMcp: process.platform === 'darwin'
         ? (workerId) => buildComputerUseMcp(cuBridge, workerId)
         : undefined,
@@ -183,7 +281,9 @@ export class HostGroup {
     this.ready = false;
     const meetingMcp = buildTalkerMcp(this.bridge, this.isCoordinator, this.id);
 
-    const rolePrompt = this.isCoordinator() ? COORDINATOR_ROLE_PROMPT : EXPERT_ROLE_PROMPT;
+    const rolePrompt = this.isCoordinator()
+      ? `${COORDINATOR_ROLE_PROMPT}${COORDINATOR_REVIEW_PROMPT}`
+      : EXPERT_ROLE_PROMPT;
     let systemPrompt: string = TALKER_PROMPT + rolePrompt;
     try {
       const memoryEntries = await selectRelevant(this.projectId, {
@@ -341,8 +441,13 @@ export class HostGroup {
     }
   }
 
-  private appendTurn(turn: TalkerTurn) {
-    this.talkerTranscript = [...this.talkerTranscript, turn].slice(
+  private appendTurn(turn: Pick<TalkerTurn, 'role' | 'text'>) {
+    this.talkerTurnSeq += 1;
+    this.talkerTranscript = [...this.talkerTranscript, {
+      ...turn,
+      id: `${this.id}:turn:${this.talkerTurnSeq}`,
+      timestamp: Date.now(),
+    }].slice(
       -TALKER_TRANSCRIPT_MAX_ENTRIES,
     );
   }

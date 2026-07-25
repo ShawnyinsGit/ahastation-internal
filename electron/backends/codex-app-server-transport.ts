@@ -6,6 +6,12 @@ export interface CodexAppServerNotification {
   params?: unknown;
 }
 
+export interface CodexAppServerRequest {
+  id: number | string;
+  method: string;
+  params?: unknown;
+}
+
 export interface CodexAppServerReady {
   userAgent: string;
   codexHome: string;
@@ -15,6 +21,11 @@ export interface CodexAppServerReady {
 }
 
 export const SUPPORTED_CODEX_APP_SERVER_VERSION = '0.144.1';
+
+/** True when the subprocess env carries an explicit OpenAI-compatible API key. */
+export function hasCodexApiKeyCredentials(env: NodeJS.ProcessEnv | undefined): boolean {
+  return Boolean(String(env?.OPENAI_API_KEY ?? '').trim());
+}
 
 interface AppServerProcess {
   stdin: { write(data: string): unknown; end?(): unknown };
@@ -28,6 +39,7 @@ export interface CodexAppServerTransportOptions {
   binaryPath: string;
   env: NodeJS.ProcessEnv;
   onNotification?: (notification: CodexAppServerNotification) => void;
+  onRequest?: (request: CodexAppServerRequest) => Promise<unknown> | unknown;
   onStderr?: (line: string) => void;
   onExit?: (error: Error) => void;
   spawnProcess?: () => AppServerProcess;
@@ -44,14 +56,16 @@ interface PendingRequest {
 export class CodexAppServerTransport {
   private process: AppServerProcess | null = null;
   private nextId = 0;
-  private pending = new Map<number, PendingRequest>();
+  private pending = new Map<number | string, PendingRequest>();
   private closing = false;
+  private terminated = false;
 
   constructor(private readonly options: CodexAppServerTransportOptions) {}
 
   async start(): Promise<CodexAppServerReady> {
     if (this.process) throw new Error('Codex app-server already started');
     this.closing = false;
+    this.terminated = false;
     this.process = this.options.spawnProcess?.() ?? spawn(
       this.options.binaryPath,
       ['app-server', '--stdio'],
@@ -83,16 +97,19 @@ export class CodexAppServerTransport {
       'account/read',
       { refreshToken: false },
     );
-    if (accountResult.requiresOpenaiAuth && !accountResult.account) {
+    const apiKeyConfigured = hasCodexApiKeyCredentials(this.options.env);
+    if (accountResult.requiresOpenaiAuth && !accountResult.account && !apiKeyConfigured) {
       throw new Error('Codex authentication required');
     }
-    if (!accountResult.account) throw new Error('Codex account is unavailable');
+    if (!accountResult.account && !apiKeyConfigured) {
+      throw new Error('Codex account is unavailable');
+    }
     return {
       userAgent,
       codexHome: String(initialized.codexHome ?? ''),
       platformFamily: String(initialized.platformFamily ?? ''),
       platformOs: String(initialized.platformOs ?? ''),
-      account: accountResult.account,
+      account: accountResult.account ?? { type: 'api_key' },
     };
   }
 
@@ -121,6 +138,7 @@ export class CodexAppServerTransport {
   close(): void {
     if (this.closing) return;
     this.closing = true;
+    this.terminated = true;
     for (const request of this.pending.values()) {
       clearTimeout(request.timer);
       request.reject(new Error('Codex app-server closed'));
@@ -160,7 +178,10 @@ export class CodexAppServerTransport {
       this.options.onStderr?.(`Invalid app-server JSON: ${line}`);
       return;
     }
-    if (typeof message.id === 'number') {
+    if (
+      (typeof message.id === 'number' || typeof message.id === 'string')
+      && typeof message.method !== 'string'
+    ) {
       const request = this.pending.get(message.id);
       if (!request) return;
       this.pending.delete(message.id);
@@ -169,12 +190,38 @@ export class CodexAppServerTransport {
       else request.resolve(message.result);
       return;
     }
+    if (
+      (typeof message.id === 'number' || typeof message.id === 'string')
+      && typeof message.method === 'string'
+    ) {
+      const id = message.id;
+      void Promise.resolve(this.options.onRequest?.({
+        id,
+        method: message.method,
+        params: message.params,
+      }))
+        .then((result) => this.writeResponse(id, { result: result ?? {} }))
+        .catch((error) => this.writeResponse(id, {
+          error: { code: -32001, message: appServerErrorMessage(error) },
+        }));
+      return;
+    }
     if (typeof message.method === 'string') {
       this.options.onNotification?.({ method: message.method, params: message.params });
     }
   }
 
+  private writeResponse(
+    id: number | string,
+    response: { result?: unknown; error?: { code: number; message: string } },
+  ): void {
+    this.process?.stdin.write(`${JSON.stringify({ id, ...response })}\n`);
+  }
+
   private handleExit(error: Error): void {
+    if (this.terminated) return;
+    this.terminated = true;
+    this.process = null;
     for (const request of this.pending.values()) {
       clearTimeout(request.timer);
       request.reject(error);

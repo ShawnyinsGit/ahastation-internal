@@ -1,22 +1,33 @@
-// companion-window-manager.ts — the companion-screen BrowserWindow
-// (Phase 8, §3.4 触发矩阵: manual desktop entry + floating form factor).
+// companion-window-manager.ts — floating always-on-top BrowserWindow that
+// hosts either the Phaser companion office (view=companion) or the Phase-1
+// AhaBar + virtual keyboard (view=ahabar).
 //
-// Small frameless always-on-top floating window with its own in-memory
-// session partition and the same tight CSP shape as the editor window (no
-// localhost wildcard, no eval). Closing the window stops all rendering —
-// the renderer sleeps its Phaser loop and main drops the reference here.
+// Closing destroys the window (renderer sleeps). There is also show/hide for
+// the AhaBar ghost mode so fullscreen demos can dim without tearing down the
+// feed subscription.
 
-import { BrowserWindow, app, nativeTheme } from 'electron';
+import { BrowserWindow, app, nativeTheme, screen } from 'electron';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
+export type CompanionViewMode = 'ahabar' | 'companion';
+
+const AHABAR_COMPACT = { width: 420, height: 56 };
+const AHABAR_EXPANDED = { width: 420, height: 240 };
+const COMPANION_SIZE = { width: 480, height: 320, minWidth: 360, minHeight: 240 };
+
 let companionWin: BrowserWindow | null = null;
+let currentView: CompanionViewMode = 'ahabar';
 
 export function getCompanionWebContentsId(): number | null {
   return companionWin && !companionWin.isDestroyed() ? companionWin.webContents.id : null;
+}
+
+export function getCompanionViewMode(): CompanionViewMode {
+  return currentView;
 }
 
 export function sendToCompanion(channel: string, payload: unknown): boolean {
@@ -31,29 +42,67 @@ export function closeCompanionWindow(): void {
   }
 }
 
-export function toggleCompanionWindow(): { open: boolean } {
+export function focusMainWindow(getMain: () => BrowserWindow | null): boolean {
+  const main = getMain();
+  if (!main || main.isDestroyed()) return false;
+  if (main.isMinimized()) main.restore();
+  main.show();
+  main.focus();
+  return true;
+}
+
+export function setAhaBarExpanded(expanded: boolean): boolean {
+  if (!companionWin || companionWin.isDestroyed() || currentView !== 'ahabar') return false;
+  const size = expanded ? AHABAR_EXPANDED : AHABAR_COMPACT;
+  const [x, y] = companionWin.getPosition();
+  companionWin.setBounds({ x, y, width: size.width, height: size.height }, true);
+  return true;
+}
+
+export function setAhaBarGhost(ghost: boolean): boolean {
+  if (!companionWin || companionWin.isDestroyed()) return false;
+  companionWin.setOpacity(ghost ? 0.35 : 1);
+  return true;
+}
+
+/** Toggle the floating window. Phase 1 defaults to AhaBar; pass `companion`
+ *  to reopen the Phaser office (still available for later). */
+export function toggleCompanionWindow(view: CompanionViewMode = 'ahabar'): { open: boolean } {
   if (companionWin && !companionWin.isDestroyed()) {
+    if (currentView === view) {
+      companionWin.close();
+      return { open: false };
+    }
     companionWin.close();
-    return { open: false };
   }
-  companionWin = createCompanionWindow();
+  companionWin = createCompanionWindow(view);
   return { open: true };
 }
 
-function createCompanionWindow(): BrowserWindow {
+function createCompanionWindow(view: CompanionViewMode): BrowserWindow {
   const dev = !app.isPackaged && !!process.env.VITE_DEV_SERVER_URL;
+  currentView = view;
+
+  const isAha = view === 'ahabar';
+  const size = isAha ? AHABAR_COMPACT : COMPANION_SIZE;
+  const display = screen.getPrimaryDisplay().workArea;
 
   const win = new BrowserWindow({
-    width: 480,
-    height: 320,
-    minWidth: 360,
-    minHeight: 240,
-    title: 'AhaStation 陪伴屏',
+    width: size.width,
+    height: size.height,
+    x: Math.round(display.x + (display.width - size.width) / 2),
+    y: Math.round(display.y + (isAha ? 12 : 48)),
+    minWidth: isAha ? 320 : COMPANION_SIZE.minWidth,
+    minHeight: isAha ? 48 : COMPANION_SIZE.minHeight,
+    title: isAha ? 'AhaBar' : 'AhaStation 陪伴屏',
     frame: false,
     alwaysOnTop: true,
-    resizable: true,
-    skipTaskbar: false,
-    backgroundColor: nativeTheme.shouldUseDarkColors ? '#141416' : '#f2f2f7',
+    resizable: !isAha,
+    skipTaskbar: isAha,
+    transparent: isAha,
+    backgroundColor: isAha
+      ? '#00000000'
+      : (nativeTheme.shouldUseDarkColors ? '#141416' : '#f2f2f7'),
     webPreferences: {
       // NB: this file compiles to dist-electron/companion/ — preload is one
       // level up, dist bundle two levels up.
@@ -64,6 +113,10 @@ function createCompanionWindow(): BrowserWindow {
       partition: 'companion',
     },
   });
+
+  if (isAha) {
+    win.setAlwaysOnTop(true, 'floating');
+  }
 
   // Tight CSP (same shape as the editor window): self-only, no localhost
   // wildcard, no eval — Phaser renders to canvas, no WASM needed.
@@ -107,7 +160,7 @@ function createCompanionWindow(): BrowserWindow {
     companionWin = null;
   });
 
-  const query = new URLSearchParams({ view: 'companion' });
+  const query = new URLSearchParams({ view });
   if (dev) {
     win.loadURL(`${process.env.VITE_DEV_SERVER_URL}?${query.toString()}`);
   } else {

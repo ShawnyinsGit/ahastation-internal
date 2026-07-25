@@ -1,5 +1,5 @@
 import { memo, useMemo, useState } from 'react';
-import { ChevronDown, ChevronUp, Crown, ExternalLink, MicOff, Plus, RotateCcw, UserX } from 'lucide-react';
+import { ChevronDown, ChevronUp, Crown, ExternalLink, MicOff, Plus, RotateCcw, Terminal, UserX } from 'lucide-react';
 import type { HostGroupState, WorkerState } from '../lib/meeting-store';
 import { BackendAvatar } from './BackendAvatar';
 import { WorkerCard } from './WorkerCard';
@@ -24,6 +24,8 @@ interface ParticipantPanelProps {
   onSelectParticipant?: (id: string) => void;
   /** Called when the user clicks "详情" on a host tile to open the IDE editor. */
   onOpenEditor?: (backendId: string, hostId: string) => void;
+  /** Open the high-fidelity CLI execution view for a worker or host talker. */
+  onOpenTerminal?: (workerId: string) => void;
 }
 
 export const ParticipantPanel = memo(function ParticipantPanel({
@@ -42,6 +44,7 @@ export const ParticipantPanel = memo(function ParticipantPanel({
   onRestartHost,
   onSelectParticipant,
   onOpenEditor,
+  onOpenTerminal,
 }: ParticipantPanelProps) {
   const [barCollapsed, setBarCollapsed] = useState(false);
 
@@ -76,6 +79,23 @@ export const ParticipantPanel = memo(function ParticipantPanel({
     });
     return entries;
   }, [hostGroups]);
+  const taskWorkers = useMemo(
+    () => workers.filter((worker) => worker.role === 'worker'),
+    [workers],
+  );
+  const titleByWorkerId = useMemo(
+    () => new Map(taskWorkers.map((worker) => [worker.id, worker.title])),
+    [taskWorkers],
+  );
+  const workerIconId = (backendId?: string): string => {
+    switch (backendId) {
+      case 'claude-code': return 'claude';
+      case 'codex': return 'codex';
+      case 'kimi': return 'kimi';
+      case 'qoder': return 'qoder';
+      default: return backendId ?? 'worker';
+    }
+  };
 
   return (
     <aside className="tiles-gallery">
@@ -105,6 +125,21 @@ export const ParticipantPanel = memo(function ParticipantPanel({
           const isCoordinator = hostId === coordinatorHostId;
           const actions = (
             <div className="tiles-gallery-actions">
+              {onOpenTerminal && (
+                <button
+                  type="button"
+                  className="tiles-gallery-action-btn"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    const talker = hostTalkers.get(hostId);
+                    onOpenTerminal(talker?.id ?? hostId);
+                  }}
+                  title="查看真实 CLI 执行情况"
+                  aria-label="Open CLI execution view"
+                >
+                  <Terminal size={12} />
+                </button>
+              )}
               {onOpenEditor && (
                 <button
                   type="button"
@@ -178,6 +213,7 @@ export const ParticipantPanel = memo(function ParticipantPanel({
                   speaking={aiSpeaking && !isMuted}
                   onSelect={onSelectParticipant ? () => onSelectParticipant(hostId) : undefined}
                   onResolvePermission={onResolvePermission}
+                  onOpenTerminal={onOpenTerminal ? () => onOpenTerminal(talker.id) : undefined}
                   iconId={hg.iconId}
                   customAvatar={avatar}
                 />
@@ -198,6 +234,7 @@ export const ParticipantPanel = memo(function ParticipantPanel({
                   speaking={false}
                   onSelect={onSelectParticipant ? () => onSelectParticipant(hostId) : undefined}
                   onResolvePermission={onResolvePermission}
+                  onOpenTerminal={onOpenTerminal ? () => onOpenTerminal(hw[0].id) : undefined}
                   iconId={hg.iconId}
                   customAvatar={avatar}
                 />
@@ -222,6 +259,26 @@ export const ParticipantPanel = memo(function ParticipantPanel({
                 <div className="tiles-gallery-placeholder-status">Connecting…</div>
               </div>
               {actions}
+            </div>
+          );
+        })}
+
+        {taskWorkers.map((worker) => {
+          const iconId = workerIconId(worker.backendId);
+          return (
+            <div key={worker.id} className="tiles-gallery-tile-wrap tiles-gallery-worker-wrap">
+              <WorkerCard
+                worker={worker}
+                depTitles={titleByWorkerId}
+                mode="gallery"
+                selected={false}
+                speaking={false}
+                onSelect={onSelectParticipant ? () => onSelectParticipant(worker.id) : undefined}
+                onResolvePermission={onResolvePermission}
+                onOpenTerminal={onOpenTerminal ? () => onOpenTerminal(worker.id) : undefined}
+                iconId={iconId}
+                customAvatar={customAvatars?.get(iconId) ?? null}
+              />
             </div>
           );
         })}

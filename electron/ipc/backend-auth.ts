@@ -19,6 +19,11 @@ import {
   updateCustomBackend,
   removeCustomBackend,
 } from '../store.js';
+import {
+  assessWorkerRuntime,
+  probeWorkerRuntimeVersion,
+  FIRST_RELEASE_STABLE_WORKERS,
+} from '../backends/worker-runtime-contract.js';
 import { getBackendRegistry, registerCustomBackends } from '../backends/registry.js';
 import { augmentedPath } from '../backends/subprocess-backend.js';
 import { isolatedSubprocessEnv } from '../backends/backend-environment.js';
@@ -89,6 +94,16 @@ export function registerBackendAuthIpc(): void {
       if (available && backend.checkAuthStatus) {
         try { loggedIn = (await backend.checkAuthStatus()).loggedIn; } catch { loggedIn = false; }
       }
+      const version = probeWorkerRuntimeVersion(backend.id, binaryPath);
+      const runtime = assessWorkerRuntime({
+        backendId: backend.id,
+        installed: available,
+        implementationEnabled: backend.capabilities.executeTasks,
+        authenticated: loggedIn || Boolean(auth?.apiKey) || (
+          backend.id === 'opencode' && (auth?.authMode ?? 'none') === 'none'
+        ),
+        version,
+      });
       return {
         id: backend.id,
         displayName: backend.capabilities.displayName,
@@ -108,8 +123,16 @@ export function registerBackendAuthIpc(): void {
         supportsMcp: backend.capabilities.mcp,
         supportsPermissions: backend.capabilities.permissions,
         supportsCoordinator: backend.capabilities.coordinate,
-        supportsWorkers: backend.capabilities.executeTasks,
+        supportsWorkers: runtime.state === 'available',
+        workerImplementation: backend.capabilities.executeTasks,
+        workerRuntimeState: runtime.state,
+        workerRuntimeReason: runtime.reason,
+        version: runtime.version,
+        expectedVersion: runtime.expectedVersion,
         customAvatar: auth?.customAvatar ?? null,
+        workerReleaseTier: backend.capabilities.executeTasks
+          ? (FIRST_RELEASE_STABLE_WORKERS.has(backend.id) ? 'stable' : 'experimental')
+          : 'blocked',
       };
     }));
 

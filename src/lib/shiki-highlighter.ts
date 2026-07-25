@@ -1,8 +1,7 @@
-// shiki-highlighter.ts — lazy, per-language shiki highlighter for the editor
-// code viewer (Phase 4). Fine-grained API: single theme, oniguruma WASM
-// engine (the editor window CSP allows 'wasm-unsafe-eval' for exactly this),
-// and grammars are dynamic-imported per language on first use — no full
-// language bundle lands in the renderer.
+// shiki-highlighter.ts — lazy, per-language shiki highlighter for code
+// preview (FileViewer) and the OpenCode editor. Fine-grained API: single
+// theme, oniguruma WASM engine (CSP allows 'wasm-unsafe-eval'), and
+// grammars are dynamic-imported per language on first use.
 
 import { createHighlighterCore } from 'shiki/core';
 import { createOnigurumaEngine } from 'shiki/engine/oniguruma';
@@ -19,20 +18,31 @@ const LANG_LOADERS: Record<string, () => Promise<LangModule>> = {
   javascript: () => import('@shikijs/langs/javascript'),
   jsx: () => import('@shikijs/langs/jsx'),
   json: () => import('@shikijs/langs/json'),
+  jsonc: () => import('@shikijs/langs/jsonc'),
   markdown: () => import('@shikijs/langs/markdown'),
   python: () => import('@shikijs/langs/python'),
   rust: () => import('@shikijs/langs/rust'),
   go: () => import('@shikijs/langs/go'),
   java: () => import('@shikijs/langs/java'),
+  kotlin: () => import('@shikijs/langs/kotlin'),
+  swift: () => import('@shikijs/langs/swift'),
   c: () => import('@shikijs/langs/c'),
   cpp: () => import('@shikijs/langs/cpp'),
+  csharp: () => import('@shikijs/langs/csharp'),
+  ruby: () => import('@shikijs/langs/ruby'),
+  php: () => import('@shikijs/langs/php'),
   shellscript: () => import('@shikijs/langs/shellscript'),
   yaml: () => import('@shikijs/langs/yaml'),
   toml: () => import('@shikijs/langs/toml'),
+  ini: () => import('@shikijs/langs/ini'),
   css: () => import('@shikijs/langs/css'),
+  scss: () => import('@shikijs/langs/scss'),
+  less: () => import('@shikijs/langs/less'),
   html: () => import('@shikijs/langs/html'),
   xml: () => import('@shikijs/langs/xml'),
+  vue: () => import('@shikijs/langs/vue'),
   sql: () => import('@shikijs/langs/sql'),
+  graphql: () => import('@shikijs/langs/graphql'),
   diff: () => import('@shikijs/langs/diff'),
 };
 

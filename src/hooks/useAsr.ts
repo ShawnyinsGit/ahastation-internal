@@ -1,19 +1,18 @@
 import { useEffect, useState } from 'react';
 import { useVoiceCapture } from './useVoiceCapture';
-import { useContinuousSpeech } from './useSpeech';
 import {
   deriveMicrophoneUiState,
   type AsrMode,
   type MicrophoneCaptureStatus,
 } from '../lib/microphone-ui-state';
 
-// Whisper is the primary ASR path; browser webkitSpeechRecognition is the
-// fallback when whisper-cli isn't bundled (dev tree without
-// `pnpm prebuild:whisper`, or future Windows/Linux builds we haven't shipped
-// whisper for yet). This hook hides the routing behind a single interface so
-// App doesn't have to manage two parallel ASR sources — and crucially keeps
-// `supported: true` while the probe is in flight, so the mic button doesn't
-// briefly render as disabled on startup.
+// Xunfei (讯飞) streaming ASR is the sole speech-to-text path. asrAvailable
+// reports whether credentials are configured; when they aren't the mic button
+// renders disabled with a "configure Xunfei ASR" hint instead of falling back
+// to a browser recognizer. This hook hides the probe + capture wiring behind a
+// single interface so App doesn't manage lifecycle, and keeps `supported: true`
+// while the probe is in flight so the mic button doesn't briefly render
+// disabled on startup.
 
 interface UseAsrOptions {
   enabled: boolean;
@@ -62,15 +61,14 @@ export function useAsr({
       .then((r) => {
         if (cancelled) return;
         const available = r.ok ? r.available : false;
-        // One-shot diagnostic so we can confirm which path a packaged build
-        // committed to. Without this, a silent fallback to browser mode is
-        // invisible — and browser mode has historically broken enrollment.
-        console.info('[asr] probe →', { available, raw: r });
+        // One-shot diagnostic so we can confirm the probe result in a packaged
+        // build. Without this, an unavailable state is invisible.
+        console.info('[asr] probe ->', { available, raw: r });
         setAsrAvailable(available);
       })
       .catch((e) => {
         if (cancelled) return;
-        console.warn('[asr] probe failed, falling back to browser mode:', e);
+        console.warn('[asr] probe failed:', e);
         setAsrAvailable(false);
       });
     return () => {
@@ -79,23 +77,15 @@ export function useAsr({
   }, []);
 
   const mode: AsrMode =
-    asrAvailable === null ? 'probing' : asrAvailable ? 'whisper' : 'browser';
+    asrAvailable === null ? 'probing' : asrAvailable ? 'xfyun' : 'unavailable';
 
   // Enrollment needs raw PCM segments, which only the VAD-based path produces.
-  // webkitSpeechRecognition (browser path) owns its own audio capture and
-  // emits transcripts, never raw audio — so it cannot feed the enrollment
-  // collector. Whenever a `tapSegment` is requested we mount VAD even in
-  // browser mode and silence browser ASR. This (a) makes enrollment work
-  // regardless of whether whisper is bundled, and (b) prevents browser ASR
-  // from transcribing the user's enrollment audio into the chat transcript.
+  // Whenever a `tapSegment` is requested we mount VAD even when ASR is
+  // unavailable so voice-print enrollment works regardless of credential state.
   const enrollmentActive = !!tapSegment;
 
-  // Both backends mount unconditionally (React hook rules) but only the one
-  // matching the chosen mode gets `enabled: true`. During probing both stay
-  // off so we don't trigger a mic permission prompt before we know which
-  // path we're committing to.
-  const whisper = useVoiceCapture({
-    enabled: enabled && mode !== 'probing' && (mode === 'whisper' || enrollmentActive),
+  const capture = useVoiceCapture({
+    enabled: enabled && mode !== 'probing' && (mode === 'xfyun' || enrollmentActive),
     onTranscript,
     onBargeIn,
     lang,
@@ -107,49 +97,30 @@ export function useAsr({
     tapSegment,
   });
 
-  const browser = useContinuousSpeech({
-    enabled: enabled && mode === 'browser' && !enrollmentActive && !paused,
-    onFinal: onTranscript,
-    onInterim: (t: string) => {
-      if (t.length >= 2) onBargeIn?.();
-    },
-  });
-
-  // During enrollment we always run VAD (even in browser mode) so its view of
-  // listening/speechLevel/support is the live one. Outside enrollment we fall
-  // back to whichever backend is mounted for that mode.
-  const usingWhisperPath = mode === 'whisper' || (mode === 'browser' && enrollmentActive);
-
-  const uiMode: AsrMode = usingWhisperPath ? 'whisper' : mode;
   const { supported, retryable } = deriveMicrophoneUiState({
-    mode: uiMode,
-    captureStatus: whisper.status,
-    browserSupported: browser.supported,
-    browserFailed: browser.error != null,
+    mode,
+    captureStatus: capture.status,
   });
 
-  const listening = usingWhisperPath ? whisper.listening : browser.listening;
-  const speechLevel = usingWhisperPath ? whisper.speechLevel : browser.speechLevel;
-  const browserError = browser.error ?? (
-    browser.supported === false
-      ? 'Speech recognition is unavailable — Whisper is not bundled and Browser Speech Recognition is unsupported'
-      : null
-  );
-  const lastError = usingWhisperPath ? whisper.lastError : browserError;
+  const lastError = mode === 'unavailable' && !enrollmentActive
+    ? '讯飞 ASR 凭证未配置 - 请在 设置 → 语音 → 讯飞 ASR 中填写'
+    : capture.lastError;
+
   const status: MicrophoneCaptureStatus =
     mode === 'probing'
       ? 'initializing'
-      : usingWhisperPath
-        ? whisper.status
-        : browser.supported === null
-          ? 'initializing'
-          : browser.supported === false
-            ? 'unavailable'
-            : browserError
-              ? 'failed'
-              : 'ready';
+      : mode === 'unavailable' && !enrollmentActive
+        ? 'unavailable'
+        : capture.status;
 
-  const retry = usingWhisperPath ? whisper.retry : browser.retry;
-
-  return { mode, listening, supported, speechLevel, lastError, status, retryable, retry };
+  return {
+    mode,
+    listening: capture.listening,
+    supported,
+    speechLevel: capture.speechLevel,
+    lastError,
+    status,
+    retryable,
+    retry: capture.retry,
+  };
 }

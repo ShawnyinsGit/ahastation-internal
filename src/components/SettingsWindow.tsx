@@ -132,11 +132,9 @@ function SettingsWindowInner() {
           onChangeReportMode={voicePrefs.handleReportModeChange}
           handheldMode={voicePrefs.handheldMode}
           onChangeHandheldMode={voicePrefs.handleHandheldModeChange}
-          asrProvider={voicePrefs.asrProvider}
-          onChangeAsrProvider={voicePrefs.handleAsrProviderChange}
-          cloudAsr={voicePrefs.cloudAsr}
-          onCloudAsrInput={voicePrefs.handleCloudAsrInput}
-          onCloudAsrCommit={voicePrefs.handleCloudAsrCommit}
+          xfyunAsr={voicePrefs.xfyunAsr}
+          onXfyunAsrInput={voicePrefs.handleXfyunAsrInput}
+          onXfyunAsrCommit={voicePrefs.handleXfyunAsrCommit}
         />
         <VoiceLockPanel
           enabled={voiceLock.voiceLockEnabled}

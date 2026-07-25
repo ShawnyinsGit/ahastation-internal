@@ -1,13 +1,33 @@
-import { ReactNode, RefObject, useState, useCallback, useMemo, cloneElement, isValidElement } from 'react';
+import {
+  ReactNode,
+  RefObject,
+  useState,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  cloneElement,
+  isValidElement,
+} from 'react';
 import type { ScreenShareState } from '../hooks/useScreenShare';
 import type { DeliverySnapshot, HostGroupState, WorkerState } from '../lib/meeting-store';
-import type { ActivityEntry, BrowserTabInfo, MeetingPlan } from '../types';
+import type {
+  BrowserTabInfo,
+  CommandRun,
+  CoordinatorBriefing,
+  FinalMeetingDecision,
+  MeetingDelivery,
+  MeetingPlan,
+} from '../types';
 import type { StageWindow, StageWindowType } from '../lib/stage-window-store';
 import { FileViewer } from './FileViewer';
 import { BrowserStage } from './BrowserStage';
 import { StageTabBar } from './StageTabBar';
 import { TerminalPanel } from './TerminalPanel';
 import { ActivityTabContent } from './ActivityTabContent';
+import { DeliveryViewer } from './DeliveryViewer';
+import { TaskInspector } from './TaskInspector';
+import { FinalMeetingDelivery } from './FinalMeetingDelivery';
 
 interface ScreenStageProps {
   share: ScreenShareState;
@@ -17,16 +37,24 @@ interface ScreenStageProps {
   workers: WorkerState[];
   hostGroups: Map<string, HostGroupState>;
   plan: MeetingPlan | null;
+  coordinatorBriefings: CoordinatorBriefing[];
   running: boolean;
   aiSpeaking: boolean;
   galleryContent: ReactNode;
   delivery: DeliverySnapshot | null;
+  finalMeetingDelivery: MeetingDelivery | null;
+  finalMeetingDecision: FinalMeetingDecision | null;
   sessionId: string | null;
-  onAcceptDelivery: () => void;
+  /** Task the cross-project board asked us to open. `seq` changes on every
+   *  request so re-picking the same task after closing the inspector works. */
+  focusTask?: { taskId: string; seq: number } | null;
+  onAcceptDelivery: () => Promise<{ ok: true } | { ok: false; error: string }>;
   onReviseDelivery: (feedback: string) => Promise<
     | { ok: true; route: 'worker' | 'talker'; queued?: boolean }
     | { ok: false; error: string }
   >;
+  onAcceptFinalMeetingDelivery: () => Promise<{ ok: true } | { ok: false; error: string }>;
+  onRequestFinalMeetingRework: (reason: string) => Promise<{ ok: true } | { ok: false; error: string }>;
   viewingFile?: { relativePath: string } | null;
   onCloseFileView?: () => void;
   stageWindows: StageWindow[];
@@ -35,7 +63,7 @@ interface ScreenStageProps {
   onCloseWindow: (id: string) => void;
   onCreateWindow: (type: StageWindowType, opts?: { workerId?: string; title?: string }) => void;
   onPopOutWindow?: (id: string) => void;
-  onResolvePermission: (id: string, decision: 'allow' | 'deny') => void;
+  onResolvePermission: (id: string, decision: 'allow' | 'deny') => Promise<{ ok: true } | { ok: false; error: string }> | void;
   browserTabs?: BrowserTabInfo[];
   browserActiveTabId?: string | null;
   browserViewportRef?: RefObject<HTMLDivElement>;
@@ -60,13 +88,19 @@ export function ScreenStage({
   workers,
   hostGroups,
   plan,
+  coordinatorBriefings,
   running,
   aiSpeaking = false,
   galleryContent,
   delivery,
+  finalMeetingDelivery,
+  finalMeetingDecision,
   sessionId,
+  focusTask,
   onAcceptDelivery,
   onReviseDelivery,
+  onAcceptFinalMeetingDelivery,
+  onRequestFinalMeetingRework,
   viewingFile,
   onCloseFileView,
   stageWindows,
@@ -89,42 +123,149 @@ export function ScreenStage({
   customAvatars,
 }: ScreenStageProps) {
   const [selectedParticipantId, setSelectedParticipantId] = useState<string | null>(null);
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  /** Bumped on every task open so the inspector returns to Overview even for the same taskId. */
+  const [inspectorOpenSeq, setInspectorOpenSeq] = useState(0);
+  const [inspectorHeight, setInspectorHeight] = useState(76);
+  const [inspectorFullscreen, setInspectorFullscreen] = useState(false);
+  const dragState = useRef<{ pointerId: number; startY: number } | null>(null);
+  const suppressInspectorClick = useRef(false);
 
-  const handleSelectParticipant = useCallback((id: string) => {
-    setSelectedParticipantId(id);
-    // Auto-switch to activity tab so the selection is visible
+  /** Task requested by the cross-project board whose plan hasn't arrived yet.
+   *  Suppresses the stale-selection sweep below during the switch. */
+  const awaitingFocus = useRef<string | null>(null);
+
+  const handleSelectTask = useCallback((id: string) => {
+    awaitingFocus.current = null;
+    setSelectedTaskId(id);
+    setInspectorOpenSeq((seq) => seq + 1);
+    setInspectorHeight(76);
+    setInspectorFullscreen(false);
     if (activeWindowId !== ACTIVITY_TAB_ID) {
       onSelectWindow(ACTIVITY_TAB_ID);
     }
   }, [activeWindowId, onSelectWindow]);
 
+  const handleSelectParticipant = useCallback((id: string) => {
+    setSelectedParticipantId(id);
+    // Worker tiles double as the in-meeting task picker now that TaskRail is
+    // gone — open the inspector when the tile maps to a plan node.
+    if ((plan?.nodes ?? []).some((node) => node.id === id)) {
+      handleSelectTask(id);
+      return;
+    }
+    if (activeWindowId !== ACTIVITY_TAB_ID) {
+      onSelectWindow(ACTIVITY_TAB_ID);
+    }
+  }, [activeWindowId, onSelectWindow, plan, handleSelectTask]);
+
+  useEffect(() => {
+    if (!selectedTaskId) return;
+    if ((plan?.nodes ?? []).some((node) => node.id === selectedTaskId)) {
+      awaitingFocus.current = null;
+      return;
+    }
+    // Switching projects from the board sets the selection before the target
+    // session's plan swaps in, so hold the selection until its node lands.
+    if (awaitingFocus.current === selectedTaskId) return;
+    setSelectedTaskId(null);
+  }, [plan, selectedTaskId]);
+
+  // Depends on seq alone: the board can hand us the same taskId twice and the
+  // inspector still has to come back up. Set awaitingFocus BEFORE selection so
+  // the plan-sweep effect cannot clear the card during a cross-project switch
+  // (handleSelectTask used to null the ref first, racing the hold).
+  const focusSeq = focusTask?.seq;
+  const focusTaskId = focusTask?.taskId;
+  useEffect(() => {
+    if (focusSeq === undefined || !focusTaskId) return;
+    awaitingFocus.current = focusTaskId;
+    setSelectedTaskId(focusTaskId);
+    setInspectorOpenSeq((seq) => seq + 1);
+    setInspectorHeight(76);
+    setInspectorFullscreen(false);
+    if (activeWindowId !== ACTIVITY_TAB_ID) {
+      onSelectWindow(ACTIVITY_TAB_ID);
+    }
+  }, [focusSeq, focusTaskId, activeWindowId, onSelectWindow]);
+
+  const handleInspectorPointerDown = useCallback((event: React.PointerEvent<HTMLButtonElement>) => {
+    dragState.current = { pointerId: event.pointerId, startY: event.clientY };
+    suppressInspectorClick.current = false;
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }, []);
+
+  const handleInspectorPointerMove = useCallback((event: React.PointerEvent<HTMLButtonElement>) => {
+    if (dragState.current?.pointerId !== event.pointerId) return;
+    if (Math.abs(event.clientY - dragState.current.startY) > 4) {
+      suppressInspectorClick.current = true;
+    }
+    const next = Math.max(44, Math.min(100, ((window.innerHeight - event.clientY) / window.innerHeight) * 100));
+    setInspectorHeight(next);
+    setInspectorFullscreen(next >= 96);
+  }, []);
+
+  const finishInspectorDrag = useCallback((event: React.PointerEvent<HTMLButtonElement>) => {
+    if (dragState.current?.pointerId !== event.pointerId) return;
+    dragState.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    setInspectorHeight((current) => {
+      if (current >= 88) {
+        setInspectorFullscreen(true);
+        return 100;
+      }
+      if (current <= 56) return 52;
+      return 76;
+    });
+  }, []);
+
+  const toggleInspectorFullscreen = useCallback(() => {
+    setInspectorFullscreen((current) => {
+      setInspectorHeight(current ? 76 : 100);
+      return !current;
+    });
+  }, []);
+
   const activeWindow = stageWindows.find((w) => w.id === activeWindowId) ?? null;
   const isActivityTab = activeWindow?.type === 'activity' || activeWindowId === ACTIVITY_TAB_ID;
+  const selectedTaskWorker = selectedTaskId
+    ? workers.find((worker) => worker.role !== 'talker' && worker.id === selectedTaskId)
+    : undefined;
+  const capacity = useMemo(() => {
+    const nodes = plan?.nodes ?? [];
+    const statusById = new Map(nodes.map((node) => [node.id, node.status]));
+    const active = nodes.filter((node) => (
+      node.status === 'running'
+      || node.status === 'verifying'
+      || node.status === 'reviewing'
+      || node.status === 'awaiting-acceptance'
+      || node.status === 'reworking'
+    )).length;
+    const waiting = nodes.filter((node) => (
+      node.status === 'pending'
+      && node.deps.every((dependencyId) => statusById.get(dependencyId) === 'accepted')
+    )).length;
+    return { active, waiting, saturated: active >= 4 && waiting > 0 };
+  }, [plan]);
 
-  // For terminal stage windows, find the worker whose activity should be
-  // displayed. When no workerId is specified, aggregate all workers' Bash
-  // activity so the terminal tab shows real command output instead of being
-  // empty (talkers have `tools: []` and never produce Bash activity).
-  const terminalActivity = useMemo(() => {
-    if (activeWindow?.type !== 'terminal') return [];
+  // For terminal stage windows, project the high-fidelity Bash command log.
+  // When no workerId is specified, aggregate every worker chronologically.
+  const terminalCommands = useMemo(() => {
+    if (activeWindow?.type !== 'terminal') return [] as CommandRun[];
     if (activeWindow.workerId) {
-      // Match by worker id OR by hostId (gallery passes hostId when opening terminal)
       const target = workers.find(
         (w) => w.id === activeWindow.workerId || w.hostId === activeWindow.workerId,
       );
-      return target?.activity ?? [];
+      return target?.commandLog ?? [];
     }
-    // Aggregate all workers' Bash-related activity chronologically
-    const bashEntries: ActivityEntry[] = [];
+    const merged: CommandRun[] = [];
     for (const w of workers) {
-      for (const a of w.activity) {
-        if (a.title?.toLowerCase().includes('bash') || a.kind === 'tool-call' || a.kind === 'tool-result') {
-          bashEntries.push(a);
-        }
-      }
+      for (const run of w.commandLog ?? []) merged.push(run);
     }
-    bashEntries.sort((a, b) => a.ts - b.ts);
-    return bashEntries;
+    merged.sort((a, b) => a.startedAt - b.startedAt);
+    return merged;
   }, [activeWindow, workers]);
 
   const stageClass = share.active
@@ -138,7 +279,7 @@ export function ScreenStage({
           : 'stage-default';
 
   return (
-    <div className={`stage ${stageClass}`}>
+    <div className={`stage ${stageClass}${selectedTaskId ? ' has-task-inspector' : ''}`}>
       {share.active && (
         <>
           <video
@@ -164,9 +305,19 @@ export function ScreenStage({
         <>
           <div className="stage-gallery">
             {isValidElement(galleryContent)
-              ? cloneElement(galleryContent, { onSelectParticipant: handleSelectParticipant } as any)
+              ? cloneElement(galleryContent, {
+                  onSelectParticipant: handleSelectParticipant,
+                  onOpenTerminal: (workerId: string) => onCreateWindow('terminal', { workerId }),
+                } as any)
               : galleryContent}
           </div>
+
+          {capacity.saturated && (
+            <div className="stage-capacity-banner" role="status" aria-live="polite">
+              <span>Worker 已满载（{capacity.active}/4）</span>
+              <small>{capacity.waiting} 项任务正在等待执行名额；已运行任务不会被抢占。</small>
+            </div>
+          )}
 
           <StageTabBar
             windows={stageWindows}
@@ -178,22 +329,41 @@ export function ScreenStage({
           />
 
           <div className="stage-content">
-            {isActivityTab && (
+            {finalMeetingDelivery ? (
+              <FinalMeetingDelivery
+                delivery={finalMeetingDelivery}
+                decision={finalMeetingDecision}
+                onAccept={onAcceptFinalMeetingDelivery}
+                onRequestRework={onRequestFinalMeetingRework}
+              />
+            ) : delivery ? (
+              <div className="stage-delivery-content">
+                <DeliveryViewer
+                  delivery={delivery}
+                  sessionId={sessionId}
+                  aiSpeaking={aiSpeaking}
+                  onAccept={onAcceptDelivery}
+                  onRevise={onReviseDelivery}
+                />
+              </div>
+            ) : isActivityTab && (
               <ActivityTabContent
                 workers={workers}
                 hostGroups={hostGroups}
                 plan={plan}
+                coordinatorBriefings={coordinatorBriefings}
                 running={running}
                 aiSpeaking={aiSpeaking}
                 onResolvePermission={onResolvePermission}
                 selectedId={selectedParticipantId}
                 onOpenInTerminal={(workerId) => onCreateWindow('terminal', { workerId })}
-          customAvatars={customAvatars}
-          sessionId={sessionId}
+                customAvatars={customAvatars}
+                sessionId={sessionId}
+                onOpenTask={handleSelectTask}
               />
             )}
 
-            {activeWindow?.type === 'browser' && browserViewportRef && onBrowserOpenTab && onBrowserCloseTab && onBrowserSetActive && onBrowserNavigate && onBrowserBack && onBrowserForward && onBrowserReload && (
+            {!delivery && !finalMeetingDelivery && activeWindow?.type === 'browser' && browserViewportRef && onBrowserOpenTab && onBrowserCloseTab && onBrowserSetActive && onBrowserNavigate && onBrowserBack && onBrowserForward && onBrowserReload && (
               <div className="stage-browser-content">
                 <BrowserStage
                   tabs={browserTabs}
@@ -210,13 +380,13 @@ export function ScreenStage({
               </div>
             )}
 
-            {activeWindow?.type === 'terminal' && (
+            {!delivery && !finalMeetingDelivery && activeWindow?.type === 'terminal' && (
               <div className="stage-terminal-content">
-                <TerminalPanel activity={terminalActivity} />
+                <TerminalPanel commands={terminalCommands} />
               </div>
             )}
 
-            {activeWindow?.type === 'file' && activeWindow.filePath && (
+            {!delivery && !finalMeetingDelivery && activeWindow?.type === 'file' && activeWindow.filePath && (
               <div className="stage-file-content">
                 <FileViewer
                   relativePath={activeWindow.filePath}
@@ -229,6 +399,64 @@ export function ScreenStage({
               </div>
             )}
           </div>
+
+          {selectedTaskId && sessionId && (
+            <div
+              className={`task-inspector-dock${inspectorFullscreen ? ' is-task-inspector-fullscreen' : ''}`}
+              style={{ '--task-inspector-height': `${inspectorHeight}dvh` } as React.CSSProperties}
+            >
+              <button
+                type="button"
+                className="task-inspector-drag-handle"
+                onPointerDown={handleInspectorPointerDown}
+                onPointerMove={handleInspectorPointerMove}
+                onPointerUp={finishInspectorDrag}
+                onPointerCancel={finishInspectorDrag}
+                onClick={() => {
+                  if (suppressInspectorClick.current) {
+                    suppressInspectorClick.current = false;
+                    return;
+                  }
+                  toggleInspectorFullscreen();
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault();
+                    toggleInspectorFullscreen();
+                  } else if (event.key === 'ArrowUp') {
+                    event.preventDefault();
+                    setInspectorHeight((current) => Math.min(100, current + 12));
+                  } else if (event.key === 'ArrowDown') {
+                    event.preventDefault();
+                    setInspectorFullscreen(false);
+                    setInspectorHeight((current) => Math.max(44, current - 12));
+                  } else if (event.key === 'Home') {
+                    event.preventDefault();
+                    setInspectorFullscreen(true);
+                    setInspectorHeight(100);
+                  } else if (event.key === 'End') {
+                    event.preventDefault();
+                    setInspectorFullscreen(false);
+                    setInspectorHeight(52);
+                  }
+                }}
+                aria-label={inspectorFullscreen ? '收起任务检查器' : '展开任务检查器至全屏'}
+                aria-valuemin={44}
+                aria-valuemax={100}
+                aria-valuenow={Math.round(inspectorHeight)}
+              >
+                <span aria-hidden />
+              </button>
+              <TaskInspector
+                sessionId={sessionId}
+                taskId={selectedTaskId}
+                openSeq={inspectorOpenSeq}
+                worker={selectedTaskWorker}
+                onClose={() => setSelectedTaskId(null)}
+                onResolvePermission={onResolvePermission}
+              />
+            </div>
+          )}
         </>
       )}
     </div>

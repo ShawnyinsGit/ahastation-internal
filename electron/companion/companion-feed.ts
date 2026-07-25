@@ -1,36 +1,69 @@
-// companion-feed.ts — orchestrator event stream → CompanionModel →
-// point-to-point pushes to the companion window (Phase 8, §3.4).
+// companion-feed.ts — orchestrator event stream → CompanionModel + AhaBar
+// snapshot → point-to-point pushes to the floating window.
 //
-// Data-source decision (per spec ①): bubbles are fed from the SAME
-// assistant text the meeting transcript (and thus the TTS) is built
-// from — orchestrator 'message' events, which main already sees. That is
-// message-granular and naturally rate-limited, unlike the raw event
-// firehose; no renderer relay needed for bubble TEXT. The only relay is
-// the tiny ttsActive boolean (main-window renderer → main → here), used
-// solely to mute companion sounds while the meeting TTS speaks.
-//
-// Multi-meeting: v1 follows the ACTIVE tab (registry.getActiveId); a tab
-// switch resets the room and re-seeds the roster.
+// Bubbles still come from the same assistant text the meeting transcript /
+// TTS is built from. AhaBar additionally tracks pending permission payloads
+// so the virtual keyboard can resolve them without round-tripping through
+// the main renderer.
 
 import { ipcMain } from 'electron';
 import { z } from 'zod';
 import type { IpcContext, IpcEmittedEvent } from '../ipc/context.js';
 import { getSettings, updateSettings } from '../store.js';
 import {
+  classifyApprovalGesture,
+  compareApprovalPriority,
+  summarizeApprovalTarget,
+  type ApprovalGesture,
+} from '../approval-gesture.js';
+import {
   CompanionModel,
   type CompanionEvent,
   type CompanionState,
 } from './companion-model.js';
 import {
+  focusMainWindow,
   getCompanionWebContentsId,
   sendToCompanion,
+  setAhaBarExpanded,
+  setAhaBarGhost,
   toggleCompanionWindow,
 } from './companion-window-manager.js';
 import { emptyPayloadSchema, handleSecure, mainWindowSenderPolicy } from '../ipc/validators.js';
 
+export interface AhaBarPending {
+  id: string;
+  sessionId: string;
+  hostId: string;
+  source: string;
+  toolName: string;
+  target: string;
+  risk: ApprovalGesture;
+  arrivedAt: number;
+}
+
+export interface AhaBarState {
+  sessionId: string | null;
+  cwd: string | null;
+  projectName: string | null;
+  runningCount: number;
+  pending: AhaBarPending[];
+  /** Highest-priority pending — the virtual keyboard's sole target. */
+  topPending: AhaBarPending | null;
+  hardwareTakenOver: boolean;
+}
+
+function projectNameFromCwd(cwd: string | null): string | null {
+  if (!cwd) return null;
+  const parts = cwd.split(/[/\\]/).filter(Boolean);
+  return parts[parts.length - 1] ?? cwd;
+}
+
 export class CompanionFeed {
   private readonly model = new CompanionModel();
   private activeSessionId: string | null = null;
+  private pendingById = new Map<string, AhaBarPending>();
+  private runningCount = 0;
 
   constructor(private readonly ctx: IpcContext) {}
 
@@ -42,10 +75,14 @@ export class CompanionFeed {
       // Follow the active meeting tab: reset the room on a switch.
       this.activeSessionId = activeId;
       this.model.reset();
+      this.pendingById.clear();
+      this.runningCount = 0;
       this.refreshRoster(now);
       this.push(now);
     }
     if (!activeId || e.sessionId !== activeId) return;
+
+    this.ingestPermission(e, now);
 
     const mapped = mapOrchestratorEvent(e);
     if (mapped === 'roster') {
@@ -53,6 +90,7 @@ export class CompanionFeed {
     } else if (mapped) {
       this.model.ingest(mapped, now);
     }
+    this.refreshRunningCount();
     this.push(now);
   }
 
@@ -65,6 +103,74 @@ export class CompanionFeed {
     return this.model.state(Date.now());
   }
 
+  getAhaBarState(): AhaBarState {
+    return this.buildAhaBarState();
+  }
+
+  resolvePermission(id: string, decision: 'allow' | 'deny'): { ok: boolean; error?: string } {
+    const pending = this.pendingById.get(id);
+    const sessionId = pending?.sessionId ?? this.activeSessionId;
+    const orch = this.ctx.getOrchestrator(sessionId);
+    if (!orch) return { ok: false, error: 'No active session' };
+    orch.resolvePermission(id, decision);
+    this.pendingById.delete(id);
+    this.push(Date.now());
+    return { ok: true };
+  }
+
+  private ingestPermission(e: IpcEmittedEvent, now: number): void {
+    const hostId = e.hostId ?? 'default';
+    const ev = e.event as { kind: string } & Record<string, unknown>;
+    if (ev.kind === 'permission-request') {
+      const id = typeof ev.id === 'string' ? ev.id : null;
+      const toolName = typeof ev.toolName === 'string' ? ev.toolName : null;
+      if (!id || !toolName) return;
+      const input = (ev.input && typeof ev.input === 'object'
+        ? ev.input
+        : {}) as Record<string, unknown>;
+      const risk = classifyApprovalGesture(toolName, input);
+      this.pendingById.set(id, {
+        id,
+        sessionId: e.sessionId,
+        hostId,
+        source: typeof e.source === 'string' ? e.source : hostId,
+        toolName,
+        target: summarizeApprovalTarget(toolName, input),
+        risk,
+        arrivedAt: now,
+      });
+      return;
+    }
+    if (ev.kind === 'permission-cancelled') {
+      const id = typeof ev.id === 'string' ? ev.id : null;
+      if (id) this.pendingById.delete(id);
+    }
+  }
+
+  private refreshRunningCount(): void {
+    // CompanionModel already tracks per-host working/stalled/alert seats from
+    // the same event stream — reuse that rather than reaching into the
+    // private meetingScheduler.
+    const state = this.model.state(Date.now());
+    this.runningCount = state.participants.filter((p) =>
+      !p.vacated && (p.status === 'working' || p.status === 'stalled' || p.status === 'alert'),
+    ).length;
+  }
+
+  private buildAhaBarState(): AhaBarState {
+    const cwd = this.ctx.getCurrentCwd(this.activeSessionId);
+    const pending = [...this.pendingById.values()].sort(compareApprovalPriority);
+    return {
+      sessionId: this.activeSessionId,
+      cwd,
+      projectName: projectNameFromCwd(cwd),
+      runningCount: this.runningCount,
+      pending,
+      topPending: pending[0] ?? null,
+      hardwareTakenOver: false,
+    };
+  }
+
   private refreshRoster(now: number): void {
     const orch = this.ctx.getOrchestrator(this.activeSessionId);
     this.model.setRoster(orch?.listHosts() ?? [], now);
@@ -72,6 +178,7 @@ export class CompanionFeed {
 
   private push(now: number): void {
     sendToCompanion('companion:event', this.model.state(now));
+    sendToCompanion('ahabar:event', this.buildAhaBarState());
   }
 }
 
@@ -148,9 +255,14 @@ export function registerCompanionIpc(ctx: IpcContext): void {
     senderId === getCompanionWebContentsId();
 
   handleSecure('companion:toggle', {
-    schema: emptyPayloadSchema,
+    schema: z.object({
+      view: z.enum(['ahabar', 'companion']).optional(),
+    }).strict().nullish(),
     authorize: mainWindowOnly,
-    handler: () => ({ ok: true, ...toggleCompanionWindow() }),
+    handler: (payload) => ({
+      ok: true,
+      ...toggleCompanionWindow(payload?.view ?? 'ahabar'),
+    }),
   });
 
   handleSecure('companion:get-state', {
@@ -158,6 +270,44 @@ export function registerCompanionIpc(ctx: IpcContext): void {
     authorize: companionWindowOnly,
     authorizeError: 'Sender is not the companion window',
     handler: () => ({ ok: true, state: feed!.getState() }),
+  });
+
+  handleSecure('ahabar:get-state', {
+    schema: emptyPayloadSchema,
+    authorize: companionWindowOnly,
+    authorizeError: 'Sender is not the companion window',
+    handler: () => ({ ok: true, state: feed!.getAhaBarState() }),
+  });
+
+  handleSecure('ahabar:resolve-permission', {
+    schema: z.object({
+      id: z.string().min(1),
+      decision: z.enum(['allow', 'deny']),
+    }).strict(),
+    authorize: companionWindowOnly,
+    authorizeError: 'Sender is not the companion window',
+    handler: (payload) => feed!.resolvePermission(payload.id, payload.decision),
+  });
+
+  handleSecure('ahabar:focus-main', {
+    schema: emptyPayloadSchema,
+    authorize: companionWindowOnly,
+    authorizeError: 'Sender is not the companion window',
+    handler: () => ({ ok: focusMainWindow(() => ctx.liveWindow()) }),
+  });
+
+  handleSecure('ahabar:set-expanded', {
+    schema: z.object({ expanded: z.boolean() }).strict(),
+    authorize: companionWindowOnly,
+    authorizeError: 'Sender is not the companion window',
+    handler: (payload) => ({ ok: setAhaBarExpanded(payload.expanded) }),
+  });
+
+  handleSecure('ahabar:set-ghost', {
+    schema: z.object({ ghost: z.boolean() }).strict(),
+    authorize: companionWindowOnly,
+    authorizeError: 'Sender is not the companion window',
+    handler: (payload) => ({ ok: setAhaBarGhost(payload.ghost) }),
   });
 
   handleSecure('companion:get-prefs', {

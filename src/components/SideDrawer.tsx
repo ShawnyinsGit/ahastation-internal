@@ -10,6 +10,11 @@ import type {
   TranscriptEntry,
 } from '../types';
 import type { HostGroupState } from '../lib/meeting-store';
+import {
+  DISPATCH_MODE_HINTS,
+  DISPATCH_MODE_LABELS,
+  type DispatchMode,
+} from '../lib/dispatch-mode';
 import { PermissionCard } from './PermissionCard';
 import { FileTree } from './FileTree';
 
@@ -18,7 +23,13 @@ interface SideDrawerProps {
   transcript: TranscriptEntry[];
   activity: ActivityEntry[];
   pending: PendingPermission | null;
-  onResolve: (id: string, decision: 'allow' | 'deny') => void;
+  /** Resolving flag for the legacy single permission card, sourced from the
+   *  worker that owns `pending.id`. Keeps the drawer card in lock-step with
+   *  WorkerCard and TaskInspector. */
+  pendingResolving?: boolean;
+  /** Permission IPC error for the legacy single permission card. */
+  pendingError?: string | null;
+  onResolve: (id: string, decision: 'allow' | 'deny') => Promise<{ ok: true } | { ok: false; error: string }> | void;
   onSend: (text: string) => void;
   onSendAttachments?: (
     staged: StagedAttachment[],
@@ -26,6 +37,8 @@ interface SideDrawerProps {
   ) => Promise<{ ok: boolean; error?: string }>;
   onSubscribeDroppedFiles?: (cb: (files: File[]) => void) => () => void;
   multiAgent?: boolean;
+  dispatchMode?: DispatchMode;
+  onChangeDispatchMode?: (mode: DispatchMode) => void;
   disabled: boolean;
   sessionId?: string | null;
   onViewFile?: (relativePath: string) => void;
@@ -146,11 +159,15 @@ export function SideDrawer({
   transcript,
   activity,
   pending,
+  pendingResolving,
+  pendingError,
   onResolve,
   onSend,
   onSendAttachments,
   onSubscribeDroppedFiles,
   multiAgent = false,
+  dispatchMode = 'direct',
+  onChangeDispatchMode,
   disabled,
   sessionId,
   onViewFile,
@@ -455,7 +472,9 @@ export function SideDrawer({
   const placeholder = disabled
     ? 'Join a meeting to chat'
     : multiAgent
-      ? '多 Agent 并行 · Enter 发送 · Shift+Enter 换行 · 📎/拖放/粘贴可附文件'
+      ? dispatchMode === 'plan'
+        ? 'Plan 模式 · Enter 发送 · Shift+Enter 换行 · 📎/拖放/粘贴可附文件'
+        : '直接派活 · Enter 发送 · Shift+Enter 换行 · 📎/拖放/粘贴可附文件'
       : 'Type a message · Enter 发送 · 📎 附件 / 拖放 / 粘贴均可';
 
   const sendDisabled = disabled || staging || (staged.length === 0 && !text.trim());
@@ -596,10 +615,30 @@ export function SideDrawer({
                 </div>
               );
             })}
-            {pending && <PermissionCard pending={pending} onDecide={onResolve} />}
+            {pending && <PermissionCard pending={pending} onDecide={onResolve} resolving={pendingResolving} error={pendingError} />}
             <div ref={endRef} />
           </div>
           <div className="drawer-composer">
+            {multiAgent && onChangeDispatchMode && (
+              <div
+                className="dispatch-mode-switch"
+                role="group"
+                aria-label="派活方式"
+              >
+                {(['direct', 'plan'] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    className={`dispatch-mode-option ${dispatchMode === mode ? 'is-active' : ''}`}
+                    aria-pressed={dispatchMode === mode}
+                    title={DISPATCH_MODE_HINTS[mode]}
+                    onClick={() => onChangeDispatchMode(mode)}
+                  >
+                    {DISPATCH_MODE_LABELS[mode]}
+                  </button>
+                ))}
+              </div>
+            )}
             {(staged.length > 0 || rejected.length > 0) && (
               <div className="attachment-strip">
                 {staged.map((a) => (

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
 import test from 'node:test';
 
 import {
@@ -18,13 +19,14 @@ test('packaged renderer enables local ONNX/VAD execution and cross-origin isolat
 });
 
 test('app protocol only serves files inside the renderer bundle', () => {
+  const root = resolve('Applications', 'AhaStation', 'dist');
   assert.equal(
-    resolveAppAssetPath('/Applications/AhaStation/dist', 'app://bundle/assets/app.js'),
-    '/Applications/AhaStation/dist/assets/app.js',
+    resolveAppAssetPath(root, 'app://bundle/assets/app.js'),
+    join(root, 'assets', 'app.js'),
   );
-  assert.equal(resolveAppAssetPath('/Applications/AhaStation/dist', 'app://other/index.html'), null);
-  assert.equal(resolveAppAssetPath('/Applications/AhaStation/dist', 'app://bundle/%2F..%2F..%2Fsecret.txt'), null);
-  assert.equal(resolveAppAssetPath('/Applications/AhaStation/dist', 'app://bundle/'), '/Applications/AhaStation/dist/index.html');
+  assert.equal(resolveAppAssetPath(root, 'app://other/index.html'), null);
+  assert.equal(resolveAppAssetPath(root, 'app://bundle/%2F..%2F..%2Fsecret.txt'), null);
+  assert.equal(resolveAppAssetPath(root, 'app://bundle/'), join(root, 'index.html'));
 });
 
 test('development renderer scopes HMR access to the configured Vite origin', () => {

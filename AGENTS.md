@@ -42,7 +42,7 @@ break without the other noticing.
 ## Build / package
 
 - `npm run build` — vite + tsc, no installer.
-- `npm run dist:dmg` — full release flow: downloads whisper, bundles Codex
+- `npm run dist:dmg` — full release flow: downloads the speaker model, bundles Codex
   defaults, builds, then runs `electron-builder --mac --arm64 --publish never`.
   Output lands in `release/` as `AhaStation-<version>-arm64.dmg`.
 
@@ -51,11 +51,6 @@ break without the other noticing.
 CI builds each platform on its native runner (`.github/workflows/build-matrix.yml`);
 packaging Windows/Linux locally from macOS needs two manual accommodations:
 
-- **whisper assets**: `extraResources` always copies `build/whisper/`, so before
-  a win/linux build point it at the staged platform tree
-  (`build/whisper-win32-x64/` or `build/whisper-linux-arm64/`, official
-  whisper.cpp v1.9.1 prebuilts + `ggml-small-q5_1.bin`), then restore the
-  darwin tree afterwards.
 - **platform backend binaries**: npm only installs the host platform's optional
   packages, so cross packages would miss the target's Codex/OpenCode binaries.
   Stage them into `node_modules` before packaging, e.g.
@@ -74,11 +69,6 @@ packaging Windows/Linux locally from macOS needs two manual accommodations:
 whatever identity the environment provides (`CSC_NAME` / keychain). Two
 safeguards wrap the build:
 
-- `scripts/sign-helpers.mjs` (electron-builder `afterPack` hook) re-signs the
-  bundled whisper.cpp helpers with a Developer ID certificate so notarization
-  doesn't reject ad-hoc executables. Identity comes from
-  `$APPLE_HELPER_IDENTITY`, then `$CSC_NAME`, then `mac.identity`; when none
-  is set it logs a warning and skips (local dev builds).
 - `node scripts/verify-macos-signing.mjs` runs at the end of both `dist` and
   `dist:dmg` and hard-fails the release unless `release/mac-arm64/AhaStation.app`
   carries a Developer ID Application signature, a TeamIdentifier, and the
