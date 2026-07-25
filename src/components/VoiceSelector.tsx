@@ -24,7 +24,9 @@ interface VoiceSelectorProps {
   onChangeHandheldMode: (mode: HandheldOverride) => void;
   xfyunAsr: XfyunAsrCredentials;
   onXfyunAsrInput: (patch: Partial<XfyunAsrCredentials>) => void;
-  onXfyunAsrCommit: () => void;
+  onXfyunAsrCommit: () => Promise<boolean>;
+  xfyunDirty: boolean;
+  xfyunSaveState: 'idle' | 'saving' | 'saved' | 'error';
 }
 
 function describeVoice(v: ListedVoice): string {
@@ -48,6 +50,8 @@ export function VoiceSelector({
   xfyunAsr,
   onXfyunAsrInput,
   onXfyunAsrCommit,
+  xfyunDirty,
+  xfyunSaveState,
 }: VoiceSelectorProps) {
   const chineseVoices = listChineseVoices(voices);
   const hasPremium = chineseVoices.some((v) => v.tier !== 'default');
@@ -114,7 +118,7 @@ export function VoiceSelector({
         <div className="drawer-settings-label">
           <div className="drawer-settings-title">讯飞 ASR</div>
           <div className="drawer-settings-hint">
-            讯飞 IAT 流式语音转写。填写下方三项凭证后失焦自动保存，未配置时语音识别不可用。
+            讯飞 IAT 流式语音转写。填写下方三项凭证，点击保存按钮（或失焦）后立即生效并重连麦克风，未配置时语音识别不可用。
           </div>
         </div>
       </div>
@@ -149,9 +153,25 @@ export function VoiceSelector({
           onChange={(e) => onXfyunAsrInput({ apiSecret: e.target.value })}
           onBlur={onXfyunAsrCommit}
         />
+        <button
+          type="button"
+          className={`asr-cloud-save${xfyunSaveState === 'saved' ? ' is-saved' : ''}${xfyunSaveState === 'error' ? ' is-error' : ''}`}
+          disabled={xfyunSaveState === 'saving'}
+          onClick={() => { void onXfyunAsrCommit(); }}
+        >
+          {xfyunSaveState === 'saving'
+            ? '保存中…'
+            : xfyunSaveState === 'saved'
+              ? '已保存 ✓ 正在重连麦克风'
+              : xfyunSaveState === 'error'
+                ? '保存失败，点击重试'
+                : xfyunDirty
+                  ? '保存并重连麦克风 ●'
+                  : '保存并重连麦克风'}
+        </button>
         <div className="drawer-settings-hint">
           在讯飞开放平台控制台获取「语音听写」服务的 AppID、API Key、API Secret。
-          凭证保存在本地 settings.json；单次识别上限 55 秒。
+          凭证保存在本地 settings.json；保存后自动重新探测并连接麦克风；单次识别上限 55 秒。
         </div>
       </div>
 

@@ -136,6 +136,8 @@ function SettingsWindowInner() {
           xfyunAsr={voicePrefs.xfyunAsr}
           onXfyunAsrInput={voicePrefs.handleXfyunAsrInput}
           onXfyunAsrCommit={voicePrefs.handleXfyunAsrCommit}
+          xfyunDirty={voicePrefs.xfyunDirty}
+          xfyunSaveState={voicePrefs.xfyunSaveState}
         />
         <VoiceLockPanel
           enabled={voiceLock.voiceLockEnabled}
