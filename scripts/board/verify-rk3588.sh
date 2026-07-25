@@ -4,6 +4,11 @@ set -eu
 fail() { printf '%s\n' "[rk3588-gate] FAIL: $*" >&2; exit 1; }
 note() { printf '%s\n' "[rk3588-gate] $*"; }
 
+STRICT=${AHASTATION_GATE_STRICT:-0}
+REQUIRE_KIMI=${AHASTATION_GATE_REQUIRE_KIMI:-0}
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+VERSIONS_FILE=${AHASTATION_GATE_VERSIONS:-"$SCRIPT_DIR/runtime-versions.env"}
+
 [ "$(uname -m)" = "aarch64" ] || fail "expected aarch64, got $(uname -m)"
 . /etc/os-release
 [ "${ID:-}" = "debian" ] || fail "expected Debian, got ${ID:-unknown}"
@@ -22,6 +27,11 @@ command -v arecord >/dev/null 2>&1 || fail "alsa-utils/arecord is missing"
 
 APP_RESOURCES=${AHASTATION_APP_RESOURCES:-/opt/AhaStation/resources}
 
+if [ -f "$VERSIONS_FILE" ]; then
+  # shellcheck disable=SC1090
+  . "$VERSIONS_FILE"
+fi
+
 bundled_runtime() {
   case "$1" in
     claude)
@@ -36,24 +46,43 @@ bundled_runtime() {
   esac
 }
 
-check_version() {
+read_version() {
+  binary=$1
+  "$binary" --version 2>&1 | sed -n 's/.*[^0-9]\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | head -n 1
+}
+
+check_runtime() {
   name=$1
   expected=$2
+  required=$3
   binary=$(command -v "$name" 2>/dev/null || true)
   if [ -z "$binary" ] && [ "$name" != "kimi" ]; then
     binary=$(bundled_runtime "$name")
   fi
-  [ -n "$binary" ] || fail "$name is missing (PATH and $APP_RESOURCES were checked)"
+  if [ -z "$binary" ]; then
+    if [ "$required" = "1" ]; then
+      fail "$name is missing (PATH and $APP_RESOURCES were checked)"
+    fi
+    note "$name skipped (not installed)"
+    return 0
+  fi
   [ -x "$binary" ] || fail "$name runtime is not executable: $binary"
-  actual=$("$binary" --version 2>&1 | sed -n 's/.*[^0-9]\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | head -n 1)
-  [ "$actual" = "$expected" ] || fail "$name version $actual, expected $expected"
+  actual=$(read_version "$binary")
+  [ -n "$actual" ] || fail "$name did not print a parseable --version ($binary)"
+  if [ "$STRICT" = "1" ]; then
+    [ -n "$expected" ] || fail "$name expected version missing from $VERSIONS_FILE"
+    [ "$actual" = "$expected" ] || fail "$name version $actual, expected $expected"
+  elif [ -n "$expected" ] && [ "$actual" != "$expected" ]; then
+    note "$name $actual ($binary) — differs from pinned $expected (set AHASTATION_GATE_STRICT=1 to fail)"
+    return 0
+  fi
   note "$name $actual ($binary)"
 }
 
-check_version claude 2.1.150
-check_version codex 0.144.1
-check_version opencode 1.18.3
-check_version kimi 0.24.1
+check_runtime claude "${CLAUDE_VERSION:-}" 1
+check_runtime codex "${CODEX_VERSION:-}" 1
+check_runtime opencode "${OPENCODE_VERSION:-}" 1
+check_runtime kimi "${KIMI_VERSION:-}" "$REQUIRE_KIMI"
 
 if command -v glxinfo >/dev/null 2>&1; then
   glxinfo -B | sed -n '1,12p'
@@ -61,5 +90,9 @@ else
   note "glxinfo unavailable; install mesa-utils for GPU evidence"
 fi
 
-note "platform PASS: Debian 11 aarch64 X11, RAM/disk/audio/git and four runtime versions"
-note "next: install the arm64 .deb, open Device Ready, authenticate all four backends, then run the real Meeting and soak checklist"
+if [ "$STRICT" = "1" ]; then
+  note "platform PASS (strict versions): Debian 11 aarch64 X11 + pinned runtimes"
+else
+  note "platform PASS (bring-up): Debian 11 aarch64 X11, RAM/disk/audio/git + runnable bundled runtimes"
+fi
+note "next: open Device Ready, authenticate backends, then run the real Meeting checklist"

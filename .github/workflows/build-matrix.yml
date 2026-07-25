@@ -1,12 +1,11 @@
-# build-matrix.yml — Phase 6b CI matrix (supersedes build.yml).
+# build-matrix.yml - Phase 6b CI matrix (supersedes build.yml).
 #
 # x64 three runners (mac/win/ubuntu) build on push/PR; linux-arm64 runs on
 # workflow_dispatch AND tag pushes (private repo: arm runners burn paid
-# minutes) INSIDE a debian:12 container on the arm runner — it builds the
-# arm64 deb on the target glibc (2.36) and smoke-verifies it by actually
-# dpkg-installing + headless-launching it in that same Debian 12
-# environment. Every job runs both typechecks + the full node --test suite +
-# the whisper asset assertion (no more silently whisper-less packages).
+# minutes) INSIDE a debian:11 container on the arm runner - it builds the
+# arm64 deb on the RK3588 / LubanCat target glibc (2.31) and smoke-verifies
+# it by dpkg-installing + headless-launching in that same Debian 11
+# environment. Every job runs both typechecks + the full node --test suite.
 # Tag pushes (v*) additionally create a GitHub Release with ALL artifacts
 # (x64 + arm64) + latest*.yml via GITHUB_TOKEN.
 #
@@ -53,27 +52,17 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .asset-cache
-          key: assets-${{ matrix.os }}-${{ hashFiles('scripts/lib/whisper-platforms.mjs', 'scripts/fetch-speaker-model.mjs') }}
+          key: assets-${{ matrix.os }}-${{ hashFiles('scripts/fetch-speaker-model.mjs') }}
           restore-keys: assets-${{ matrix.os }}-
-
-      - name: Install whisper-cpp (macOS Homebrew)
-        if: matrix.os == 'macos-latest'
-        run: brew install whisper-cpp
 
       - name: npm install
         run: npm ci
 
-      - name: Prebuild — whisper binaries (fatal on failure)
-        run: node scripts/fetch-whisper.mjs
-
-      - name: Prebuild — speaker model
+      - name: Prebuild - speaker model
         run: node scripts/fetch-speaker-model.mjs
 
-      - name: Prebuild — claude defaults
+      - name: Prebuild - claude defaults
         run: node scripts/bundle-claude-defaults.mjs
-
-      - name: Assert whisper assets (CI gate)
-        run: node scripts/assert-whisper-assets.mjs
 
       - name: Typecheck (renderer)
         run: node node_modules/typescript/bin/tsc --noEmit -p tsconfig.json
@@ -85,9 +74,9 @@ jobs:
         if: matrix.os != 'windows-latest'
         run: npm test
 
-      - name: Test suite (Windows — non-blocking, see TODO)
+      - name: Test suite (Windows - non-blocking, see TODO)
         # TODO(win32-tests): ~10 pre-existing failures on win32 (Kimi/Claude/
-        # Codex packaged-runtime resolvers return null — .exe suffix and
+        # Codex packaged-runtime resolvers return null - .exe suffix and
         # path-separator assumptions written on macOS). These are REAL win32
         # runtime defects, not flaky tests; tracked as a dedicated Windows
         # adaptation round. Non-blocking so packaging/release isn't held
@@ -108,13 +97,9 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: npx electron-builder --linux --publish never
 
-      - name: Report package + model sizes
+      - name: Report package sizes
         shell: bash
         run: |
-          # NOTE: build/whisper/ggml-small-q5_1.bin (~190 MB) ships INSIDE
-          # every package (extraResources). First-run on-demand download
-          # with hash verification is a follow-up (docs §3.5-2).
-          du -sh build/whisper || true
           ls -lh release/ || true
 
       - uses: actions/upload-artifact@v4
@@ -130,22 +115,22 @@ jobs:
           retention-days: 30
 
   linux-arm64:
-    name: linux-arm64 (debian:12 container)
-    # Private repo: arm runners consume paid minutes — manual trigger and
+    name: linux-arm64 (debian:11 container)
+    # Private repo: arm runners consume paid minutes - manual trigger and
     # tag pushes only (tags need the arm64 deb/AppImage for the release).
     if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04-arm
-    # Build inside Debian 12 (glibc 2.36 — the RK3588 target) so the deb is
-    # produced AND smoke-verified on the exact target distro; nothing glibc-
-    # linked is compiled here, so the container's real value is the dpkg
-    # install + headless launch gate below.
-    container: debian:12
+    # Build inside Debian 11 (glibc 2.31 - RK3588 / LubanCat target per
+    # docs/RK3588_DEPLOYMENT.md) so the deb is produced AND smoke-verified
+    # on the exact board distro. The package gate also rejects ELF symbols
+    # newer than GLIBC_2.31.
+    container: debian:11
     timeout-minutes: 90
     steps:
-      # debian:12 ships no git/curl/node — install before checkout (checkout
+      # debian:11 ships no git/curl/node - install before checkout (checkout
       # needs git) and npm ci / electron-builder need the rest:
-      # xz-utils (whisper tarball), python3/make/g++ (native npm modules),
-      # libfuse2 (appimagetool runs in a fuse-less docker container).
+      # python3/make/g++ (native npm modules), libfuse2 (appimagetool runs
+      # in a fuse-less docker container).
       - name: Install container build deps
         run: |
           apt-get update
@@ -159,24 +144,14 @@ jobs:
           node-version: 22
           cache: npm
 
-      - name: Prebuild — whisper binaries (official v1.9.1 ubuntu-arm64 prebuilt)
-        # The official prebuilt is linked against ubuntu-22.04 glibc 2.35, so
-        # packages run on Debian 12 / Ubuntu 22.04+ — a 24.04 self-build would
-        # require glibc 2.39 and break Debian 12. fetch-whisper.mjs downloads
-        # the archive, flattens the top-level dir, and fetches the model.
-        run: node scripts/fetch-whisper.mjs
-
       - name: npm install
         run: npm ci
 
-      - name: Prebuild — speaker model
+      - name: Prebuild - speaker model
         run: node scripts/fetch-speaker-model.mjs
 
-      - name: Prebuild — claude defaults
+      - name: Prebuild - claude defaults
         run: node scripts/bundle-claude-defaults.mjs
-
-      - name: Assert whisper assets (CI gate)
-        run: node scripts/assert-whisper-assets.mjs
 
       - name: Typecheck (renderer)
         run: node node_modules/typescript/bin/tsc --noEmit -p tsconfig.json
@@ -188,16 +163,16 @@ jobs:
         run: npm test
 
       - name: Package (Linux arm64 AppImage + deb)
-        # Built inside debian:12; the smoke step below installs and launches
-        # the deb on the target distro (docs §3.5-1 verification path).
+        # Built inside debian:11; the smoke step below installs and launches
+        # the deb on the board target distro (docs/RK3588_DEPLOYMENT.md).
         run: npx electron-builder --linux --arm64 --publish never
 
-      - name: Smoke test — dpkg install + headless launch (Debian 12 gate)
+      - name: Smoke test - dpkg install + headless launch (Debian 11 gate)
         shell: bash
         run: |
           set -euo pipefail
           DEB="$(ls release/*arm64*.deb release/ahastation_*_arm64.deb 2>/dev/null | head -n1)"
-          echo "Installing $DEB — apt resolves Depends (libgtk-3-0, libnss3, libasound2, …)"
+          echo "Installing $DEB - apt resolves Depends (libgtk-3-0, libnss3, libasound2, …)"
           apt-get install -y "./$DEB"
           BIN=/opt/AhaStation/ahastation
           test -x "$BIN"
@@ -208,9 +183,9 @@ jobs:
           if "$BIN" --no-sandbox --disable-gpu --version; then
             echo "smoke OK: $BIN launched and printed a version"
           else
-            echo "--version failed headless — falling back to ldd link check"
+            echo "--version failed headless - falling back to ldd link check"
             if ldd "$BIN" | grep "not found"; then
-              echo "smoke FAILED: unresolved shared libraries on Debian 12"
+              echo "smoke FAILED: unresolved shared libraries on Debian 11"
               exit 1
             fi
             echo "smoke OK: all shared libraries resolve"
