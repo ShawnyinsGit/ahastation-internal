@@ -79,7 +79,7 @@ function TaskCard({ task, onOpen }: { task: AggregatedTask; onOpen: () => void }
 
 // ---- Observed sessions (S0 observation layer) -------------------------------
 
-const OBSERVED_STATE_LABEL: Record<ObservedState, string> = {
+export const OBSERVED_STATE_LABEL: Record<ObservedState, string> = {
   active: '进行中',
   waiting: '等待输入',
   idle: '空闲',
@@ -87,7 +87,7 @@ const OBSERVED_STATE_LABEL: Record<ObservedState, string> = {
   unknown: '状态未知',
 };
 
-const OBSERVED_CLIENT_LABEL: Record<ObservedClientKind, string> = {
+export const OBSERVED_CLIENT_LABEL: Record<ObservedClientKind, string> = {
   'claude-code': 'Claude',
   codex: 'Codex',
   kimi: 'Kimi',
@@ -102,7 +102,7 @@ const RECENTLY_DONE_WINDOW_MS = 30 * 60_000;
  *  row is backed by a live process (session.pid set) — the Codex Desktop
  *  host-backed idle ("window open, nothing running"); stale file-only CLI
  *  idle stays hidden (history surface, S1). `done` only while recent. */
-function columnForObserved(session: ObservedSession, now: number): TaskColumnId | null {
+export function columnForObserved(session: ObservedSession, now: number): TaskColumnId | null {
   switch (session.state) {
     case 'waiting':
       return 'attention';
@@ -117,7 +117,7 @@ function columnForObserved(session: ObservedSession, now: number): TaskColumnId 
   }
 }
 
-function formatObservedAge(ts: number): string {
+export function formatObservedAge(ts: number): string {
   const min = Math.floor((Date.now() - ts) / 60_000);
   if (min < 1) return '刚刚活跃';
   if (min < 60) return `${min} 分钟前活跃`;

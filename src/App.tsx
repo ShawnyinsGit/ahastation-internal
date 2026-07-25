@@ -26,6 +26,7 @@ import { MeetingHeader, type MeetingView } from './components/MeetingHeader';
 import { AppTopBar } from './components/AppTopBar';
 import { StatusBar } from './components/StatusBar';
 import { BroadcastStrip } from './components/BroadcastStrip';
+import { ObservedStrip } from './components/ObservedStrip';
 import { MeetingControls } from './components/MeetingControls';
 import { AgentDetailPanel } from './components/AgentDetailPanel';
 import { ExplorePage } from './components/ExplorePage';
@@ -181,6 +182,9 @@ export function App() {
     setBoardOnly(true);
     setView('tasks');
   }, []);
+
+  /** 观察条点击 → 切到任务看板（观察会话的唯一操作面）。 */
+  const handleOpenTasksView = useCallback(() => setView('tasks'), []);
 
   const handleOnboardingFinish = useCallback((mode: OnboardingMode) => {
     setOnboardingMode(null);
@@ -832,6 +836,13 @@ export function App() {
 
       {!handheld && view === 'meeting' && (
         <BroadcastStrip briefings={workers.coordinatorBriefings} onInterrupt={onBargeIn} />
+      )}
+
+      {/* 「观察中」横条：会议模式下外部会话一览。挂在 BroadcastStrip 旁、
+          .mtg-main 之上 —— 不进 stage 的 CSS grid（行槽是固定的，插入会
+          挤压画廊/工作区布局）；空数据或老 preload 时组件自身不渲染。 */}
+      {!handheld && view === 'meeting' && (
+        <ObservedStrip onOpenTasks={handleOpenTasksView} />
       )}
 
       <main className="mtg-main">

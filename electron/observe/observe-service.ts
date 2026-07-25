@@ -55,6 +55,8 @@ import {
 } from './statefiles/kimi-sessions.js';
 import type {
   ClientKind,
+  CodexDesktopTailSignals,
+  CodexTailSignals,
   ObservedFileSignal,
   ObservedSession,
   ObservedSnapshot,
@@ -98,30 +100,84 @@ function fileMarker(stat: Awaited<ReturnType<typeof lstatSafe>>): string {
 /** Merge CLI rollout signals with Codex Desktop thread signals, keeping one
  * row per thread id. The same id can exist in both worlds — the desktop app
  * resumes CLI sessions — and two rows would duplicate a board card (and its
- * React key). The fresher side wins: a live desktop turn must not hide
- * behind a stale CLI rollout, and a live `codex resume` must not hide
- * behind an old desktop thread. Desktop-side recency uses chat-process
- * updates only: the global-state mtime is app-wide, not per-thread. */
+ * React key). Colliding ids merge into ONE `codex-merged` signal carrying
+ * both sides whole: liveness is only known per-tick in correlate, so the
+ * merge never picks a winner. (The old fresher-side-wins rule dropped the
+ * stale CLI row AND the live desktop row's host pid with it, hiding open
+ * desktop windows whenever the rollout file happened to be newer.)
+ * Top-level identity fields stay on the CLI rollout's per-thread evidence:
+ * fd→rollout association and MCP ghost suppression key on the rollout path,
+ * and the desktop cwd can be an app-wide workspace-root fallback. Display
+ * fields (title/titleSource) seed from the fresher side — correlate re-picks
+ * them per-tick and only falls back to this recency choice when neither
+ * side is live. Desktop-side recency uses chat-process updates only: the
+ * global-state mtime is app-wide, not per-thread. */
 export function mergeCodexDesktopSignals(
   codexSignals: ObservedFileSignal[],
   desktopSignals: ObservedFileSignal[],
 ): ObservedFileSignal[] {
-  const cliById = new Map(codexSignals.map((signal) => [signal.nativeSessionId, signal]));
-  const desktopWins = new Set<string>();
+  const desktopById = new Map<string, ObservedFileSignal>();
+  const passthrough: ObservedFileSignal[] = [];
   for (const signal of desktopSignals) {
-    if (signal.tailSignals.kind !== 'codex-desktop') continue;
-    const cli = cliById.get(signal.nativeSessionId);
-    if (cli && signal.tailSignals.lastChatUpdateAtMs > cli.mtimeMs) {
-      desktopWins.add(signal.nativeSessionId);
+    if (signal.tailSignals.kind === 'codex-desktop') {
+      desktopById.set(signal.nativeSessionId, signal);
+    } else {
+      passthrough.push(signal);
     }
   }
-  return [
-    ...codexSignals.filter((signal) => !desktopWins.has(signal.nativeSessionId)),
-    ...desktopSignals.filter((signal) => {
-      if (signal.tailSignals.kind !== 'codex-desktop') return true;
-      return !cliById.has(signal.nativeSessionId) || desktopWins.has(signal.nativeSessionId);
-    }),
-  ];
+  const merged: ObservedFileSignal[] = [];
+  for (const cli of codexSignals) {
+    const desktop = desktopById.get(cli.nativeSessionId);
+    if (!desktop) {
+      merged.push(cli);
+      continue;
+    }
+    desktopById.delete(cli.nativeSessionId);
+    merged.push(mergeCollidingSignals(cli, desktop));
+  }
+  return [...merged, ...desktopById.values(), ...passthrough];
+}
+
+/** One row for a CLI↔desktop collision: both tails kept whole under
+ * `codex-merged` so correlate can run the live side's rules per tick. */
+function mergeCollidingSignals(
+  cli: ObservedFileSignal,
+  desktop: ObservedFileSignal,
+): ObservedFileSignal {
+  // Callers only pass kind-checked signals (codex rollout ⨯ codex-desktop).
+  const cliTail = cli.tailSignals as CodexTailSignals;
+  const desktopTail = desktop.tailSignals as CodexDesktopTailSignals;
+  const desktopFresher = desktopTail.lastChatUpdateAtMs > cli.mtimeMs;
+  const display = desktopFresher ? desktop : cli;
+  const secondary = desktopFresher ? cli : desktop;
+  return {
+    clientKind: 'codex',
+    nativeSessionId: cli.nativeSessionId,
+    cwd: cli.cwd,
+    filePath: cli.filePath,
+    mtimeMs: Math.max(cli.mtimeMs, desktop.mtimeMs),
+    sizeBytes: cli.sizeBytes + desktop.sizeBytes,
+    title: display.title ?? secondary.title,
+    titleSource: display.title ? display.titleSource : secondary.titleSource,
+    model: cli.model ?? desktop.model,
+    tailSignals: {
+      kind: 'codex-merged',
+      desktop: {
+        ...desktopTail,
+        title: desktop.title,
+        titleSource: desktop.titleSource,
+        filePath: desktop.filePath,
+        mtimeMs: desktop.mtimeMs,
+      },
+      cli: {
+        ...cliTail,
+        title: cli.title,
+        titleSource: cli.titleSource,
+        filePath: cli.filePath,
+        mtimeMs: cli.mtimeMs,
+      },
+    },
+  };
 }
 
 export class ObserveService {

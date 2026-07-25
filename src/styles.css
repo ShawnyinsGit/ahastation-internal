@@ -1397,6 +1397,102 @@ html.popout-view #root {
   font-size: 11px;
   cursor: not-allowed;
 }
+
+/* 「观察中」横条（会议模式，ObservedStrip）：外部会话紧凑 tile 行。client
+   chip 与「推断」标记直接复用看板的 tasks-* 类；状态点沿用看板状态色。 */
+.observed-strip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+  min-width: 0;
+  margin: 8px 16px 0;
+  padding: 6px 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-lg);
+  background: var(--bg-tile);
+}
+.observed-strip-label {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--aha-info);
+}
+.observed-strip-tiles {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.observed-strip-tiles::-webkit-scrollbar { display: none; }
+.observed-strip-tile {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  max-width: 340px;
+  padding: 4px 8px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-secondary);
+  font-size: 11px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background var(--transition), border-color var(--transition);
+}
+.observed-strip-tile:hover { background: var(--bg-hover); border-color: var(--border-strong); }
+.observed-strip-tile .tasks-client-chip {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-style: normal;
+}
+.observed-strip-project {
+  flex-shrink: 0;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-muted);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+}
+.observed-strip-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-primary);
+}
+.observed-strip-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.observed-strip-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-muted);
+}
+.observed-strip-dot.is-active { background: var(--accent); }
+.observed-strip-dot.is-waiting { background: var(--warn); }
+.observed-strip-dot.is-idle { background: var(--aha-info); }
+.observed-strip-dot.is-done { background: var(--success); }
+.observed-strip-age { flex-shrink: 0; font-size: 10px; color: var(--text-muted); }
+.observed-strip-more {
+  flex-shrink: 0;
+  padding: 4px 10px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 11px;
+  cursor: pointer;
+}
+.observed-strip-more:hover { background: var(--bg-hover); color: var(--text-primary); }
 .tasks-observed-action:disabled { opacity: 0.7; }
 
 .tasks-noise-group {

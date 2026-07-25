@@ -86,7 +86,7 @@ function pickTitle(signal: ObservedFileSignal, projectName: string): TitlePick {
 function messageCount(signal: ObservedFileSignal): number {
   if (signal.tailSignals.kind === 'claude') return signal.tailSignals.messagesSeen;
   if (signal.tailSignals.kind === 'kimi') return signal.tailSignals.messagesSeen;
-  if (signal.tailSignals.kind === 'codex-desktop') {
+  if (signal.tailSignals.kind === 'codex-desktop' || signal.tailSignals.kind === 'codex-merged') {
     // Desktop threads have no message content on disk; exempt from the
     // short-session noise fold — process/host liveness decides visibility.
     return 2;
@@ -105,8 +105,82 @@ function correlateOne(input: CorrelateInput, signal: ObservedFileSignal): Observ
     let sessionPid: number | undefined;
     let pidState: PidState = 'none';
     let lastActiveAt = signal.mtimeMs;
+    let descendantCpuMax = 0;
+    /** Merged collision rows override the title pick with the live side's
+     * display fields (recency tie-break when nothing is live). */
+    let titleSignal = signal;
 
-    if (signal.tailSignals.kind === 'codex-desktop') {
+    if (signal.tailSignals.kind === 'codex-merged') {
+      // CLI↔desktop collision row: both sides' evidence, and the live side's
+      // rules decide state — desktop rules when a chat/host pid is live, CLI
+      // rules when only the CLI pid is live, the CLI-side stale outcome
+      // (idle pidless → board-hidden) when nothing is live.
+      const tail = signal.tailSignals;
+      // MCP ghost suppression keys on the per-thread rollout path.
+      if (input.suppressedPaths.has(tail.cli.filePath)) return null;
+      if (tail.desktop.filePath !== signal.filePath) {
+        evidence.push(`file:${tail.desktop.filePath}`);
+      }
+      const liveChatPids = tail.desktop.chatPids.filter((chatPid) => input.snapshot.byPid.has(chatPid));
+      for (const chatPid of liveChatPids) evidence.push(`chat-process pid ${chatPid} alive`);
+      const hostPid = input.codexDesktopHostPid;
+      const hostAlive = hostPid !== undefined;
+      evidence.push(hostAlive
+        ? `desktop-host:app-server pid ${hostPid}`
+        : 'desktop-host:app-server not running');
+      if (tail.desktop.unread) evidence.push('badge:unread');
+      if (tail.desktop.heartbeat) evidence.push('badge:heartbeat-perms');
+
+      const association = input.associations.get(
+        associationKey(signal.clientKind, signal.nativeSessionId),
+      );
+      const cliAlive = association !== undefined && input.snapshot.byPid.has(association.pid);
+      if (association) {
+        if (cliAlive) {
+          descendantCpuMax = maxDescendantCpu(input.snapshot, association.pid);
+          evidence.push(`pid:${association.pid} via ${association.via}`);
+          if (descendantCpuMax > 0) evidence.push(`descendant-cpu:${descendantCpuMax.toFixed(1)}%`);
+        } else {
+          evidence.push(`pid:${association.pid} dead`);
+        }
+      } else {
+        evidence.push('no live process');
+      }
+
+      const desktopLive = liveChatPids.length > 0 || hostAlive;
+      if (desktopLive) {
+        inferred = inferCodexDesktopState({ liveChatPids, hostAlive });
+      } else {
+        pidState = association ? (cliAlive ? 'live' : 'dead') : 'none';
+        inferred = inferCodexState({
+          tail: tail.cli,
+          descendantCpuMax,
+          pidState,
+          mtimeMs: tail.cli.mtimeMs,
+          now: input.now,
+        });
+      }
+      // Ownership: a live chat process owns the row, then the shared host
+      // (host-backed idle), then a live CLI pid.
+      sessionPid = liveChatPids[0] ?? hostPid ?? (cliAlive ? association?.pid : undefined);
+      lastActiveAt = Math.max(tail.cli.mtimeMs, tail.desktop.mtimeMs, tail.desktop.lastChatUpdateAtMs);
+
+      // Display fields: the live side's title wins; when nothing is live
+      // the fresher side's (the old winner-take-all recency rule, demoted
+      // to tie-breaker — desktop recency is chat-process updates only).
+      const preferDesktop = desktopLive
+        || (!cliAlive && tail.desktop.lastChatUpdateAtMs > tail.cli.mtimeMs);
+      const preferred = preferDesktop ? tail.desktop : tail.cli;
+      const fallback = preferDesktop ? tail.cli : tail.desktop;
+      const pickedTitle = preferred.title ?? fallback.title;
+      titleSignal = {
+        ...signal,
+        title: pickedTitle,
+        titleSource: pickedTitle
+          ? (preferred.title ? preferred.titleSource : fallback.titleSource)
+          : undefined,
+      };
+    } else if (signal.tailSignals.kind === 'codex-desktop') {
       // Codex Desktop thread: no rollout tail and no PID association —
       // state comes from chat-process liveness plus the shared
       // app-server host detected by the service.
@@ -128,7 +202,6 @@ function correlateOne(input: CorrelateInput, signal: ObservedFileSignal): Observ
       const association = input.associations.get(
         associationKey(signal.clientKind, signal.nativeSessionId),
       );
-      let descendantCpuMax = 0;
       if (association) {
         const alive = input.snapshot.byPid.has(association.pid);
         pidState = alive ? 'live' : 'dead';
@@ -161,7 +234,7 @@ function correlateOne(input: CorrelateInput, signal: ObservedFileSignal): Observ
     evidence.push(`state:${inferred.state}/${inferred.activity} (inferred)`);
 
     const projectName = projectNameOf(signal.cwd);
-    const { title, source } = pickTitle(signal, projectName);
+    const { title, source } = pickTitle(titleSignal, projectName);
     const isNoise =
       NOISE_PATH_PREFIXES.some((prefix) => realCwd.startsWith(prefix)) ||
       // Fresh live sessions legitimately have <2 messages — only fold short
@@ -170,8 +243,9 @@ function correlateOne(input: CorrelateInput, signal: ObservedFileSignal): Observ
       // Untitled desktop threads with nothing running are low-information
       // rows (project+time fallback titles) — fold them into the noise
       // group; a live chat process or a curated title keeps them visible.
-      (signal.tailSignals.kind === 'codex-desktop'
-        && !signal.title
+      // Merged collision rows follow the same rule on their picked title.
+      (((signal.tailSignals.kind === 'codex-desktop' && !signal.title)
+        || (signal.tailSignals.kind === 'codex-merged' && source === 'project-fallback'))
         && inferred.state !== 'active');
 
     return {

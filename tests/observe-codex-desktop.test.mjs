@@ -6,7 +6,7 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import { correlate } from '../dist-electron/observe/correlate.js';
-import { detectCodexDesktopHostPids } from '../dist-electron/observe/mapping.js';
+import { associationKey, detectCodexDesktopHostPids } from '../dist-electron/observe/mapping.js';
 import { mergeCodexDesktopSignals, ObserveService } from '../dist-electron/observe/observe-service.js';
 import { findClientPids, parsePsOutput } from '../dist-electron/observe/process/darwin.js';
 import {
@@ -279,28 +279,187 @@ function desktopSignal(id, lastChatUpdateAtMs, extra = {}) {
   };
 }
 
-test('mergeCodexDesktopSignals: one row per id, fresher side wins', () => {
-  // Desktop-only and CLI-only ids pass through.
+test('mergeCodexDesktopSignals: one row per id; collisions keep BOTH sides (codex-merged)', () => {
+  // Desktop-only and CLI-only ids pass through untouched.
   let merged = mergeCodexDesktopSignals([cliSignal('a', 100)], [desktopSignal('b', 50)]);
   assert.deepEqual(merged.map((s) => s.nativeSessionId).sort(), ['a', 'b']);
-
-  // Collision, desktop chat processes newer → desktop row wins, CLI dropped
-  // (a live desktop turn must not hide behind a stale rollout).
-  merged = mergeCodexDesktopSignals([cliSignal('a', 100)], [desktopSignal('a', 200)]);
-  assert.equal(merged.length, 1);
-  assert.equal(merged[0].tailSignals.kind, 'codex-desktop');
-
-  // Collision, CLI rollout newer → CLI row wins, desktop dropped (a live
-  // `codex resume` must not hide behind an old desktop thread).
-  merged = mergeCodexDesktopSignals([cliSignal('a', 300)], [desktopSignal('a', 200)]);
-  assert.equal(merged.length, 1);
   assert.equal(merged[0].tailSignals.kind, 'codex');
+  assert.equal(merged[1].tailSignals.kind, 'codex-desktop');
+
+  // Collision → a single merged row carrying both tails whole; identity
+  // fields stay on the CLI rollout (fd association + MCP suppression key on
+  // it), display title seeds from the fresher side.
+  merged = mergeCodexDesktopSignals(
+    [{ ...cliSignal('a', 100), title: 'cli title', titleSource: 'session-index' }],
+    [{ ...desktopSignal('a', 200), title: 'desktop title', titleSource: 'global-state' }],
+  );
+  assert.equal(merged.length, 1);
+  const row = merged[0];
+  assert.equal(row.tailSignals.kind, 'codex-merged');
+  assert.equal(row.tailSignals.cli.kind, 'codex');
+  assert.equal(row.tailSignals.desktop.kind, 'codex-desktop');
+  assert.equal(row.tailSignals.cli.filePath, '/r.jsonl');
+  assert.equal(row.tailSignals.desktop.filePath, '/g.json');
+  assert.equal(row.filePath, '/r.jsonl'); // rollout path, never global-state
+  assert.equal(row.title, 'desktop title'); // desktop chat updates are fresher
+  assert.equal(row.titleSource, 'global-state');
+  assert.equal(row.mtimeMs, 100); // max(cli.mtimeMs, desktop.mtimeMs=1)
+
+  // CLI rollout fresher → CLI display fields win the seed.
+  merged = mergeCodexDesktopSignals(
+    [{ ...cliSignal('a', 300), title: 'cli title', titleSource: 'session-index' }],
+    [{ ...desktopSignal('a', 200), title: 'desktop title', titleSource: 'global-state' }],
+  );
+  assert.equal(merged[0].title, 'cli title');
+  assert.equal(merged[0].titleSource, 'session-index');
 
   // A desktop thread without chat-process updates never outranks a rollout —
   // the global-state mtime is app-wide and proves nothing per-thread.
-  merged = mergeCodexDesktopSignals([cliSignal('a', 1)], [desktopSignal('a', 0)]);
-  assert.equal(merged.length, 1);
-  assert.equal(merged[0].tailSignals.kind, 'codex');
+  merged = mergeCodexDesktopSignals(
+    [{ ...cliSignal('a', 1), title: 'cli title' }],
+    [{ ...desktopSignal('a', 0), title: 'desktop title' }],
+  );
+  assert.equal(merged[0].title, 'cli title');
+
+  // Fresher side without a title falls back to the other side's title.
+  merged = mergeCodexDesktopSignals(
+    [{ ...cliSignal('a', 100), title: 'cli title', titleSource: 'session-index' }],
+    [desktopSignal('a', 200)],
+  );
+  assert.equal(merged[0].title, 'cli title');
+});
+
+// ---------------------------------------------------------------------------
+// correlate: CLI↔desktop collision rows (the visibility-bug fix)
+// ---------------------------------------------------------------------------
+
+/** Build a merged collision row via the real merge, with tunable liveness
+ * inputs: CLI rollout mtime + tail, desktop chat pids + chat recency. */
+function mergedRow(id, {
+  cliMtime,
+  chatPids = [],
+  lastChatUpdateAtMs = 0,
+  cliTitle,
+  desktopTitle,
+  cliTail = {},
+} = {}) {
+  const cliBase = cliSignal(id, cliMtime);
+  const cli = {
+    ...cliBase,
+    title: cliTitle,
+    titleSource: cliTitle ? 'session-index' : undefined,
+    tailSignals: { ...cliBase.tailSignals, ...cliTail },
+  };
+  const desktopBase = desktopSignal(id, lastChatUpdateAtMs);
+  const desktop = {
+    ...desktopBase,
+    title: desktopTitle,
+    titleSource: desktopTitle ? 'global-state' : undefined,
+    tailSignals: { ...desktopBase.tailSignals, chatPids },
+  };
+  const [row] = mergeCodexDesktopSignals([cli], [desktop]);
+  assert.equal(row.tailSignals.kind, 'codex-merged');
+  return row;
+}
+
+function collisionCorrelate(signals, { hostPid, associations } = {}) {
+  return correlate({
+    signals,
+    associations: associations ?? new Map(),
+    snapshot,
+    realpathOf: identity,
+    now: Date.now(),
+    selfSessionIds: new Set(),
+    suppressedPaths: new Set(),
+    codexDesktopHostPid: hostPid,
+  });
+}
+
+test('collision: live desktop chat pid + stale CLI rollout → desktop rules, chat pid owns the row', () => {
+  const row = mergedRow('c1', {
+    cliMtime: Date.now() - 20 * 60_000, // stale rollout, nothing claims it
+    chatPids: [CHAT_PID],
+    lastChatUpdateAtMs: Date.now() - 60_000,
+    cliTitle: 'old cli title',
+    desktopTitle: '桌面窗口标题',
+  });
+  const [session] = collisionCorrelate([row], { hostPid: HOST_PID });
+  assert.equal(session.state, 'active');
+  assert.equal(session.activity, 'executing');
+  assert.equal(session.pid, CHAT_PID);
+  // The live side's title wins, and both files show up in evidence.
+  assert.equal(session.title, '桌面窗口标题');
+  assert.equal(session.titleSource, 'global-state');
+  assert.ok(session.evidence.includes(`file:${row.tailSignals.cli.filePath}`));
+  assert.ok(session.evidence.includes(`file:${row.tailSignals.desktop.filePath}`));
+  assert.ok(session.evidence.includes(`chat-process pid ${CHAT_PID} alive`));
+  // Board-visible: active rows always render.
+  assert.equal(session.isNoise, false);
+});
+
+test('collision: live host + stale CLI rollout → host-backed idle (the reported bug)', () => {
+  const row = mergedRow('c2', {
+    cliMtime: Date.now() - 20 * 60_000, // newer than the desktop side yet stale
+    chatPids: [],
+    cliTitle: 'stale rollout title',
+    desktopTitle: '桌面线程',
+  });
+  const [session] = collisionCorrelate([row], { hostPid: HOST_PID });
+  // Before the fix the fresher CLI side won winner-take-all and the row
+  // became a pidless idle → hidden while the desktop window was open.
+  assert.equal(session.state, 'idle');
+  assert.equal(session.pid, HOST_PID);
+  assert.equal(session.title, '桌面线程');
+  assert.ok(session.evidence.includes(`desktop-host:app-server pid ${HOST_PID}`));
+});
+
+test('collision: live CLI pid + dead desktop side → CLI rules win', () => {
+  const row = mergedRow('c3', {
+    cliMtime: Date.now() - 60_000,
+    chatPids: [55555], // dead in ps-sample
+    cliTitle: 'cli 会话标题',
+    desktopTitle: '旧桌面线程',
+    cliTail: { generating: true },
+  });
+  const associations = new Map([
+    [associationKey('codex', 'c3'), { pid: 4301, via: 'cwd' }],
+  ]);
+  const [session] = collisionCorrelate([row], { associations }); // no host pid
+  assert.equal(session.state, 'active');
+  assert.equal(session.activity, 'thinking');
+  assert.equal(session.pid, 4301);
+  // CLI is the live side → its title wins.
+  assert.equal(session.title, 'cli 会话标题');
+  assert.equal(session.titleSource, 'session-index');
+  assert.ok(session.evidence.includes('pid:4301 via cwd'));
+  assert.ok(session.evidence.includes('desktop-host:app-server not running'));
+});
+
+test('collision: both sides stale → CLI-side stale outcome (idle pidless → hidden)', () => {
+  const row = mergedRow('c4', {
+    cliMtime: Date.now() - 20 * 60_000, // outside the done window
+    chatPids: [55555],
+    cliTitle: 'rollout 标题',
+    desktopTitle: '桌面标题',
+  });
+  const [session] = collisionCorrelate([row], {}); // no host, no association
+  assert.equal(session.state, 'idle');
+  assert.equal(session.pid, undefined);
+  // Recency tie-break: the rollout is fresher (no chat-process updates).
+  assert.equal(session.title, 'rollout 标题');
+  assert.ok(session.evidence.includes(`chat-process pid 55555 alive`) === false);
+
+  // Fresher desktop side (recent chat update) wins the title tie-break.
+  const desktopFresher = mergedRow('c5', {
+    cliMtime: Date.now() - 20 * 60_000,
+    lastChatUpdateAtMs: Date.now() - 5 * 60_000,
+    cliTitle: 'rollout 标题',
+    desktopTitle: '桌面标题',
+  });
+  const [session5] = collisionCorrelate([desktopFresher], {});
+  assert.equal(session5.title, '桌面标题');
+  assert.equal(session5.titleSource, 'global-state');
+  assert.equal(session5.lastActiveAt, desktopFresher.tailSignals.desktop.lastChatUpdateAtMs);
 });
 
 test('correlate desktop: untitled non-active threads fold into noise; active or titled stay visible', () => {
@@ -354,9 +513,8 @@ test('ObserveService: desktop threads publish; CLI rollout ids never duplicate a
   const codexIds = snap.sessions
     .filter((s) => s.clientKind === 'codex')
     .map((s) => s.nativeSessionId);
-  // a2/a3 carry global-state descriptions AND CLI rollouts; their desktop
-  // side has no chat-process updates, so the CLI row wins the recency dedup
-  // and no id ever appears twice.
+  // a2/a3 carry global-state descriptions AND CLI rollouts; each collision
+  // merges into ONE row (codex-merged), so no id ever appears twice.
   assert.equal(new Set(codexIds).size, codexIds.length);
 
   const byId = new Map(snap.sessions.map((s) => [s.nativeSessionId, s]));
@@ -365,11 +523,15 @@ test('ObserveService: desktop threads publish; CLI rollout ids never duplicate a
   assert.equal(byId.get(DESK_IDLE).state, 'idle');
   assert.equal(byId.get(DESK_IDLE).pid, HOST_PID);
 
-  // The CLI row for the same described id keeps its rollout evidence and
-  // never claims the desktop host pid.
+  // The colliding a3 row keeps its rollout evidence as the anchor AND gains
+  // the live desktop host: host-backed idle, visible while ChatGPT.app runs
+  // (the old winner-take-all dropped the host pid behind the fresher
+  // rollout and the board hid the row).
   const cliRow = byId.get(CLI_WITH_DESCRIPTION);
   assert.match(cliRow.evidence[0], /rollout-.*\.jsonl$/);
-  assert.equal(cliRow.pid, undefined);
+  assert.equal(cliRow.state, 'idle');
+  assert.equal(cliRow.pid, HOST_PID);
+  assert.ok(cliRow.evidence.includes(`desktop-host:app-server pid ${HOST_PID}`));
 });
 
 test('ObserveService: self-excluded host pid drops host backing (own adapter children stay hidden)', async () => {
