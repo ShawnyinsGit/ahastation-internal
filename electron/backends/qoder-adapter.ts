@@ -381,7 +381,9 @@ export function resolveQoderRuntime(
     if (!candidate || !existsSync(candidate)) continue;
     try {
       accessSync(candidate, fsConstants.X_OK);
-      return realpathSync(candidate);
+      // realpathSync.native also expands Windows 8.3 short names (RUNNER~1),
+      // so the SDK always sees the same canonical executable path.
+      return realpathSync.native(candidate);
     } catch { /* continue */ }
   }
   return null;
