@@ -4,7 +4,7 @@
 // plausible size. Designed to tolerate flaky CN networks.
 
 import { spawn, spawnSync } from 'node:child_process';
-import { createWriteStream, existsSync, mkdirSync, statSync, copyFileSync, chmodSync, readdirSync, renameSync, unlinkSync } from 'node:fs';
+import { createWriteStream, existsSync, mkdirSync, statSync, copyFileSync, chmodSync, readdirSync, renameSync, rmSync, unlinkSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -16,6 +16,33 @@ import {
   whisperArchiveFor,
   whisperBinaryName,
 } from './lib/whisper-platforms.mjs';
+
+// Windows often keeps the curl write handle open briefly after exit (AV /
+// Defender scan, delayed close). renameSync then throws EBUSY. Prefer rename,
+// then retry, then fall back to copy+unlink.
+async function promoteTempFile(tmp, dest) {
+  if (existsSync(dest)) {
+    try { unlinkSync(dest); } catch { /* ignore — rename/copy will surface real errors */ }
+  }
+  let lastErr;
+  for (let attempt = 0; attempt < 8; attempt++) {
+    try {
+      renameSync(tmp, dest);
+      return;
+    } catch (e) {
+      lastErr = e;
+      const code = e && e.code;
+      if (code !== 'EBUSY' && code !== 'EPERM' && code !== 'EACCES') throw e;
+      await sleep(100 * (attempt + 1));
+    }
+  }
+  try {
+    copyFileSync(tmp, dest);
+    try { unlinkSync(tmp); } catch { /* leave .part if still locked; dest is usable */ }
+  } catch (e) {
+    throw lastErr || e;
+  }
+}
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(here, '..');
@@ -77,16 +104,11 @@ async function downloadWithCurl(url, dest) {
       ],
       { stdio: ['ignore', 'inherit', 'inherit'] },
     );
-    p.on('exit', (code) => {
+    p.on('close', (code) => {
+      // Prefer `close` over `exit` so stdio file descriptors are released
+      // before we try to promote the .part file (matters on Windows).
       if (code === 0) {
-        try {
-          // rename .part → final (cross-platform, no shell needed)
-          if (existsSync(dest)) unlinkSync(dest);
-          renameSync(tmp, dest);
-          resolve();
-        } catch (e) {
-          reject(e);
-        }
+        promoteTempFile(tmp, dest).then(resolve, reject);
       } else {
         reject(new Error(`curl exited ${code} for ${url}`));
       }
@@ -269,6 +291,28 @@ function relinkAndSign(destDir, binaryNames) {
   log('ad-hoc re-signed after relocation');
 }
 
+/** Official win32 zip extracts into Release/; lift binaries + DLLs to dir. */
+function flattenNestedBinDir(dir, cliBin) {
+  if (existsSync(cliBin)) return;
+  const cliName = cliBin.split(/[/\\]/).pop();
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const nested = join(dir, entry.name);
+    if (!existsSync(join(nested, cliName))) continue;
+    log(`flattening nested archive dir ${entry.name}/ → ${dir}`);
+    for (const file of readdirSync(nested)) {
+      const from = join(nested, file);
+      const to = join(dir, file);
+      if (existsSync(to)) {
+        try { unlinkSync(to); } catch { /* ignore */ }
+      }
+      renameSync(from, to);
+    }
+    try { rmSync(nested, { recursive: true, force: true }); } catch { /* ignore */ }
+    return;
+  }
+}
+
 async function ensureBinary() {
   const targets = ['whisper-cli', 'whisper-server'];
   const copied = [];
@@ -313,6 +357,9 @@ async function ensureBinary() {
       if (r.status !== 0) throw new Error(`tar failed: ${r.stderr}`);
     }
     try { unlinkSync(archive); } catch { /* ignore */ }
+    // Official Windows zip nests under Release/; promote so resolveWhisperPaths
+    // finds whisper-cli.exe next to the model.
+    flattenNestedBinDir(outDir, cliBin);
     for (const name of targets) {
       const bin = join(outDir, whisperBinaryName(name, platform));
       if (existsSync(bin)) chmodSync(bin, 0o755);

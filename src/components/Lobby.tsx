@@ -368,7 +368,7 @@ export function Lobby({ lastError }: LobbyProps) {
                       autoComplete="off"
                       spellCheck={false}
                     />
-                    {currentBackend.models && currentBackend.models.length > 0 ? (
+                    {currentBackend.id !== 'codex' && currentBackend.models && currentBackend.models.length > 0 ? (
                       <select
                         className="join-auth-input join-auth-input-full lobby-backend-select"
                         value={modelInput || ''}
@@ -383,20 +383,32 @@ export function Lobby({ lastError }: LobbyProps) {
                         ))}
                       </select>
                     ) : (
-                      <input
-                        type="text"
-                        className="join-auth-input join-auth-input-full"
-                        placeholder={`Model (optional)${currentBackend.defaultModel ? ` — ${currentBackend.defaultModel}` : ''}`}
-                        value={modelInput}
-                        onChange={(e) => setModelInput(e.target.value)}
-                        onBlur={(e) => {
-                          if (e.target.value !== (currentBackend.model ?? '')) {
-                            void saveModel(e.target.value);
-                          }
-                        }}
-                        autoComplete="off"
-                        spellCheck={false}
-                      />
+                      <>
+                        <input
+                          type="text"
+                          className="join-auth-input join-auth-input-full"
+                          list={currentBackend.models && currentBackend.models.length > 0
+                            ? `${currentBackend.id}-lobby-model-suggestions`
+                            : undefined}
+                          placeholder={`Model (optional)${currentBackend.defaultModel ? ` — ${currentBackend.defaultModel}` : ''}`}
+                          value={modelInput}
+                          onChange={(e) => setModelInput(e.target.value)}
+                          onBlur={(e) => {
+                            if (e.target.value !== (currentBackend.model ?? '')) {
+                              void saveModel(e.target.value);
+                            }
+                          }}
+                          autoComplete="off"
+                          spellCheck={false}
+                        />
+                        {currentBackend.models && currentBackend.models.length > 0 && (
+                          <datalist id={`${currentBackend.id}-lobby-model-suggestions`}>
+                            {currentBackend.models.map((m) => (
+                              <option key={m} value={m} />
+                            ))}
+                          </datalist>
+                        )}
+                      </>
                     )}
                     {apiKeyStatus === 'error' && (
                       <div className="join-auth-error">Failed to save settings.</div>

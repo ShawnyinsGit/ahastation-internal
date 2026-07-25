@@ -3,6 +3,7 @@ import type {
   AgentSource,
   AttachmentMeta,
   AutoApproveScope,
+  CommandRun,
   CoordinatorBriefing,
   MeetingPlan,
   PlanMeetingTaskInput,
@@ -25,9 +26,15 @@ import type {
 } from '../types';
 import { MEETING_TOOL_NAMES } from '../../electron/meeting-tools';
 import { redactSecrets } from '../../electron/format-error';
+import {
+  columnForTask,
+  projectNameFromCwd,
+  WORKER_STATUS_LABEL,
+  type TaskColumnId,
+} from './task-columns';
 import { extractText, extractToolUses, uid } from './sdk-message';
 import { isSpeechActive, type SpeakHandle } from './speech-session';
-import { reduceWorkerEvent } from './worker-event-reducer';
+import { reduceWorkerEvent, upsertCommandLog } from './worker-event-reducer';
 import {
   hydrateTaskProjection,
   reduceTaskEvent,
@@ -142,6 +149,8 @@ export interface WorkerState {
   eventSeq?: number;
   workReport?: WorkReport;
   workerEvents?: WorkerEventV2[];
+  /** High-fidelity Bash/command execution log for the CLI view. */
+  commandLog: CommandRun[];
 }
 
 /** Snapshot of one worker's delivered artifacts, displayed in the ScreenStage
@@ -250,6 +259,42 @@ export interface LobbyData {
   recent: RecentCwdMeta[];
 }
 
+/** One plan node, flattened out of its slot and tagged with the project it
+ *  belongs to. The cross-project board consumes these instead of reaching into
+ *  slot state, so it stays independent of how many Orchestrators are alive. */
+export interface AggregatedTask {
+  /** Unique across projects — plan node ids are only unique within a slot. */
+  key: string;
+  sessionId: string;
+  cwd: string;
+  projectName: string;
+  taskId: string;
+  title: string;
+  status: WorkerStatus;
+  column: TaskColumnId;
+  statusLabel: string;
+  backendId: string | null;
+  deps: string[];
+  attempt: number;
+  /** Why this task is parked on the user, or null when nothing is blocking. */
+  blockedReason: string | null;
+}
+
+/** A plan the coordinator proposed that the user hasn't approved yet. Surfaced
+ *  on the board so the 待批准 column reflects meeting-level approvals too, not
+ *  just per-task permission prompts. */
+export interface PendingPlanSummary {
+  sessionId: string;
+  cwd: string;
+  projectName: string;
+  taskCount: number;
+}
+
+export interface CrossProjectTasks {
+  tasks: AggregatedTask[];
+  pendingPlans: PendingPlanSummary[];
+}
+
 interface SlotInternal {
   id: string;                              // sessionId for live slots; `placeholder:<cwd>` for restored-but-not-yet-spawned
   cwd: string;
@@ -332,6 +377,7 @@ function createTalkerState(): WorkerState {
     startedAt: null,
     taskHistory: [],
     hostId: 'default',
+    commandLog: [],
   };
 }
 
@@ -410,6 +456,10 @@ class MeetingStore {
   private cachedActiveCwdFresh = false;
   /** Lobby projection cache. Invalidated whenever tabs or recents change. */
   private cachedLobbyData: LobbyData | null = null;
+  /** Cross-project task board projection. Shares the tab cache's invalidation
+   *  because notify() nudges tab listeners for every slot, active or not —
+   *  which is exactly the granularity the board needs. */
+  private cachedCrossProjectTasks: CrossProjectTasks | null = null;
 
   private listeners = new Set<Listener>();
   private tabListeners = new Set<Listener>();
@@ -614,6 +664,7 @@ class MeetingStore {
     this.cachedTabs = null;
     this.cachedActiveCwdFresh = false;
     this.cachedLobbyData = null;
+    this.cachedCrossProjectTasks = null;
   }
 
   /** Returns whichever sessionId we should pass to main for active-tab calls.
@@ -632,6 +683,62 @@ class MeetingStore {
       recent: this.recentCwds,
     };
     return this.cachedLobbyData;
+  };
+
+  /** Flatten every live slot's plan into one cross-project task list. This is
+   *  the seam that lets the UI present a single meeting while execution stays
+   *  one-Orchestrator-per-cwd: the board reads this, never the slot map.
+   *  Placeholder slots are skipped — they have no plan until resumed. */
+  getCrossProjectTasks = (): CrossProjectTasks => {
+    if (this.cachedCrossProjectTasks) return this.cachedCrossProjectTasks;
+
+    const tasks: AggregatedTask[] = [];
+    const pendingPlans: PendingPlanSummary[] = [];
+
+    for (const slot of this.slots.values()) {
+      if (slot.placeholder) continue;
+      const projectName = projectNameFromCwd(slot.cwd);
+
+      if (slot.state.pendingPlan && slot.state.pendingPlan.length > 0) {
+        pendingPlans.push({
+          sessionId: slot.id,
+          cwd: slot.cwd,
+          projectName,
+          taskCount: slot.state.pendingPlan.length,
+        });
+      }
+
+      for (const node of slot.state.plan?.nodes ?? []) {
+        const worker = slot.state.workers.get(node.id);
+        const blockedReason = worker?.pendingPermission
+          ? '等待权限'
+          : node.workspaceDiagnostic
+            ? node.workspaceDiagnostic.message
+            : node.status === 'budget-paused'
+              ? '预算耗尽，需要续额'
+              : node.status === 'integration-conflict'
+                ? '集成冲突待处理'
+                : null;
+        tasks.push({
+          key: `${slot.id}\u0000${node.id}`,
+          sessionId: slot.id,
+          cwd: slot.cwd,
+          projectName,
+          taskId: node.id,
+          title: node.title,
+          status: node.status,
+          column: columnForTask(node.status, Boolean(worker?.pendingPermission || node.workspaceDiagnostic)),
+          statusLabel: WORKER_STATUS_LABEL[node.status],
+          backendId: worker?.backendId ?? node.executorBackendId ?? null,
+          deps: node.deps,
+          attempt: worker?.attempt ?? 1,
+          blockedReason,
+        });
+      }
+    }
+
+    this.cachedCrossProjectTasks = { tasks, pendingPlans };
+    return this.cachedCrossProjectTasks;
   };
 
   setSpeakCallback(cb: SpeakHandle | null) {
@@ -1215,6 +1322,7 @@ class MeetingStore {
               lastText: '',
               activity: isReassign ? [] : existing.activity,
               transcript: isReassign ? [] : existing.transcript,
+              commandLog: isReassign ? [] : (existing.commandLog ?? []),
               taskHistory: archivedHistory,
               hostId,
             }
@@ -1238,6 +1346,7 @@ class MeetingStore {
               startedAt: now,
               taskHistory: [],
               hostId,
+              commandLog: [],
             };
         workers.set(e.workerId, next);
 
@@ -1693,6 +1802,7 @@ class MeetingStore {
       startedAt: null,
       taskHistory: [],
       hostId: hostId ?? 'default',
+      commandLog: [],
     };
   }
 
@@ -1888,10 +1998,26 @@ class MeetingStore {
             const input = typeof last.input === 'object' && last.input !== null
               ? JSON.stringify(last.input).slice(0, 80)
               : String(last.input ?? '');
+            const now = Date.now();
+            let commandLog = next.commandLog ?? [];
+            for (const t of visible) {
+              if (t.name !== 'Bash' && t.name !== 'bash') continue;
+              const command = typeof t.input?.command === 'string'
+                ? t.input.command
+                : undefined;
+              commandLog = upsertCommandLog(commandLog, {
+                callId: typeof t.id === 'string' ? t.id : undefined,
+                command,
+                phase: 'started',
+                timestamp: now,
+                source,
+              });
+            }
             next = {
               ...next,
               currentTool: last.name,
               currentToolInput: input,
+              commandLog,
               activity: appendCapped(
                 next.activity,
                 visible.map((t) => ({
@@ -1899,7 +2025,7 @@ class MeetingStore {
                   kind: 'tool-call' as const,
                   title: `Tool: ${t.name}`,
                   detail: JSON.stringify(t.input).slice(0, 200),
-                  ts: Date.now(),
+                  ts: now,
                   source,
                 })),
                 MAX_ACTIVITY,
@@ -1918,26 +2044,58 @@ class MeetingStore {
       const content = msg?.message?.content;
       if (!Array.isArray(content)) return;
       const results = content.filter((b: any) => b?.type === 'tool_result');
-      if (results.length === 0 || source === 'talker') return;
-      this.updateWorker(slot, source, (w) => ({
-        ...w,
-        currentTool: null,
-        currentToolInput: null,
-        activity: appendCapped(
-          w.activity,
-          results.map((r: any) => ({
-            id: uid(),
-            kind: 'tool-result' as const,
-            title: `Tool result${r.is_error ? ' (error)' : ''}`,
-            detail: typeof r.content === 'string'
-              ? r.content.slice(0, 300)
-              : JSON.stringify(r.content).slice(0, 300),
-            ts: Date.now(),
-            source,
-          })),
-          MAX_ACTIVITY,
-        ),
-      }));
+      if (results.length === 0) return;
+      // Talkers also project Bash results into commandLog so the CLI view
+      // covers host/coordinator shells, not only Workers.
+      this.updateWorker(slot, source, (w) => {
+        const now = Date.now();
+        let commandLog = w.commandLog ?? [];
+        for (const r of results) {
+          const callId = typeof r.tool_use_id === 'string' ? r.tool_use_id : undefined;
+          const matched = callId
+            ? commandLog.find((entry) => entry.id === callId)
+            : undefined;
+          // Only complete Bash entries (or anonymous results when we have no id).
+          if (matched || !callId) {
+            const rawOutput = typeof r.content === 'string'
+              ? r.content
+              : r.content != null
+                ? JSON.stringify(r.content)
+                : undefined;
+            commandLog = upsertCommandLog(commandLog, {
+              callId,
+              command: matched?.command,
+              phase: r.is_error ? 'failed' : 'completed',
+              output: rawOutput,
+              timestamp: now,
+              source,
+            });
+          }
+        }
+        if (source === 'talker') {
+          return { ...w, currentTool: null, currentToolInput: null, commandLog };
+        }
+        return {
+          ...w,
+          currentTool: null,
+          currentToolInput: null,
+          commandLog,
+          activity: appendCapped(
+            w.activity,
+            results.map((r: any) => ({
+              id: uid(),
+              kind: 'tool-result' as const,
+              title: `Tool result${r.is_error ? ' (error)' : ''}`,
+              detail: typeof r.content === 'string'
+                ? r.content.slice(0, 300)
+                : JSON.stringify(r.content).slice(0, 300),
+              ts: now,
+              source,
+            })),
+            MAX_ACTIVITY,
+          ),
+        };
+      }, hostId);
       return;
     }
     if (type === 'result') {

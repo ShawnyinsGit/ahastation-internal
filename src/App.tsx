@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useClaude } from './hooks/useClaude';
 import { useWorkers } from './hooks/useWorkers';
 import { useTabs } from './hooks/useTabs';
+import { useCrossProjectTasks } from './hooks/useCrossProjectTasks';
 import { useScreenShare } from './hooks/useScreenShare';
 import { useBrowser } from './hooks/useBrowser';
 import { useStageWindows } from './hooks/useStageWindows';
@@ -16,9 +17,11 @@ import { useDragAndDrop } from './hooks/useDragAndDrop';
 import { useHandheldMode } from './lib/handheld-mode';
 import { planDisplayMigration } from './lib/display-migration';
 import { meetingStore } from './lib/meeting-store';
+import { browserStore } from './lib/browser-store';
 import { Lobby } from './components/Lobby';
 import { TabStrip } from './components/TabStrip';
-import { MeetingHeader } from './components/MeetingHeader';
+import { MeetingHeader, type MeetingView } from './components/MeetingHeader';
+import { TasksView } from './components/TasksView';
 import { ParticipantTile } from './components/ParticipantTile';
 import { ScreenStage } from './components/ScreenStage';
 import { SourcePicker } from './components/SourcePicker';
@@ -36,6 +39,7 @@ export function App() {
   const { state, restartSession, sendText, sendImage, sendAttachments, publishDroppedFiles, onDroppedFiles, resolvePermission, interrupt, setSpeakCallback } = useClaude();
   const workers = useWorkers();
   const tabs = useTabs();
+  const crossProjectTasks = useCrossProjectTasks();
   const { state: share, start: startShare, startSystemPicker, stop: stopShare, captureFrame, videoRef } = useScreenShare();
   const browser = useBrowser();
   const stageWindows = useStageWindows();
@@ -50,6 +54,10 @@ export function App() {
   const [muted, setMuted] = useState(false);
   const [autoApproveScope, setAutoApproveScope] = useState<AutoApproveScope>('off');
   const [multiAgent, setMultiAgent] = useState(false);
+  const [view, setView] = useState<MeetingView>('meeting');
+  /** Bumped every time the task board asks the meeting view to open a task, so
+   *  re-clicking the same card after closing the inspector still reopens it. */
+  const [taskFocus, setTaskFocus] = useState<{ taskId: string; seq: number } | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [aiSpeaking, setAiSpeaking] = useState(false);
   const [viewingFile, setViewingFile] = useState<{ relativePath: string } | null>(null);
@@ -65,6 +73,37 @@ export function App() {
     if (!activeTab || activeTab.placeholder) return;
     void window.vibeMeet.setOrchestrationMode(activeTab.id, multiAgent);
   }, [activeTab?.id, activeTab?.placeholder, multiAgent]);
+
+  const attentionCount = useMemo(
+    () => crossProjectTasks.tasks.filter((t) => t.column === 'attention').length
+      + crossProjectTasks.pendingPlans.length,
+    [crossProjectTasks],
+  );
+
+  // The embedded browser is a native WebContentsView painted above the
+  // renderer, so no amount of CSS can tuck it behind the task board. Drop it
+  // while the board is up and put it back the way we found it on return.
+  const browserWasVisible = useRef(false);
+  useEffect(() => {
+    if (view === 'tasks') {
+      browserWasVisible.current = browserStore.getSnapshot().visible;
+      if (browserWasVisible.current) void browserStore.setVisible(false);
+    } else if (browserWasVisible.current) {
+      browserWasVisible.current = false;
+      void browserStore.setVisible(true);
+    }
+  }, [view]);
+
+  const handleOpenTaskFromBoard = useCallback((sessionId: string, taskId: string) => {
+    void meetingStore.setActive(sessionId);
+    setTaskFocus((prev) => ({ taskId, seq: (prev?.seq ?? 0) + 1 }));
+    setView('meeting');
+  }, []);
+
+  const handleOpenPlanFromBoard = useCallback((sessionId: string) => {
+    void meetingStore.setActive(sessionId);
+    setView('meeting');
+  }, []);
 
   // Load available backends for the participants tab
   useEffect(() => {
@@ -518,7 +557,7 @@ ${trimmed}`
 
   return (
     <div
-      className={`mtg${dragDrop.dropActive ? ' mtg-dropping' : ''}`}
+      className={`mtg${dragDrop.dropActive ? ' mtg-dropping' : ''}${view === 'tasks' ? ' is-tasks-view' : ''}`}
       onDragEnter={dragDrop.onDragEnter}
       onDragOver={dragDrop.onDragOver}
       onDragLeave={dragDrop.onDragLeave}
@@ -532,6 +571,9 @@ ${trimmed}`
         onChangeAutoApproveScope={setAutoApproveScope}
         multiAgent={multiAgent}
         onToggleMultiAgent={() => setMultiAgent((v) => !v)}
+        view={view}
+        onChangeView={setView}
+        attentionCount={attentionCount}
         settingsSlot={
           <SettingsMenu badge={voiceLock.enrollmentActive} />
         }
@@ -586,6 +628,7 @@ ${trimmed}`
             finalMeetingDelivery={workers.finalMeetingDelivery}
             finalMeetingDecision={workers.finalMeetingDecision}
             sessionId={activeTab?.id ?? null}
+            focusTask={taskFocus}
             onAcceptDelivery={() => workers.acceptDelivery()}
             onReviseDelivery={(fb: string) => workers.reviseDelivery(fb)}
             onAcceptFinalMeetingDelivery={() => workers.acceptFinalMeetingDelivery()}
@@ -648,6 +691,17 @@ ${trimmed}`
           forceParticipantsTab={openParticipantsTab}
         />
       </main>
+
+      {/* The board is a sibling rather than a replacement: unmounting
+          .mtg-main would tear down the stage's browser viewport ref and the
+          inspector's local state every time the user glances at their tasks. */}
+      {view === 'tasks' && (
+        <TasksView
+          data={crossProjectTasks}
+          onOpenTask={handleOpenTaskFromBoard}
+          onOpenPlan={handleOpenPlanFromBoard}
+        />
+      )}
 
       <BottomToolbar
         muted={muted}

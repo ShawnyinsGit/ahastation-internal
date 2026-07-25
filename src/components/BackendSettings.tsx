@@ -690,7 +690,8 @@ function BackendCard({
 
           <div className="backend-field">
             <label className="backend-field-label">Model</label>
-            {b.models && b.models.length > 0 ? (
+            {/* Codex keeps free-text so third-party model IDs work; models are suggestions. */}
+            {b.id !== 'codex' && b.models && b.models.length > 0 ? (
               <select
                 className="backend-field-select"
                 defaultValue={b.model ?? b.defaultModel ?? ''}
@@ -703,22 +704,32 @@ function BackendCard({
                 ))}
               </select>
             ) : (
-              <input
-                className="backend-field-input"
-                type="text"
-                defaultValue={b.model ?? ''}
-                onBlur={(e) => {
-                  if (e.target.value !== (b.model ?? '')) {
-                    onSaveModel(e.target.value);
+              <>
+                <input
+                  className="backend-field-input"
+                  type="text"
+                  list={b.models && b.models.length > 0 ? `${b.id}-model-suggestions` : undefined}
+                  defaultValue={b.model ?? ''}
+                  onBlur={(e) => {
+                    if (e.target.value !== (b.model ?? '')) {
+                      onSaveModel(e.target.value);
+                    }
+                  }}
+                  placeholder={
+                    b.id === 'codex'
+                      ? '留空则使用 Codex CLI 默认模型；可填 gpt-5.4 / glm-5.2 等'
+                      : (b.defaultModel ?? '默认模型')
                   }
-                }}
-                placeholder={
-                  b.id === 'codex'
-                    ? '留空则使用 Codex CLI 默认模型'
-                    : (b.defaultModel ?? '默认模型')
-                }
-                disabled={saving}
-              />
+                  disabled={saving}
+                />
+                {b.models && b.models.length > 0 && (
+                  <datalist id={`${b.id}-model-suggestions`}>
+                    {b.models.map((m) => (
+                      <option key={m} value={m} />
+                    ))}
+                  </datalist>
+                )}
+              </>
             )}
           </div>
 

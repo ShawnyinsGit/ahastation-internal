@@ -30,6 +30,7 @@ import { runTerminalLogin } from './terminal-login.js';
 import { isolatedSubprocessEnv } from './backend-environment.js';
 import {
   extractWorkReportFrame,
+  truncateToolOutput,
   type WorkerAdapterSignal,
 } from '../worker-protocol.js';
 import { dirname, join } from 'node:path';
@@ -144,19 +145,36 @@ export function mapClaudeMessageToWorkerSignals(
       const name = typeof block.name === 'string' && block.name.trim()
         ? block.name.trim()
         : 'unknown';
-      if (typeof block.id === 'string') toolNames.set(block.id, name);
-      signals.push({ kind: 'tool', toolName: name, phase: 'started' });
+      const callId = typeof block.id === 'string' && block.id.trim()
+        ? block.id.trim().slice(0, 200)
+        : undefined;
+      if (callId) toolNames.set(callId, name);
+      const input = (block.input && typeof block.input === 'object')
+        ? block.input as Record<string, unknown>
+        : null;
+      const command = typeof input?.command === 'string' ? input.command : undefined;
+      signals.push({
+        kind: 'tool',
+        toolName: name,
+        phase: 'started',
+        ...(callId ? { callId } : {}),
+        ...(command ? { detail: command.slice(0, 4_000) } : {}),
+      });
     } else if (block.type === 'tool_result') {
-      const id = typeof block.tool_use_id === 'string' ? block.tool_use_id : '';
+      const id = typeof block.tool_use_id === 'string' ? block.tool_use_id.trim().slice(0, 200) : '';
       const name = toolNames.get(id) ?? 'unknown';
       const failed = block.is_error === true;
+      const rawOutput = typeof block.content === 'string'
+        ? block.content
+        : block.content != null
+          ? JSON.stringify(block.content)
+          : undefined;
       signals.push({
         kind: 'tool',
         toolName: name,
         phase: failed ? 'failed' : 'completed',
-        ...(typeof block.content === 'string'
-          ? { detail: block.content.slice(0, 4_000) }
-          : {}),
+        ...(id ? { callId: id } : {}),
+        ...(rawOutput !== undefined ? { output: truncateToolOutput(rawOutput) } : {}),
       });
       if (id) toolNames.delete(id);
     }
@@ -357,6 +375,7 @@ const CLAUDE_CODE_CAPABILITIES: BackendCapabilities = {
     'claude-sonnet-4-20250514',
     'claude-haiku-4-5-20251001',
     'claude-opus-4-20250514',
+    'glm-5.2',
   ],
   npmPackage: '@anthropic-ai/claude-agent-sdk',
   installHint: 'Bundled with AhaStation',

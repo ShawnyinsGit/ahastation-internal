@@ -52,6 +52,7 @@ import { getBackendAuth } from '../store.js';
 import { normalizeBackendBaseUrl } from '../normalize-base-url.js';
 import {
   extractWorkReportFrame,
+  truncateToolOutput,
   type WorkerAdapterSignal,
 } from '../worker-protocol.js';
 import {
@@ -81,6 +82,8 @@ const CODEX_CAPABILITIES: BackendCapabilities = {
   skills: false,
   interrupt: true,
   defaultModel: 'gpt-5.4',
+  // Suggestions for the settings UI; free-text still accepts any model ID.
+  models: ['gpt-5.4', 'gpt-5.4-mini', 'gpt-5.2', 'glm-5.2'],
   npmPackage: '@openai/codex',
   installHint: 'npm install -g @openai/codex',
 };
@@ -123,12 +126,31 @@ export function mapCodexItemToWorkerSignals(
   let toolName = '';
   let failed = false;
   let detail: string | undefined;
+  let callId: string | undefined;
+  let output: string | undefined;
+  let exitCode: number | undefined;
+  if (typeof item.id === 'string' && item.id.trim()) callId = item.id.trim().slice(0, 200);
   if (type === 'commandExecution' || type === 'command_execution') {
     toolName = 'Bash';
     detail = typeof item.command === 'string' ? item.command.slice(0, 4_000) : undefined;
+    const rawExit = typeof item.exitCode === 'number'
+      ? item.exitCode
+      : typeof item.exit_code === 'number'
+        ? item.exit_code
+        : undefined;
+    exitCode = rawExit;
     failed = item.status === 'failed'
-      || (typeof item.exitCode === 'number' && item.exitCode !== 0)
-      || (typeof item.exit_code === 'number' && item.exit_code !== 0);
+      || (typeof rawExit === 'number' && rawExit !== 0);
+    const rawOutput = typeof item.aggregatedOutput === 'string'
+      ? item.aggregatedOutput
+      : typeof item.aggregated_output === 'string'
+        ? item.aggregated_output
+        : undefined;
+    if (typeof rawOutput === 'string') {
+      output = truncateToolOutput(rawOutput);
+    } else if (failed && phase !== 'started') {
+      output = `[${String(item.status ?? 'failed')}; exit ${rawExit ?? 'unknown'}]`;
+    }
   } else if (type === 'fileChange' || type === 'file_change') {
     toolName = 'Write';
     const changes = Array.isArray(item.changes) ? item.changes : [];
@@ -156,6 +178,9 @@ export function mapCodexItemToWorkerSignals(
     toolName,
     phase: failed ? 'failed' : phase,
     ...(detail ? { detail } : {}),
+    ...(callId ? { callId } : {}),
+    ...(output !== undefined ? { output } : {}),
+    ...(exitCode !== undefined ? { exitCode } : {}),
   }];
 }
 

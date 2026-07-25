@@ -12,3 +12,6 @@ audit/
 screenshot/
 deliveries/
 .vibe-materials/
+.vibe-assets/
+.vibe-attachments/
+.vibe-docs/

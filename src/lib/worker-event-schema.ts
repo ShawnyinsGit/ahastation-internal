@@ -30,6 +30,10 @@ const signalSchema = z.discriminatedUnion('kind', [
     toolName: z.string().trim().min(1).max(500),
     phase: z.enum(['started', 'completed', 'failed']),
     detail: z.string().max(4_000).optional(),
+    callId: z.string().trim().min(1).max(200).optional(),
+    output: z.string().max(64_000).optional(),
+    exitCode: z.number().int().optional(),
+    durationMs: z.number().int().nonnegative().optional(),
   }).strict(),
   z.object({ kind: z.literal('delivery'), report: reportSchema }).strict(),
   z.object({

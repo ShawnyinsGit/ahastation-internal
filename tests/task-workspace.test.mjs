@@ -77,6 +77,18 @@ test('non-git write paths cannot escape the workspace', async (t) => {
   }), /escapes workspace/);
 });
 
+test('canPrepare returns false for escaping write paths instead of throwing', async (t) => {
+  const cwd = await mkdtemp(join(tmpdir(), 'ahastation-nongit-'));
+  t.after(() => rm(cwd, { recursive: true, force: true }));
+  const manager = new TaskWorkspaceManager('meeting', cwd);
+  assert.equal(manager.canPrepare('escape', {
+    mode: 'shared-locked',
+    writePaths: ['../outside'],
+  }), false);
+  assert.match(manager.validateWritePaths(['../outside']), /escapes workspace/);
+  assert.equal(manager.validateWritePaths(['output/report.md']), null);
+});
+
 test('clean git tasks receive isolated worktrees', async (t) => {
   const cwd = await mkdtemp(join(tmpdir(), 'ahastation-git-'));
   const meetingId = `meeting-${Date.now()}-${Math.random().toString(16).slice(2)}`;

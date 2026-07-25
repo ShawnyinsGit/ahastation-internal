@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react';
-import { AlertTriangle, Bell, RotateCcw } from 'lucide-react';
+import { AlertTriangle, Bell, RotateCcw, Terminal } from 'lucide-react';
 import type { WorkerState } from '../lib/meeting-store';
-import type { WorkerSpecialty } from '../types';
 import { BackendAvatar } from './BackendAvatar';
 
 interface WorkerCardProps {
@@ -12,6 +11,8 @@ interface WorkerCardProps {
   speaking?: boolean;
   onSelect?: () => void;
   onResolvePermission: (id: string, decision: 'allow' | 'deny') => void;
+  /** Open the high-fidelity CLI execution view for this worker. */
+  onOpenTerminal?: () => void;
   /** Backend icon identifier for per-backend avatar rendering. */
   iconId?: string;
   /** Custom avatar image URL (overrides iconId). */
@@ -84,6 +85,7 @@ export function WorkerCard({
   speaking,
   onSelect,
   onResolvePermission,
+  onOpenTerminal,
   iconId,
   customAvatar,
 }: WorkerCardProps) {
@@ -132,6 +134,17 @@ export function WorkerCard({
       <div className={className} role="group" aria-label={`${worker.title}，${label}`}>
         {/* Role badge — top-right */}
         <div className="tile-role-badge">{roleName}</div>
+        {onOpenTerminal && (
+          <button
+            type="button"
+            className="worker-card-terminal-btn"
+            onClick={(e) => { e.stopPropagation(); onOpenTerminal(); }}
+            title="查看真实 CLI 执行情况"
+            aria-label="打开 CLI 执行视图"
+          >
+            <Terminal size={12} />
+          </button>
+        )}
 
         <button
           type="button"

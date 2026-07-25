@@ -603,10 +603,33 @@ export interface MeetingTaskRecord {
 
 export type WorkerAdapterSignal =
   | { kind: 'progress'; message: string; percent?: number }
-  | { kind: 'tool'; toolName: string; phase: 'started' | 'completed' | 'failed'; detail?: string }
+  | {
+      kind: 'tool';
+      toolName: string;
+      phase: 'started' | 'completed' | 'failed';
+      detail?: string;
+      callId?: string;
+      output?: string;
+      exitCode?: number;
+      durationMs?: number;
+    }
   | { kind: 'delivery'; report: WorkReport }
   | { kind: 'failed'; code: string; message: string; retryable: boolean }
   | { kind: 'ended'; reason: 'completed' | 'interrupted' | 'crashed' };
+
+/** One Bash/command execution projected for the CLI execution view. */
+export interface CommandRun {
+  id: string;
+  command: string;
+  status: 'running' | 'completed' | 'failed';
+  output?: string;
+  exitCode?: number;
+  durationMs?: number;
+  startedAt: number;
+  endedAt?: number;
+  backendId?: string;
+  source?: AgentSource;
+}
 
 export interface WorkerEventV2 {
   schemaVersion: 2;
@@ -1206,6 +1229,8 @@ export interface VibeMeetApi {
   appVersion: () => Promise<string>;
   onUpdateAvailable: (cb: (info: { latest: string; url: string }) => void) => () => void;
   companion: CompanionApi;
+  /** Floating AhaBar window bridge (preload-companion.cjs only). */
+  ahabar?: AhaBarApi;
   ideFiles: {
     list: (path?: string) => Promise<{ ok: true; entries: FileEntry[] } | { ok: false; error: string }>;
     read: (path: string) => Promise<{ ok: true; file: FileContent } | { ok: false; error: string }>;
@@ -1272,13 +1297,48 @@ export interface CompanionState {
 }
 
 export interface CompanionApi {
-  toggle: () => Promise<{ ok: boolean; open?: boolean; error?: string }>;
+  toggle: (opts?: { view?: 'ahabar' | 'companion' }) => Promise<{ ok: boolean; open?: boolean; error?: string }>;
   ttsState: (active: boolean) => void;
   /** Companion-window bridge only (preload-companion.cjs). */
   getState?: () => Promise<{ ok: true; state: CompanionState } | { ok: false; error: string }>;
   onEvent?: (cb: (state: CompanionState) => void) => () => void;
   getPrefs?: () => Promise<{ ok: boolean; soundEnabled?: boolean }>;
   setSound?: (soundEnabled: boolean) => Promise<{ ok: boolean; error?: string }>;
+}
+
+export type ApprovalGesture = 'low' | 'mid' | 'high';
+
+export interface AhaBarPending {
+  id: string;
+  sessionId: string;
+  hostId: string;
+  source: string;
+  toolName: string;
+  target: string;
+  risk: ApprovalGesture;
+  arrivedAt: number;
+}
+
+export interface AhaBarState {
+  sessionId: string | null;
+  cwd: string | null;
+  projectName: string | null;
+  runningCount: number;
+  pending: AhaBarPending[];
+  topPending: AhaBarPending | null;
+  hardwareTakenOver: boolean;
+}
+
+export interface AhaBarApi {
+  getState: () => Promise<{ ok: true; state: AhaBarState } | { ok: false; error: string }>;
+  onEvent: (cb: (state: AhaBarState) => void) => () => void;
+  resolvePermission: (
+    id: string,
+    decision: 'allow' | 'deny',
+  ) => Promise<{ ok: boolean; error?: string }>;
+  focusMain: () => Promise<{ ok: boolean }>;
+  setExpanded: (expanded: boolean) => Promise<{ ok: boolean }>;
+  setGhost: (ghost: boolean) => Promise<{ ok: boolean }>;
 }
 
 export interface TranscriptsApi {

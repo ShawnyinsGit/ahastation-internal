@@ -78,12 +78,22 @@ test('Codex worker items translate to semantic signals and strict WorkReport', a
   } = await import('../dist-electron/backends/codex-adapter.js');
   assert.deepEqual(
     mapCodexItemToWorkerSignals({
+      id: 'cmd-1',
       type: 'commandExecution',
       command: 'npm test',
       status: 'completed',
       exitCode: 0,
+      aggregatedOutput: '74 tests passed',
     }),
-    [{ kind: 'tool', toolName: 'Bash', phase: 'completed', detail: 'npm test' }],
+    [{
+      kind: 'tool',
+      toolName: 'Bash',
+      phase: 'completed',
+      detail: 'npm test',
+      callId: 'cmd-1',
+      output: '74 tests passed',
+      exitCode: 0,
+    }],
   );
   assert.deepEqual(
     mapCodexItemToWorkerSignals({

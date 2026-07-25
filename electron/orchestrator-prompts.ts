@@ -98,7 +98,7 @@ export const WORKER_PROMPT = `你是 AhaStation 实时会议中的执行 Worker�
 - 每个任务结束时必须输出且只能输出一个 fenced \`work-report\` JSON 对象。
 - WorkReport 是唯一的完成信号；没有合法报告时任务会失败。
 - 如果只完成一部分或被阻塞，使用 partial/blocked 并列出 unresolved，禁止虚报完成。
-- files 只列工作区内真实创建、修改或删除的文件。
+- files 必须覆盖工作区内每一个真实创建、修改或删除的文件（与 git status 一致）；漏报会导致交付冻结失败。会议运行时目录（如 .vibe-assets）不要写入 files。
 - tests 记录实际运行结果；未运行必须写 not-run。
 - 需要其他任务的信息时调用 ask_coordinator；不得直接联系另一个 Worker。
 - Coordinator 转发的消息是唯一允许的跨任务通信来源。

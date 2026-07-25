@@ -157,6 +157,44 @@ test('candidate preparation refuses unreported or unchanged paths', async () => 
   assert.equal(git(cwd, ['rev-parse', 'HEAD']), base);
 });
 
+test('candidate preparation ignores ephemeral vibe runtime paths and gitignore housekeeping', async () => {
+  const { cwd, base } = makeRepository();
+  writeFileSync(join(cwd, '.gitignore'), 'node_modules/\n');
+  git(cwd, ['add', '--', '.gitignore']);
+  git(cwd, ['commit', '-m', 'ignore']);
+  const cleanBase = git(cwd, ['rev-parse', 'HEAD']);
+
+  writeFileSync(join(cwd, 'src', 'app.ts'), 'export const value = 2;\n');
+  writeFileSync(join(cwd, '.gitignore'), 'node_modules/\n.vibe-assets/\n');
+  mkdirSync(join(cwd, '.vibe-assets'), { recursive: true });
+  writeFileSync(join(cwd, '.vibe-assets', 'quote-2.txt'), 'quote two\n');
+  writeFileSync(join(cwd, '.vibe-assets', 'quote-3.txt'), 'quote three\n');
+
+  const frozen = await prepareFrozenDeliveryCandidate({
+    order: {
+      deliveryId: 'delivery-ephemeral',
+      taskId: 'task-ephemeral',
+      attempt: 1,
+      meetingId: 'meeting-1',
+      goal: 'change value',
+      acceptanceCriteria: [],
+      workspace: cwd,
+      sourceRevision: cleanBase,
+    },
+    report: report([{ path: 'src/app.ts', action: 'modified' }]),
+    verification: verification(),
+  });
+
+  assert.deepEqual(frozen.reportedPaths, ['src/app.ts']);
+  assert.equal(
+    git(cwd, ['diff-tree', '--no-commit-id', '--name-only', '-r', frozen.commit]),
+    'src/app.ts',
+  );
+  // Runtime assets remain on disk but must not enter the candidate commit.
+  assert.equal(readFileSync(join(cwd, '.vibe-assets', 'quote-2.txt'), 'utf8'), 'quote two\n');
+  void base;
+});
+
 test('diff manifest is deterministic and withholds suspected secrets', async () => {
   const { cwd, base } = makeRepository();
   writeFileSync(

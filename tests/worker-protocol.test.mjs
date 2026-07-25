@@ -4,6 +4,8 @@ import test from 'node:test';
 import {
   extractWorkReportFrame,
   parseWorkReport,
+  truncateToolOutput,
+  TOOL_OUTPUT_MAX_CHARS,
   workerAdapterSignalSchema,
   workerEventSchema,
 } from '../dist-electron/worker-protocol.js';
@@ -37,6 +39,41 @@ test('all five provider-neutral Worker signals parse', () => {
   for (const signal of signals) {
     assert.equal(workerAdapterSignalSchema.safeParse(signal).success, true);
   }
+});
+
+test('tool signal accepts optional CLI fidelity fields and rejects oversized output', () => {
+  const legacy = { kind: 'tool', toolName: 'Bash', phase: 'started', detail: 'npm test' };
+  assert.equal(workerAdapterSignalSchema.safeParse(legacy).success, true);
+  const rich = {
+    kind: 'tool',
+    toolName: 'Bash',
+    phase: 'completed',
+    detail: 'npm test',
+    callId: 'cmd-1',
+    output: 'ok\n',
+    exitCode: 0,
+    durationMs: 12,
+  };
+  assert.equal(workerAdapterSignalSchema.safeParse(rich).success, true);
+  assert.equal(workerAdapterSignalSchema.safeParse({
+    ...rich,
+    output: 'x'.repeat(TOOL_OUTPUT_MAX_CHARS + 1),
+  }).success, false);
+  assert.equal(workerAdapterSignalSchema.safeParse({
+    ...rich,
+    unknownField: true,
+  }).success, false);
+});
+
+test('truncateToolOutput keeps head and tail under the protocol budget', () => {
+  const short = 'hello';
+  assert.equal(truncateToolOutput(short), short);
+  const long = `${'A'.repeat(40_000)}${'B'.repeat(40_000)}`;
+  const truncated = truncateToolOutput(long);
+  assert.ok(truncated.length <= TOOL_OUTPUT_MAX_CHARS);
+  assert.ok(truncated.startsWith('A'.repeat(100)));
+  assert.ok(truncated.endsWith('B'.repeat(100)));
+  assert.match(truncated, /chars omitted/);
 });
 
 test('WorkerEvent v2 requires a durable identity envelope', () => {

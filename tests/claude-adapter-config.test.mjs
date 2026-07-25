@@ -78,7 +78,7 @@ test('Claude worker messages translate to provider-neutral semantic signals', as
     },
   }, tools), [
     { kind: 'progress', message: 'working' },
-    { kind: 'tool', toolName: 'Write', phase: 'started' },
+    { kind: 'tool', toolName: 'Write', phase: 'started', callId: 'tool-1' },
   ]);
   assert.deepEqual(mapClaudeMessageToWorkerSignals({
     type: 'user',
@@ -86,7 +86,7 @@ test('Claude worker messages translate to provider-neutral semantic signals', as
       content: [{ type: 'tool_result', tool_use_id: 'tool-1', content: 'ok' }],
     },
   }, tools), [
-    { kind: 'tool', toolName: 'Write', phase: 'completed', detail: 'ok' },
+    { kind: 'tool', toolName: 'Write', phase: 'completed', callId: 'tool-1', output: 'ok' },
   ]);
   assert.deepEqual(mapClaudeMessageToWorkerSignals({ type: 'result', subtype: 'success' }), [
     { kind: 'ended', reason: 'completed' },

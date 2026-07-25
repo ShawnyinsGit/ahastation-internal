@@ -53,6 +53,7 @@ import type { SteerResult } from './meeting-mcp.js';
 import type { AutoApproveScope } from './auto-approve-policy.js';
 import {
   DirtyWorkspaceWriteBlockedError,
+  validateWorkspaceWritePaths,
   type PrepareTaskWorkspaceInput,
   type TaskWorkspace,
   type TaskWorkspaceManager,
@@ -1022,6 +1023,15 @@ export class WorkerScheduler {
     const err = validatePlan(tasks);
     if (err) return { ok: false, error: err.message };
     for (const task of tasks) {
+      const pathError = validateWorkspaceWritePaths(
+        this.opts.cwd,
+        task.authorityRequest.writePaths,
+      );
+      if (pathError) {
+        return { ok: false, error: `task ${task.id}: ${pathError}` };
+      }
+    }
+    for (const task of tasks) {
       if (this.workers.has(task.id)) {
         return { ok: false, error: `Worker id already in use: ${task.id}` };
       }
@@ -1184,6 +1194,13 @@ export class WorkerScheduler {
 
     const graphError = validatePlan(Array.from(projected.values()));
     if (graphError) return { ok: false, error: graphError.message };
+    for (const task of projected.values()) {
+      const writePaths = task.authorityRequest?.writePaths ?? task.writePaths ?? [];
+      const pathError = validateWorkspaceWritePaths(this.opts.cwd, writePaths);
+      if (pathError) {
+        return { ok: false, error: `task ${task.id}: ${pathError}` };
+      }
+    }
 
     // Steering is the only operation with an asynchronous durable boundary.
     // Complete it before mutating the in-memory graph so a mailbox failure
@@ -2818,40 +2835,66 @@ export class WorkerScheduler {
     };
   }
 
+  private failInvalidWritePaths(handle: WorkerHandle, error: string): void {
+    console.error(`[scheduler] invalid writePaths for ${handle.id}:`, error);
+    handle.summary = error;
+    this.opts.emit({
+      source: 'talker',
+      event: { kind: 'worker-ended', workerId: handle.id, status: 'failed', summary: error },
+    });
+    this.harvestUnresolvedAddenda(handle);
+    this.disposeWorker(handle, 'failed', error);
+    this.emitPlanUpdate();
+    this.cascadeFailure(handle.id);
+  }
+
   private spawnReadyWorkers(): void {
     for (const handle of this.workers.values()) {
       if (handle.status !== 'pending') continue;
       const allDepsDone = handle.deps.every((d) => this.workers.get(d)?.status === 'accepted');
       if (!allDepsDone) continue;
       if (this.countRunning() >= MAX_CONCURRENT_WORKERS) break;
+      const input = this.workspaceInputFor(handle);
+      const pathError = validateWorkspaceWritePaths(this.opts.cwd, input.writePaths);
+      if (pathError) {
+        this.failInvalidWritePaths(handle, pathError);
+        continue;
+      }
       if (this.opts.workspaceManager) {
-        const input = this.workspaceInputFor(handle);
-        const block = typeof this.opts.workspaceManager.preparationBlock === 'function'
-          ? this.opts.workspaceManager.preparationBlock(input)
-          : null;
-        if (block) {
-          if (handle.workspaceDiagnostic?.code !== block.code) {
-            handle.workspaceDiagnostic = block;
-            handle.summary = block.message;
-            this.emitCoordinatorBriefing({
-              kind: 'workspace-blocked',
-              title: `任务「${handle.title}」被脏工作区阻止`,
-              summary: block.message,
-              recommendedAction: 'revise-plan',
-              workerId: handle.id,
-              taskId: handle.id,
-              blockers: [
-                '隔离 worktree 不会包含当前未提交改动。',
-                'AhaStation 不会自动 commit、stash 或复制这些改动。',
-                '共享锁定模式属于非受管兼容路径，不能自动集成或原子发布。',
-              ],
-            });
-            this.emitPlanUpdate();
+        try {
+          const block = typeof this.opts.workspaceManager.preparationBlock === 'function'
+            ? this.opts.workspaceManager.preparationBlock(input)
+            : null;
+          if (block) {
+            if (handle.workspaceDiagnostic?.code !== block.code) {
+              handle.workspaceDiagnostic = block;
+              handle.summary = block.message;
+              this.emitCoordinatorBriefing({
+                kind: 'workspace-blocked',
+                title: `任务「${handle.title}」被脏工作区阻止`,
+                summary: block.message,
+                recommendedAction: 'revise-plan',
+                workerId: handle.id,
+                taskId: handle.id,
+                blockers: [
+                  '隔离 worktree 不会包含当前未提交改动。',
+                  'AhaStation 不会自动 commit、stash 或复制这些改动。',
+                  '共享锁定模式属于非受管兼容路径，不能自动集成或原子发布。',
+                ],
+              });
+              this.emitPlanUpdate();
+            }
+            continue;
           }
+          if (!this.opts.workspaceManager.canPrepare(handle.id, input)) continue;
+          handle.workspaceDiagnostic = undefined;
+        } catch (error) {
+          // canPrepare/preparationBlock must not abort the whole spawn loop —
+          // a single poisoned pending task previously blocked every new plan.
+          const message = error instanceof Error ? error.message : String(error);
+          this.failInvalidWritePaths(handle, message);
           continue;
         }
-        if (!this.opts.workspaceManager.canPrepare(handle.id, input)) continue;
-        handle.workspaceDiagnostic = undefined;
       }
       void this.spawnWorker(handle);
     }

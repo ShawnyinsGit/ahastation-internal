@@ -12,8 +12,8 @@ import {
 import type { ScreenShareState } from '../hooks/useScreenShare';
 import type { DeliverySnapshot, HostGroupState, WorkerState } from '../lib/meeting-store';
 import type {
-  ActivityEntry,
   BrowserTabInfo,
+  CommandRun,
   CoordinatorBriefing,
   FinalMeetingDecision,
   MeetingDelivery,
@@ -46,6 +46,9 @@ interface ScreenStageProps {
   finalMeetingDelivery: MeetingDelivery | null;
   finalMeetingDecision: FinalMeetingDecision | null;
   sessionId: string | null;
+  /** Task the cross-project board asked us to open. `seq` changes on every
+   *  request so re-picking the same task after closing the inspector works. */
+  focusTask?: { taskId: string; seq: number } | null;
   onAcceptDelivery: () => Promise<{ ok: true } | { ok: false; error: string }>;
   onReviseDelivery: (feedback: string) => Promise<
     | { ok: true; route: 'worker' | 'talker'; queued?: boolean }
@@ -94,6 +97,7 @@ export function ScreenStage({
   finalMeetingDelivery,
   finalMeetingDecision,
   sessionId,
+  focusTask,
   onAcceptDelivery,
   onReviseDelivery,
   onAcceptFinalMeetingDelivery,
@@ -134,7 +138,12 @@ export function ScreenStage({
     }
   }, [activeWindowId, onSelectWindow]);
 
+  /** Task requested by the cross-project board whose plan hasn't arrived yet.
+   *  Suppresses the stale-selection sweep below during the switch. */
+  const awaitingFocus = useRef<string | null>(null);
+
   const handleSelectTask = useCallback((id: string) => {
+    awaitingFocus.current = null;
     setSelectedTaskId(id);
     setInspectorHeight(76);
     setInspectorFullscreen(false);
@@ -144,13 +153,26 @@ export function ScreenStage({
   }, [activeWindowId, onSelectWindow]);
 
   useEffect(() => {
-    if (
-      selectedTaskId
-      && !(plan?.nodes ?? []).some((node) => node.id === selectedTaskId)
-    ) {
-      setSelectedTaskId(null);
+    if (!selectedTaskId) return;
+    if ((plan?.nodes ?? []).some((node) => node.id === selectedTaskId)) {
+      awaitingFocus.current = null;
+      return;
     }
+    // Switching projects from the board sets the selection before the target
+    // session's plan swaps in, so hold the selection until its node lands.
+    if (awaitingFocus.current === selectedTaskId) return;
+    setSelectedTaskId(null);
   }, [plan, selectedTaskId]);
+
+  // Depends on seq alone: the board can hand us the same taskId twice and the
+  // inspector still has to come back up.
+  const focusSeq = focusTask?.seq;
+  const focusTaskId = focusTask?.taskId;
+  useEffect(() => {
+    if (focusSeq === undefined || !focusTaskId) return;
+    handleSelectTask(focusTaskId);
+    awaitingFocus.current = focusTaskId;
+  }, [focusSeq]);
 
   const handleInspectorPointerDown = useCallback((event: React.PointerEvent<HTMLButtonElement>) => {
     dragState.current = { pointerId: event.pointerId, startY: event.clientY };
@@ -213,30 +235,22 @@ export function ScreenStage({
     return { active, waiting, saturated: active >= 4 && waiting > 0 };
   }, [plan]);
 
-  // For terminal stage windows, find the worker whose activity should be
-  // displayed. When no workerId is specified, aggregate all workers' Bash
-  // activity so the terminal tab shows real command output instead of being
-  // empty (talkers have `tools: []` and never produce Bash activity).
-  const terminalActivity = useMemo(() => {
-    if (activeWindow?.type !== 'terminal') return [];
+  // For terminal stage windows, project the high-fidelity Bash command log.
+  // When no workerId is specified, aggregate every worker chronologically.
+  const terminalCommands = useMemo(() => {
+    if (activeWindow?.type !== 'terminal') return [] as CommandRun[];
     if (activeWindow.workerId) {
-      // Match by worker id OR by hostId (gallery passes hostId when opening terminal)
       const target = workers.find(
         (w) => w.id === activeWindow.workerId || w.hostId === activeWindow.workerId,
       );
-      return target?.activity ?? [];
+      return target?.commandLog ?? [];
     }
-    // Aggregate all workers' Bash-related activity chronologically
-    const bashEntries: ActivityEntry[] = [];
+    const merged: CommandRun[] = [];
     for (const w of workers) {
-      for (const a of w.activity) {
-        if (a.title?.toLowerCase().includes('bash') || a.kind === 'tool-call' || a.kind === 'tool-result') {
-          bashEntries.push(a);
-        }
-      }
+      for (const run of w.commandLog ?? []) merged.push(run);
     }
-    bashEntries.sort((a, b) => a.ts - b.ts);
-    return bashEntries;
+    merged.sort((a, b) => a.startedAt - b.startedAt);
+    return merged;
   }, [activeWindow, workers]);
 
   const stageClass = share.active
@@ -276,7 +290,10 @@ export function ScreenStage({
         <>
           <div className="stage-gallery">
             {isValidElement(galleryContent)
-              ? cloneElement(galleryContent, { onSelectParticipant: handleSelectParticipant } as any)
+              ? cloneElement(galleryContent, {
+                  onSelectParticipant: handleSelectParticipant,
+                  onOpenTerminal: (workerId: string) => onCreateWindow('terminal', { workerId }),
+                } as any)
               : galleryContent}
           </div>
 
@@ -356,7 +373,7 @@ export function ScreenStage({
 
             {!delivery && !finalMeetingDelivery && activeWindow?.type === 'terminal' && (
               <div className="stage-terminal-content">
-                <TerminalPanel activity={terminalActivity} />
+                <TerminalPanel commands={terminalCommands} />
               </div>
             )}
 

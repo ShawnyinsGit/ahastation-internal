@@ -162,6 +162,11 @@ test('shikiLangForPath maps known extensions and falls back to null', () => {
   assert.equal(shikiLangForPath('README.md'), 'markdown');
   assert.equal(shikiLangForPath('a/b/c.rs'), 'rust');
   assert.equal(shikiLangForPath('fix.diff'), 'diff');
+  assert.equal(shikiLangForPath('Main.kt'), 'kotlin');
+  assert.equal(shikiLangForPath('App.vue'), 'vue');
+  assert.equal(shikiLangForPath('styles.scss'), 'scss');
+  assert.equal(shikiLangForPath('query.gql'), 'graphql');
+  assert.equal(shikiLangForPath('C:\\proj\\src\\util.ts'), 'typescript');
   assert.equal(shikiLangForPath('archive.unknownext'), null);
   assert.equal(shikiLangForPath('Makefile'), null);
   assert.equal(shikiLangForPath('.gitignore'), null);

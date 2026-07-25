@@ -1,5 +1,7 @@
-import type { WorkReport, WorkerEventV2, WorkerStatus } from '../types';
+import type { CommandRun, WorkReport, WorkerEventV2, WorkerStatus } from '../types';
 import { rendererWorkerEventSchema } from './worker-event-schema.ts';
+
+export const COMMAND_LOG_CAP = 200;
 
 export interface WorkerEventProjection {
   eventSeq?: number;
@@ -12,6 +14,72 @@ export interface WorkerEventProjection {
   status: 'idle' | WorkerStatus;
   workReport?: WorkReport;
   workerEvents?: WorkerEventV2[];
+  commandLog?: CommandRun[];
+}
+
+function isBashTool(toolName: string): boolean {
+  return toolName === 'Bash' || toolName === 'bash';
+}
+
+/** Upsert a Bash command entry keyed by callId (or a synthetic fallback id). */
+export function upsertCommandLog(
+  log: CommandRun[] | undefined,
+  patch: {
+    callId?: string;
+    command?: string;
+    phase: 'started' | 'completed' | 'failed';
+    output?: string;
+    exitCode?: number;
+    durationMs?: number;
+    timestamp: number;
+    backendId?: string;
+    source?: string;
+  },
+): CommandRun[] {
+  const next = [...(log ?? [])];
+  const id = patch.callId?.trim() || `anon-${patch.timestamp}-${next.length}`;
+  const existingIdx = next.findIndex((entry) => entry.id === id);
+  if (patch.phase === 'started') {
+    const started: CommandRun = {
+      id,
+      command: patch.command?.trim() || next[existingIdx]?.command || '',
+      status: 'running',
+      startedAt: patch.timestamp,
+      ...(patch.backendId ? { backendId: patch.backendId } : {}),
+      ...(patch.source ? { source: patch.source } : {}),
+    };
+    if (existingIdx >= 0) next[existingIdx] = { ...next[existingIdx], ...started };
+    else next.push(started);
+  } else {
+    const prev = existingIdx >= 0 ? next[existingIdx] : undefined;
+    const completed: CommandRun = {
+      id,
+      command: patch.command?.trim() || prev?.command || '',
+      status: patch.phase === 'failed' ? 'failed' : 'completed',
+      startedAt: prev?.startedAt ?? patch.timestamp,
+      endedAt: patch.timestamp,
+      ...(patch.output !== undefined ? { output: patch.output } : prev?.output ? { output: prev.output } : {}),
+      ...(patch.exitCode !== undefined
+        ? { exitCode: patch.exitCode }
+        : prev?.exitCode !== undefined
+          ? { exitCode: prev.exitCode }
+          : {}),
+      ...(patch.durationMs !== undefined
+        ? { durationMs: patch.durationMs }
+        : prev?.durationMs !== undefined
+          ? { durationMs: prev.durationMs }
+          : prev
+            ? { durationMs: Math.max(0, patch.timestamp - prev.startedAt) }
+            : {}),
+      ...(patch.backendId || prev?.backendId
+        ? { backendId: patch.backendId ?? prev?.backendId }
+        : {}),
+      ...(patch.source || prev?.source ? { source: patch.source ?? prev?.source } : {}),
+    };
+    if (existingIdx >= 0) next[existingIdx] = completed;
+    else next.push(completed);
+  }
+  return next.length > COMMAND_LOG_CAP ? next.slice(-COMMAND_LOG_CAP) : next;
 }
 
 /** Provider-neutral renderer projection. Events with a duplicate/out-of-order
@@ -40,6 +108,19 @@ export function reduceWorkerEvent(
   } else if (signal.kind === 'tool') {
     next.currentTool = signal.phase === 'started' ? signal.toolName : null;
     next.currentToolInput = signal.detail ?? null;
+    if (isBashTool(signal.toolName)) {
+      next.commandLog = upsertCommandLog(current.commandLog, {
+        callId: signal.callId,
+        command: signal.detail,
+        phase: signal.phase,
+        output: signal.output,
+        exitCode: signal.exitCode,
+        durationMs: signal.durationMs,
+        timestamp: valid.timestamp,
+        backendId: valid.backendId,
+        source: valid.workerId,
+      });
+    }
   } else if (signal.kind === 'delivery') {
     next.workReport = signal.report;
     next.summary = signal.report.summary;

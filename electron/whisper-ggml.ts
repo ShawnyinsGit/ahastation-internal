@@ -25,7 +25,12 @@ export function chooseGgmlBackend(
     return fallback ?? null;
   }
   if (platform === 'win32') {
+    // Official v1.9.1 win zip ships per-CPU plugins (ggml-cpu-x64.dll,
+    // ggml-cpu-sse42.dll, …) and often no generic ggml-cpu.dll. Prefer the
+    // broadest-compatible names before an arch-specific plugin.
     if (set.has('ggml-cpu.dll')) return 'ggml-cpu.dll';
+    if (set.has('ggml-cpu-x64.dll')) return 'ggml-cpu-x64.dll';
+    if (set.has('ggml-cpu-sse42.dll')) return 'ggml-cpu-sse42.dll';
     const fallback = files.find((f) => /^ggml-cpu.*\.dll$/i.test(f));
     return fallback ?? null;
   }

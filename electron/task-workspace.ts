@@ -122,6 +122,23 @@ function parsePorcelainStatus(output: string): {
   };
 }
 
+/** Return an error message when any write path resolves outside `baseCwd`.
+ * Used by plan install and Scheduler readiness so escaping paths never throw
+ * through the shared spawn loop. */
+export function validateWorkspaceWritePaths(
+  baseCwd: string,
+  writePaths: readonly string[],
+): string | null {
+  const base = resolve(baseCwd);
+  for (const path of writePaths) {
+    const absolute = resolve(baseCwd, path);
+    if (absolute !== base && !absolute.startsWith(base + sep)) {
+      return `write path escapes workspace: ${path}`;
+    }
+  }
+  return null;
+}
+
 /** Meeting-scoped workspace isolation. Clean Git repositories get one real
  * worktree per managed write task. Read-only tasks inspect the selected base
  * directly. Explicit shared mode writes in place under advisory path locks and
@@ -135,6 +152,11 @@ export class TaskWorkspaceManager {
     private readonly baseCwd: string,
     private readonly options: TaskWorkspaceManagerOptions = {},
   ) {}
+
+  /** Same check as {@link validateWorkspaceWritePaths}, scoped to this meeting. */
+  validateWritePaths(writePaths: readonly string[]): string | null {
+    return validateWorkspaceWritePaths(this.baseCwd, writePaths);
+  }
 
   inspectBaseline(): WorkspaceBaseline {
     if (!this.isGitRepository()) {
@@ -166,15 +188,21 @@ export class TaskWorkspaceManager {
 
   /** Return whether a pending task can acquire its workspace without mutating
    * Git, lock, or filesystem state. Dirty isolated writers return false; the
-   * subsequent explicit prepare call produces the typed user-facing error. */
+   * subsequent explicit prepare call produces the typed user-facing error.
+   * Escaping write paths return false instead of throwing so readiness checks
+   * cannot poison the Scheduler spawn loop. */
   canPrepare(taskId: string, input: PrepareTaskWorkspaceInput): boolean {
     if (this.workspaces.has(taskId) || input.mode === 'read-only') return true;
     const baseline = this.inspectBaseline();
     if (input.mode === 'git-worktree') {
       return baseline.kind === 'git-clean';
     }
-    const keys = this.lockKeys(input.writePaths);
-    return keys.every((key) => !this.conflictingOwner(key, taskId));
+    try {
+      const keys = this.lockKeys(input.writePaths);
+      return keys.every((key) => !this.conflictingOwner(key, taskId));
+    } catch {
+      return false;
+    }
   }
 
   preparationBlock(input: PrepareTaskWorkspaceInput): WorkspaceBlockedDiagnostic | null {
@@ -329,11 +357,9 @@ export class TaskWorkspaceManager {
   }
 
   private normalizedLockKey(path: string): string {
+    const error = validateWorkspaceWritePaths(this.baseCwd, [path]);
+    if (error) throw new Error(error);
     const absolute = resolve(this.baseCwd, path);
-    const base = resolve(this.baseCwd);
-    if (absolute !== base && !absolute.startsWith(base + sep)) {
-      throw new Error(`write path escapes workspace: ${path}`);
-    }
     return process.platform === 'win32' ? absolute.toLowerCase() : absolute;
   }
 

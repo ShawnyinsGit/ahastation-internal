@@ -59,8 +59,10 @@ interface ClaudeWorkspaceProps {
   onSteerTask?: (instruction: string) => Promise<{ ok: true; queued: boolean } | { ok: false; error: string }>;
   onOpenWorkspace?: () => Promise<{ ok: boolean; error?: string }>;
   onOpenInTerminal?: () => void;
-  /** Whether this workspace represents a talker (shows terminal button in hero). */
+  /** Whether this workspace represents a talker. */
   isTalker?: boolean;
+  /** High-fidelity Bash/command log for the CLI execution view. */
+  commandLog?: import('../types').CommandRun[];
 }
 
 const dotColor: Record<ActivityEntry['kind'], string> = {
@@ -184,6 +186,7 @@ export const ClaudeWorkspace = memo(function ClaudeWorkspace({
   onOpenWorkspace,
   onOpenInTerminal,
   isTalker,
+  commandLog,
 }: ClaudeWorkspaceProps) {
   const lastAssistant = useMemo(() => [...transcript].reverse().find((t) => t.role === 'assistant'), [transcript]);
   const latestToolCall = useMemo(
@@ -319,17 +322,23 @@ export const ClaudeWorkspace = memo(function ClaudeWorkspace({
         </header>
       )}
 
-      {isTalker && onOpenInTerminal && (
+      {onOpenInTerminal && ((commandLog && commandLog.length > 0) || running || isTalker) && (
         <div className={`workspace-terminal-btn-row${hideHero ? ' workspace-terminal-btn-row--compact' : ''}`}>
           <button
             type="button"
             className="workspace-hero-terminal-btn"
             onClick={onOpenInTerminal}
-            title="Open terminal"
-            aria-label="Open terminal"
+            title="查看真实 CLI 执行情况"
+            aria-label="Open CLI execution view"
           >
             <Terminal size={14} />
-            <span className="workspace-terminal-btn-label">Terminal</span>
+            <span className="workspace-terminal-btn-label">
+              {backendId === 'codex'
+                ? 'Codex CLI'
+                : backendId === 'claude-code'
+                  ? 'Claude CLI'
+                  : 'Terminal'}
+            </span>
           </button>
         </div>
       )}

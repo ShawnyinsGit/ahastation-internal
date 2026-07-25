@@ -152,6 +152,7 @@ export function ActivityTabContent({
           }
           onOpenInTerminal={onOpenInTerminal ? handleOpenInTerminal : undefined}
           isTalker={selectedWorker.role === 'talker'}
+          commandLog={selectedWorker.commandLog}
         />
       )}
     </div>

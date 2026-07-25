@@ -9,6 +9,7 @@ import {
   ShieldAlert,
 } from 'lucide-react';
 import type { WorkerState } from '../lib/meeting-store';
+import { WORKER_STATUS_LABEL as LABEL } from '../lib/task-columns';
 import type { MeetingPlan, WorkerStatus } from '../types';
 
 interface TaskRailProps {
@@ -17,23 +18,6 @@ interface TaskRailProps {
   selectedId: string | null;
   onSelect: (id: string) => void;
 }
-
-const LABEL: Record<WorkerStatus, string> = {
-  pending: '等待调度',
-  running: '执行中',
-  verifying: '校验中',
-  reviewing: '评审中',
-  'awaiting-acceptance': '等待验收',
-  'integration-queued': '等待集成',
-  integrating: '集成中',
-  'integration-conflict': '集成冲突',
-  reworking: '需要返工',
-  'budget-paused': '预算暂停',
-  accepted: '已接受',
-  interrupted: '已中断',
-  done: '已完成',
-  failed: '失败',
-};
 
 const PROGRESS: Record<WorkerStatus, number> = {
   pending: 0,

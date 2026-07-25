@@ -213,7 +213,7 @@ export function BottomToolbar({
                   role="menuitem"
                   onClick={() => { setMoreOpen(false); onToggleCompanion(); }}
                 >
-                  <Gamepad2 size={16} /> 陪伴屏
+                  <Gamepad2 size={16} /> AhaBar
                 </button>
               </div>
             )}
@@ -286,9 +286,9 @@ export function BottomToolbar({
         />
         <ToolbarButton
           icon={<Gamepad2 size={ICON_SIZE} />}
-          label="陪伴屏"
+          label="AhaBar"
           onClick={onToggleCompanion}
-          title="像素虚拟会议室（陪伴屏）"
+          title="AhaBar 悬浮条 · 待批准快捷键"
         />
         <button className="tb-leave" onClick={onLeave}>
           <span className="tb-btn-icon" aria-hidden="true"><X size={ICON_SIZE} /></span>

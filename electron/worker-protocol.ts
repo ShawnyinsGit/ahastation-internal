@@ -63,7 +63,14 @@ export const workerAdapterSignalSchema = z.discriminatedUnion('kind', [
     kind: z.literal('tool'),
     toolName: z.string().trim().min(1).max(500),
     phase: z.enum(['started', 'completed', 'failed']),
+    /** Command / path / query summary for the tool call. */
     detail: z.string().max(4_000).optional(),
+    /** Adapter-provided call id used to pair started with completed/failed. */
+    callId: z.string().trim().min(1).max(200).optional(),
+    /** Real merged command output; head/tail retained with a mid-omit marker. */
+    output: z.string().max(64_000).optional(),
+    exitCode: z.number().int().optional(),
+    durationMs: z.number().int().nonnegative().optional(),
   }).strict(),
   z.object({
     kind: z.literal('delivery'),
@@ -154,4 +161,32 @@ export function extractWorkReportFrame(text: string): {
       error: error instanceof Error ? error.message : String(error),
     };
   }
+}
+
+/** Max bytes accepted by the tool.output schema field. */
+export const TOOL_OUTPUT_MAX_CHARS = 64_000;
+const TOOL_OUTPUT_HEAD_CHARS = 32_000;
+const TOOL_OUTPUT_TAIL_CHARS = 32_000;
+
+/**
+ * Keep the head and tail of a long command transcript so the CLI view stays
+ * readable without exceeding the WorkerEvent payload budget. Short outputs
+ * pass through unchanged.
+ */
+export function truncateToolOutput(raw: string, maxChars = TOOL_OUTPUT_MAX_CHARS): string {
+  if (raw.length <= maxChars) return raw;
+  // Size the marker twice so digit-width changes cannot push past maxChars.
+  let head = Math.min(TOOL_OUTPUT_HEAD_CHARS, Math.floor(maxChars / 2));
+  let tail = Math.min(TOOL_OUTPUT_TAIL_CHARS, maxChars - head);
+  for (let i = 0; i < 2; i += 1) {
+    const omitted = Math.max(0, raw.length - head - tail);
+    const marker = `\n…[${omitted} chars omitted]…\n`;
+    const budget = Math.max(0, maxChars - marker.length);
+    head = Math.min(TOOL_OUTPUT_HEAD_CHARS, Math.floor(budget / 2));
+    tail = Math.min(TOOL_OUTPUT_TAIL_CHARS, budget - head);
+  }
+  const omitted = Math.max(0, raw.length - head - tail);
+  const marker = `\n…[${omitted} chars omitted]…\n`;
+  const result = `${raw.slice(0, head)}${marker}${raw.slice(-tail)}`;
+  return result.length <= maxChars ? result : result.slice(0, maxChars);
 }

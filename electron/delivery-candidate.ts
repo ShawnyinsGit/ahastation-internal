@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { promises as fs } from 'node:fs';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 import {
@@ -14,6 +15,26 @@ import type { WorkReport } from './worker-protocol.js';
 
 const execFileAsync = promisify(execFile);
 const GIT_OUTPUT_LIMIT = 32 * 1024 * 1024;
+
+/** Meeting runtime dirs. They must never enter a delivery candidate or block
+ * freeze when a Worker/report omits them (assets are not task deliverables). */
+const EPHEMERAL_DIR_PREFIXES = [
+  '.vibe-assets/',
+  '.vibe-attachments/',
+  '.vibe-materials/',
+  '.vibe-docs/',
+] as const;
+
+const EPHEMERAL_GITIGNORE_ENTRIES = new Set([
+  '.vibe-assets',
+  '.vibe-assets/',
+  '.vibe-attachments',
+  '.vibe-attachments/',
+  '.vibe-materials',
+  '.vibe-materials/',
+  '.vibe-docs',
+  '.vibe-docs/',
+]);
 
 export interface FrozenDeliveryCandidate {
   schemaVersion: 1;
@@ -271,12 +292,55 @@ async function changedWorkspacePaths(workspace: string): Promise<string[]> {
     '--exclude-standard',
     '--',
   ]);
-  return [...new Set(
+  const paths = [...new Set(
     [tracked, staged, untracked]
       .flatMap((output) => output.split(/\r?\n/u))
-      .map((path) => path.trim())
-      .filter(Boolean),
+      .map((path) => path.trim().split('\\').join('/'))
+      .filter(Boolean)
+      .filter((path) => !isEphemeralDeliveryPath(path)),
   )].sort();
+  if (paths.includes('.gitignore') && await isGitignoreEphemeralHousekeepingOnly(workspace)) {
+    return paths.filter((path) => path !== '.gitignore');
+  }
+  return paths;
+}
+
+function isEphemeralDeliveryPath(path: string): boolean {
+  const normalized = path.split('\\').join('/');
+  return EPHEMERAL_DIR_PREFIXES.some(
+    (prefix) => normalized === prefix.slice(0, -1) || normalized.startsWith(prefix),
+  );
+}
+
+/** True when `.gitignore` only gained known `.vibe-*` ignore entries (the
+ * side effect of maybeAppendGitignore), with no other line changes. */
+async function isGitignoreEphemeralHousekeepingOnly(workspace: string): Promise<boolean> {
+  let headContent = '';
+  try {
+    headContent = await git(workspace, ['show', 'HEAD:.gitignore']);
+  } catch {
+    headContent = '';
+  }
+  let workContent = '';
+  try {
+    workContent = await fs.readFile(resolve(workspace, '.gitignore'), 'utf8');
+  } catch {
+    return false;
+  }
+  const headLines = new Set(
+    headContent.split(/\r?\n/u).map((line) => line.trim()).filter(Boolean),
+  );
+  const workLines = workContent.split(/\r?\n/u).map((line) => line.trim()).filter(Boolean);
+  const workSet = new Set(workLines);
+  for (const line of headLines) {
+    if (!workSet.has(line)) return false;
+  }
+  for (const line of workSet) {
+    if (!headLines.has(line) && !EPHEMERAL_GITIGNORE_ENTRIES.has(line)) {
+      return false;
+    }
+  }
+  return workSet.size >= headLines.size;
 }
 
 async function stagedWorkspacePaths(workspace: string): Promise<string[]> {

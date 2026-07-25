@@ -64,6 +64,11 @@ test('chooseGgmlBackend on linux/win prefers the generic plugin', () => {
   );
   assert.equal(chooseGgmlBackend(['libggml-cpu-sse42.so'], 'linux'), 'libggml-cpu-sse42.so');
   assert.equal(chooseGgmlBackend(['ggml-base.dll', 'ggml-cpu.dll'], 'win32'), 'ggml-cpu.dll');
+  assert.equal(
+    chooseGgmlBackend(['ggml-cpu-alderlake.dll', 'ggml-cpu-x64.dll', 'ggml-cpu-sse42.dll'], 'win32'),
+    'ggml-cpu-x64.dll',
+  );
+  assert.equal(chooseGgmlBackend(['ggml-cpu-sse42.dll', 'ggml-cpu-haswell.dll'], 'win32'), 'ggml-cpu-sse42.dll');
   assert.equal(chooseGgmlBackend([], 'linux'), null);
   assert.equal(chooseGgmlBackend(['random.txt'], 'win32'), null);
 });

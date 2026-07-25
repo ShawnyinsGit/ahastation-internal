@@ -268,7 +268,8 @@ const api = {
     // Main-window side: toggle the floating companion window + relay the
     // TTS-active flag (sound ducking). The companion window itself uses the
     // narrow preload-companion.cjs bridge instead.
-    toggle: () => ipcRenderer.invoke('companion:toggle'),
+    // Phase 1 defaults to AhaBar; pass { view: 'companion' } for the Phaser office.
+    toggle: (opts) => ipcRenderer.invoke('companion:toggle', opts ?? {}),
     ttsState: (active) => ipcRenderer.send('companion:tts-state', { active }),
   },
   // Secure editor file browsing. No cwd is ever sent — the main process
