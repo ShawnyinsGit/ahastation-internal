@@ -41,6 +41,9 @@ function makeOrch(cwd = '/tmp', workspaceManager, meetingId) {
     cwd,
     workspaceManager,
     meetingId,
+    // No real Coordinator paces these tests, so wall-clock must never charge
+    // the review turn budget (same convention as coordinator-review-loop).
+    reviewStallTimeoutMs: 0,
     sessionFactory: (options) => {
       const s = new FakeSession(options);
       sessions.push(s);
@@ -87,20 +90,26 @@ test('legacy task_done cannot release a worker; reviewed WorkReport does', async
     { worktreeRoot: join(root, '.task-worktrees') },
   );
   const { orch, sessions, events } = makeOrch(root, workspaceManager, meetingId);
+  // A live Coordinator host is required: without one every review notify
+  // falls into pauseForDisconnect, and the chunk-review loop below races the
+  // pause landing (flaky on slower CI runners).
+  await orch.start();
+  const coordinator = sessions[0];
+  assert.ok(coordinator, 'coordinator host session was not created');
   const result = await orch.installPlan([
     { id: 'a', title: 'A', prompt: 'do A', deps: [], writePaths: ['result.txt'] },
   ]);
   assert.equal(result.ok, true);
-  await waitUntil(() => sessions.length === 1, 'worker session was not created');
-  assert.equal(sessions.length, 1, 'worker session created');
-  assert.equal(sessions[0].started, true);
-  assert.equal(sessions[0].ended, false, 'session live during task');
+  const worker = await waitUntil(() => sessions[1], 'worker session was not created');
+  assert.equal(sessions.length, 2, 'coordinator + worker sessions created');
+  assert.equal(worker.started, true);
+  assert.equal(worker.ended, false, 'session live during task');
 
   // Legacy completion is only a note. It cannot bypass verification/review.
   orch.markWorkerTaskDone('a', 'finished');
-  assert.equal(sessions[0].ended, false, 'task_done cannot release the session');
+  assert.equal(worker.ended, false, 'task_done cannot release the session');
 
-  writeFileSync(join(sessions[0].cwd, 'result.txt'), 'finished with evidence\n');
+  writeFileSync(join(worker.cwd, 'result.txt'), 'finished with evidence\n');
   orch.submitWorkerReport('a', {
     status: 'completed',
     summary: 'finished with evidence',
@@ -118,7 +127,7 @@ test('legacy task_done cannot release a worker; reviewed WorkReport does', async
     },
     'delivery did not reach Coordinator review',
   );
-  assert.equal(sessions[0].ended, false, 'Coordinator review keeps the Worker resource live');
+  assert.equal(worker.ended, false, 'Coordinator review keeps the Worker resource live');
   for (;;) {
     if (orch.inspectDeliveryReview(review.id)?.status === 'paused') {
       await orch.coordinatorReviewDriver.resume(review.id);
@@ -141,7 +150,7 @@ test('legacy task_done cannot release a worker; reviewed WorkReport does', async
     )),
     'reviewed delivery did not become durably accepted',
   );
-  assert.equal(sessions[0].ended, true, 'accepted delivery releases the session');
+  assert.equal(worker.ended, true, 'accepted delivery releases the session');
   await orch.end();
 });
 
