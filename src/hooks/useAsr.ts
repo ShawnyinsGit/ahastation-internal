@@ -55,23 +55,32 @@ export function useAsr({
 
   useEffect(() => {
     let cancelled = false;
-    window.vibeMeet
-      .asrAvailable()
-      .then((r) => {
-        if (cancelled) return;
-        const available = r.ok ? r.available : false;
-        // One-shot diagnostic so we can confirm the probe result in a packaged
-        // build. Without this, an unavailable state is invisible.
-        console.info('[asr] probe ->', { available, raw: r });
-        setAsrAvailable(available);
-      })
-      .catch((e) => {
-        if (cancelled) return;
-        console.warn('[asr] probe failed:', e);
-        setAsrAvailable(false);
-      });
+    const probe = () => {
+      window.vibeMeet
+        .asrAvailable()
+        .then((r) => {
+          if (cancelled) return;
+          const available = r.ok ? r.available : false;
+          // Diagnostic so we can confirm the probe result in a packaged
+          // build. Without this, an unavailable state is invisible.
+          console.info('[asr] probe ->', { available, raw: r });
+          setAsrAvailable(available);
+        })
+        .catch((e) => {
+          if (cancelled) return;
+          console.warn('[asr] probe failed:', e);
+          setAsrAvailable(false);
+        });
+    };
+    probe();
+    // Credentials can be entered while the app is already running (设置 → 语音
+    // → 讯飞 ASR commits on blur). The main process broadcasts after a
+    // successful credentials write; re-probe so the mic unlocks without an
+    // app restart.
+    const unsubscribe = window.vibeMeet.onVoicePrefChanged?.(probe);
     return () => {
       cancelled = true;
+      unsubscribe?.();
     };
   }, []);
 

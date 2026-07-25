@@ -72,6 +72,11 @@ const api = {
   setVoicePrint: (vp) => ipcRenderer.invoke('settings:set-voice-print', vp),
   getVoicePref: () => ipcRenderer.invoke('settings:get-voice-pref'),
   setVoicePref: (patch) => ipcRenderer.invoke('settings:set-voice-pref', patch),
+  onVoicePrefChanged: (cb) => {
+    const listener = () => cb();
+    ipcRenderer.on('settings:voice-pref-changed', listener);
+    return () => ipcRenderer.removeListener('settings:voice-pref-changed', listener);
+  },
   openVoiceSettings: () => ipcRenderer.invoke('system:open-voice-settings'),
   useSystemPicker: () => ipcRenderer.invoke('desktop:use-system-picker'),
   getDesktopSources: () => ipcRenderer.invoke('desktop:get-sources'),

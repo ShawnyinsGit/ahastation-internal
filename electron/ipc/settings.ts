@@ -1,4 +1,4 @@
-import { ipcMain, shell } from 'electron';
+import { ipcMain, shell, webContents } from 'electron';
 import { getSettings, updateSettings, clearVoicePrint, type Settings, type VoicePrint, type XfyunAsrCredentials } from '../store.js';
 
 export interface VoicePrefPatch {
@@ -128,6 +128,14 @@ export function registerSettingsIpc(): void {
       next.xfyunAsr = { ...(getSettings().xfyunAsr ?? {}), ...next.xfyunAsr };
     }
     await updateSettings(next);
+    // ASR availability is probed once at renderer mount; when credentials
+    // change mid-session, notify every window so hooks re-probe instead of
+    // requiring an app restart for the mic to unlock.
+    if (next.xfyunAsr) {
+      for (const wc of webContents.getAllWebContents()) {
+        wc.send('settings:voice-pref-changed');
+      }
+    }
     return { ok: true };
   });
 

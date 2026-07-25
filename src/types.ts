@@ -1206,6 +1206,7 @@ export interface VibeMeetApi {
   setVoicePrint: (vp: VoicePrint | null) => Promise<{ ok: boolean }>;
   getVoicePref: () => Promise<{ selectedVoiceName: string | null; guidanceDismissed: boolean; speechFilterMode: 'strict' | 'off'; voicePolishEnabled: boolean; reportModeEnabled: boolean; handheldMode: 'auto' | 'handheld' | 'desktop'; xfyunAsr: XfyunAsrCredentials }>;
   setVoicePref: (patch: { selectedVoiceName?: string | null; guidanceDismissed?: boolean; speechFilterMode?: 'strict' | 'off'; voicePolishEnabled?: boolean; reportModeEnabled?: boolean; handheldMode?: 'auto' | 'handheld' | 'desktop'; xfyunAsr?: Partial<XfyunAsrCredentials> }) => Promise<{ ok: boolean; error?: string }>;
+  onVoicePrefChanged: (cb: () => void) => () => void;
   openVoiceSettings: () => Promise<{ ok: boolean }>;
   useSystemPicker: () => Promise<boolean>;
   getDesktopSources: () => Promise<
