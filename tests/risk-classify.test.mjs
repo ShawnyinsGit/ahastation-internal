@@ -76,6 +76,37 @@ test('unknown tools fall back to high risk', async () => {
   assert.ok(r.action.includes('mcp__something__dangerous'));
 });
 
+test('in-proc meeting tools classify as recognized, not high risk', async () => {
+  const { assessRisk } = await loadRiskModule();
+  // Dispatch/steer verbs spawn or redirect workers → mid.
+  for (const name of ['delegate_task', 'delegate_to', 'follow_up_task', 'steer_task', 'interrupt_task', 'plan_meeting']) {
+    const r = assessRisk(`mcp__meeting__${name}`, {});
+    assert.equal(r.level, 'mid', name);
+    assert.ok(!r.impact.includes('未识别'), name);
+  }
+  // Status/report verbs → low.
+  for (const name of ['narrate_to_user', 'ask_worker_status', 'task_done', 'submit_work_report', 'ask_host']) {
+    const r = assessRisk(`mcp__meeting__${name}`, {});
+    assert.equal(r.level, 'low', name);
+  }
+  // Worker-side prefix is recognized too.
+  assert.equal(assessRisk('mcp__meeting-worker__submit_work_report', {}).level, 'low');
+});
+
+test('inline meeting tool names stay in sync with electron/meeting-tool-names.ts', async () => {
+  const { assessRisk } = await loadRiskModule();
+  const source = await readFile(
+    new URL('../electron/meeting-tool-names.ts', import.meta.url),
+    'utf8',
+  );
+  const names = [...source.matchAll(/^\s+[A-Z_]+: '([a-z_]+)',$/gm)].map((m) => m[1]);
+  assert.ok(names.length >= 20, 'expected the full meeting tool vocabulary');
+  for (const name of names) {
+    const r = assessRisk(`mcp__meeting__${name}`, {});
+    assert.ok(r.level === 'low' || r.level === 'mid', `${name} should be recognized`);
+  }
+});
+
 test('risk labels and badge classes cover every level', async () => {
   const { RISK_LABELS, RISK_BADGE_CLASS } = await loadRiskModule();
   for (const level of ['low', 'mid', 'high', 'blocked']) {

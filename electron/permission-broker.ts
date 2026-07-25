@@ -92,8 +92,14 @@ export function decideTaskPermission(
     };
   }
   if (!grant) {
+    // No authority grant on this task (compat delegate path, plan/profile
+    // missing). A hard deny strands Workers with "missing Bash tool
+    // permission" and no way out — the user never sees a card. Escalate to an
+    // approval card instead, matching the authority-miss remediation channel
+    // used for granted tasks; the user can allow once (fingerprint memory
+    // avoids repeat prompts) or deny.
     return {
-      decision: { kind: 'deny', reason: 'task-authority-missing' },
+      decision: { kind: 'ask-user', reason: 'authority-miss:task-authority-missing' },
       safeInput: summarizeCanonicalRequest(normalized.request),
     };
   }

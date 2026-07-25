@@ -48,7 +48,13 @@ bundled_runtime() {
 
 read_version() {
   binary=$1
-  "$binary" --version 2>&1 | sed -n 's/.*[^0-9]\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | head -n 1
+  # Match a semver either mid-line (preceded by a non-digit) or at line start
+  # (e.g. "2.1.150 (Claude Code)", "1.18.5"); the old pattern required a
+  # non-digit prefix and silently failed on leading-version output.
+  "$binary" --version 2>&1 | sed -n \
+    -e 's/^\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' \
+    -e 's/.*[^0-9]\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' \
+    | head -n 1
 }
 
 check_runtime() {
