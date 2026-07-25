@@ -1,0 +1,19 @@
+p4201
+fcwd
+n/Users/test/work/project-alpha
+ftxt
+n/usr/local/bin/claude
+f0
+n->/dev/null
+p4301
+fcwd
+n/Users/test/work/project-gamma
+f3
+n/Users/test/.codex/sessions/2026/07/24/rollout-2026-07-24T10-00-00-d0de0000-0000-7000-8000-0000000000a1.jsonl
+p4401
+fcwd
+n(readlink: Permission denied)
+f4
+n/Users/test/.codex/sessions/2026/07/20/rollout-2026-07-20T08-00-00-d0de0000-0000-7000-8000-0000000000ff.jsonl
+f5
+n/Users/test/.codex/sessions/2026/07/21/rollout-2026-07-21T09-30-00-d0de0000-0000-7000-8000-0000000000fe.jsonl

@@ -1,0 +1,6 @@
+{"timestamp":"2026-07-23T09:00:00.000Z","type":"session_meta","payload":{"id":"d0de0000-0000-7000-8000-0000000000a3","timestamp":"2026-07-23T09:00:00.000Z","cwd":"/Users/test/work/project-alpha","originator":"codex_cli_rs","source":"cli","cli_version":"0.999.0","model_provider":"openai"}}
+{"timestamp":"2026-07-23T09:00:01.000Z","type":"event_msg","payload":{"type":"task_started","turn_id":"t-1"}}
+{"timestamp":"2026-07-23T09:00:02.000Z","type":"event_msg","payload":{"type":"user_message","message":"review the microphone fix diff","images":[]}}
+{"timestamp":"2026-07-23T09:00:40.000Z","type":"event_msg","payload":{"type":"agent_message","message":"The diff looks good, one nit about buffer sizing."}}
+this line is not json at all and must be skipped
+{"timestamp":"2026-07-23T09:00:41.000Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"t-1","last_agent_message":"The diff looks good, one nit about buffer sizing."}}
