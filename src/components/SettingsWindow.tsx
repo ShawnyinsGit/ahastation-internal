@@ -9,6 +9,7 @@ import { MemoryPanel } from './MemoryPanel';
 import { VoiceSelector } from './VoiceSelector';
 import { VoiceLockPanel } from './VoiceLockPanel';
 import { SkillManagerPanel } from './SkillManagerPanel';
+import { UpcomingSettingsPanel } from './UpcomingSettingsPanel';
 import { BackendSettings } from './BackendSettings';
 import { IDEManagerPanel } from './IDEManagerPanel';
 import { VoiceGuideModal } from './VoiceGuideModal';
@@ -149,6 +150,7 @@ function SettingsWindowInner() {
           onClearEnrollment={voiceLock.handleClearEnrollment}
         />
         <SkillManagerPanel />
+        <UpcomingSettingsPanel />
       </div>
       {voicePrefs.guideOpen && (
         <VoiceGuideModal
