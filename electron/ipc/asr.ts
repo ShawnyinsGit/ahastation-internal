@@ -15,6 +15,7 @@ import { polishAsrText } from '../asr-polish.js';
 import { errorMessage } from '../format-error.js';
 import { getSettings } from '../store.js';
 import { XfyunIatSession, type AsrLanguage, type XfyunCredentials } from '../asr/xfyun-iat.js';
+import { createWsWebSocketFactory } from '../asr/ws-transport.js';
 
 export function registerAsrIpc(): void {
   const MAX_POLISH_CHARS = 20_000;
@@ -116,7 +117,7 @@ export function registerAsrIpc(): void {
       }
       const lang = options?.lang ?? 'auto';
       if (!validLanguage(lang)) return { ok: false, error: 'invalid ASR language' };
-      const session = new XfyunIatSession(credentials, lang);
+      const session = new XfyunIatSession(credentials, lang, createWsWebSocketFactory());
       activeStream = { session, accepting: true, idleTimer: setTimeout(() => {}, 0) };
       armIdleWatchdog();
 

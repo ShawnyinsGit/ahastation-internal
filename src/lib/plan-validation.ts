@@ -1,4 +1,6 @@
 import type { BackendInfo, PlanMeetingTaskInput } from '../types';
+import { draftDependencyGate } from './dependency-gate.ts';
+import { DEFAULT_TASK_BUDGET } from './task-budget.ts';
 
 export function normalizePlanDraft(
   task: PlanMeetingTaskInput,
@@ -9,11 +11,18 @@ export function normalizePlanDraft(
     ?? defaultBackendId;
   const writePaths = task.authorityRequest?.writePaths ?? task.writePaths ?? [];
   const contextMode = task.executionProfile?.contextMode ?? 'meeting-summary';
+  const workspaceMode = task.workspaceMode ?? (writePaths.length > 0 ? 'git-worktree' : 'read-only');
   return {
     ...task,
     deps: [...(task.deps ?? [])],
+    dependencyGate: draftDependencyGate({
+      ...task,
+      writePaths,
+      workspaceMode,
+    }),
     executorBackendId: backendId,
     writePaths: [...writePaths],
+    workspaceMode,
     executionProfile: task.executionProfile ? { ...task.executionProfile } : {
       schemaVersion: 1,
       backendId,
@@ -35,7 +44,6 @@ export function normalizePlanDraft(
       dependencyTaskIds: [],
       attachmentIds: [],
     },
-    workspaceMode: task.workspaceMode ?? (writePaths.length > 0 ? 'git-worktree' : 'read-only'),
     authorityRequest: task.authorityRequest ? {
       ...task.authorityRequest,
       writePaths: [...task.authorityRequest.writePaths],
@@ -53,13 +61,7 @@ export function normalizePlanDraft(
       maxCommandTimeoutMs: 1_800_000,
       networkHosts: [],
     },
-    budget: task.budget ? { ...task.budget } : {
-      schemaVersion: 1,
-      maxAttempts: 6,
-      maxTotalTokens: 600_000,
-      maxTotalDurationMs: 14_400_000,
-      maxStagnantAttempts: 3,
-    },
+    budget: task.budget ? { ...task.budget } : { ...DEFAULT_TASK_BUDGET },
   };
 }
 

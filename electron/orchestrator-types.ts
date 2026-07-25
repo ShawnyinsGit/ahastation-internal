@@ -67,6 +67,12 @@ export interface MeetingPlanNode {
   title: string;
   status: WorkerStatusKind;
   deps: string[];
+  /** True while spawnWorker is bringing the session up (context/profile
+   *  compilation, workspace prep, session.start). The handle is still 'pending'
+   *  but a concurrency slot is already consumed; surfacing this lets the
+   *  renderer's capacity banner reflect real saturation during the launch
+   *  window instead of lagging one emit behind. */
+  launching?: boolean;
   /** Immutable accepted task replaced by this versioned rework node. */
   supersedesTaskId?: string;
   executorBackendId?: string;
@@ -75,6 +81,13 @@ export interface MeetingPlanNode {
   contextSelection?: PlanMeetingTask['contextSelection'];
   workspaceMode?: PlanMeetingTask['workspaceMode'];
   authorityRequest?: PlanMeetingTask['authorityRequest'];
+  /** When dependents may start. Defaults to accepted. */
+  dependencyGate?: 'reviewed' | 'accepted';
+  /**
+   * Authoritative DAG readiness computed by WorkerScheduler.
+   * Renderer capacity must prefer this over status heuristics.
+   */
+  dependencyRelease?: 'none' | 'reviewed' | 'accepted';
   budget?: PlanMeetingTask['budget'];
   budgetState?: {
     attempts: number;
@@ -230,6 +243,8 @@ export interface WorkerHandle {
   approvalRecordedAt?: number;
   approvedPlanVersion?: number;
   acceptanceCriteria?: import('./worker-protocol.js').AcceptanceCriterion[];
+  /** When dependents of this task may start. Default accepted. */
+  dependencyGate: 'reviewed' | 'accepted';
   status: WorkerStatusKind;
   session: BackendSession | null;
   /** Last durable native conversation handle. Captured before interruption so

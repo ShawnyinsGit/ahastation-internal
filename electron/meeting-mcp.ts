@@ -134,7 +134,7 @@ export interface OrchestratorBridge {
 
   // Document tool (report mode — saves full response as a reviewable document)
   saveDocument(input: { title: string; content: string; spokenSummary: string }): Promise<{ ok: boolean; filename?: string; error?: string }>;
-  sendHostMessage(fromHostId: string, toHostId: string, text: string): { ok: boolean; error?: string };
+  sendHostMessage(fromHostId: string, toHostId: string, text: string): { ok: boolean; error?: string; truncated?: boolean };
   getCoordinatorHostId(): string;
 
   // Worker tools
@@ -206,7 +206,9 @@ export function buildTalkerMcp(
         async ({ hostId: targetHostId, question }) => {
           if (!canCoordinate()) return denied();
           const result = bridge.sendHostMessage(hostId, targetHostId, `[expert request] ${question}`);
-          return { content: [{ type: 'text', text: result.ok ? `question sent to ${targetHostId}` : `error: ${result.error}` }] };
+          if (!result.ok) return { content: [{ type: 'text', text: `error: ${result.error}` }] };
+          const note = result.truncated ? ' (truncated to fit the host bus)' : '';
+          return { content: [{ type: 'text', text: `question sent to ${targetHostId}${note}` }] };
         },
       ),
       tool(
@@ -215,7 +217,9 @@ export function buildTalkerMcp(
         { text: z.string().min(1).max(20_000) },
         async ({ text }) => {
           const result = bridge.sendHostMessage(hostId, bridge.getCoordinatorHostId(), `[expert reply from ${hostId}] ${text}`);
-          return { content: [{ type: 'text', text: result.ok ? 'reply sent to coordinator' : `error: ${result.error}` }] };
+          if (!result.ok) return { content: [{ type: 'text', text: `error: ${result.error}` }] };
+          const note = result.truncated ? ' (truncated to fit the host bus)' : '';
+          return { content: [{ type: 'text', text: `reply sent to coordinator${note}` }] };
         },
       ),
       tool(

@@ -118,7 +118,11 @@ test('legacy task_done cannot release a worker; reviewed WorkReport does', async
     },
     'delivery did not reach Coordinator review',
   );
-  assert.equal(sessions[0].ended, false, 'Coordinator review keeps the Worker resource live');
+  // The scheduler releases the Backend session as soon as a WorkReport enters
+  // verification (freeing the concurrency slot during review/acceptance), so by
+  // the time Coordinator review opens the session is already ended. Legacy
+  // task_done above must NOT have ended it; the reviewed WorkReport did.
+  assert.equal(sessions[0].ended, true, 'a reviewed WorkReport releases the Backend session for verification/review');
   for (;;) {
     if (orch.inspectDeliveryReview(review.id)?.status === 'paused') {
       await orch.coordinatorReviewDriver.resume(review.id);

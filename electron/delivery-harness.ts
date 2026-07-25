@@ -68,8 +68,13 @@ export interface DeliveryCandidate {
   verification: VerificationEvidence;
   review: ReviewVerdict;
   frozen?: FrozenDeliveryCandidate;
-  /** Set when freeze failed and the host is asked to accept the report as-is. */
+  /** True explore / verbal findings — no code paths to freeze or stage. */
   reportOnly?: boolean;
+  /**
+   * Freeze infrastructure failed while the report still lists file changes.
+   * Host may Return for rework; Accept must not mint Meeting-branch acceptance.
+   */
+  freezeDeferred?: boolean;
   reviewSession?: {
     id: string;
     reviewHash: string;
@@ -271,6 +276,14 @@ export class DeliveryHarness {
             || item.report.status === 'blocked'
           ));
           if (!last) throw new Error('delivery is not ready for acceptance');
+          // File-bearing reports cannot skip Meeting-branch staging via Accept.
+          // Only true report-only (no files) may be signed off from reworking.
+          if (last.report.files.length > 0) {
+            throw new Error(
+              'delivery has file changes and cannot be accepted without Meeting-branch staging; '
+              + 'return the delivery for rework instead',
+            );
+          }
           record.view.candidate = {
             id: decision.candidateId,
             attempt: last.attempt,
@@ -610,10 +623,11 @@ export class DeliveryHarness {
       } catch (error) {
         // Freeze is infrastructure (dirty unrelated files, HEAD drift). The
         // Worker already passed verification/review — auto-rework just burns
-        // attempts. Hand the report to the host instead.
+        // attempts. Park for host Return; Accept cannot mint Meeting acceptance
+        // without a frozen candidate (ADR-0001).
         const message = error instanceof Error ? error.message : String(error);
         this.handReportToHost(record, attempt, report, verification, review, {
-          reportOnly: true,
+          freezeDeferred: true,
           error: `candidate freeze deferred: ${message}`,
         });
         return;
@@ -646,7 +660,7 @@ export class DeliveryHarness {
     report: WorkReport,
     verification: VerificationEvidence,
     review: ReviewVerdict,
-    options: { reportOnly: boolean; error?: string },
+    options: { reportOnly?: boolean; freezeDeferred?: boolean; error?: string },
   ): void {
     record.view.error = options.error;
     record.view.candidate = {
@@ -656,6 +670,7 @@ export class DeliveryHarness {
       verification: structuredClone(verification),
       review: structuredClone(review),
       ...(options.reportOnly ? { reportOnly: true } : {}),
+      ...(options.freezeDeferred ? { freezeDeferred: true } : {}),
     };
     attempt.verification = structuredClone(verification);
     attempt.review = structuredClone(review);
@@ -665,15 +680,29 @@ export class DeliveryHarness {
     this.transition(record, 'awaiting-delivery-acceptance', 'delivery.status-changed', {
       hostReview: true,
       ...(options.error ? { reason: options.error } : {}),
+      ...(options.freezeDeferred ? { freezeDeferred: true } : {}),
     });
   }
 
   private async integrateCandidate(record: DeliveryRecord): Promise<void> {
     const candidate = record.view.candidate;
     if (!candidate) throw new Error('delivery candidate is missing');
-    // Freeze-deferred report-only candidates have no git commit to merge.
-    // Accepting them means the host signed off on the WorkReport itself.
+    // Freeze deferred with file changes: no Meeting-branch staging is possible.
+    // Host must Return for rework — Accept must not open the accepted gate.
+    if (candidate.freezeDeferred && !candidate.frozen) {
+      throw new Error(
+        'candidate freeze was deferred; return the delivery for rework. '
+        + 'Accept cannot stage file changes onto the Meeting branch without a frozen candidate',
+      );
+    }
+    // True report-only (no files) — host signs off on the WorkReport itself.
     if (candidate.reportOnly && !candidate.frozen) {
+      if (candidate.report.files.length > 0) {
+        throw new Error(
+          'report-only acceptance requires an empty files list; '
+          + 'file-bearing deliveries must freeze and enter the Integration Queue',
+        );
+      }
       const attempt = record.view.attempts.find((item) => item.attempt === candidate.attempt);
       if (attempt) {
         attempt.outcome = 'accepted';

@@ -304,6 +304,18 @@ const PARKED_SLOT_STATUSES: ReadonlySet<WorkerStatusKind> = new Set([
   'integrating',
   'integration-conflict',
 ]);
+/**
+ * Statuses that may satisfy dependencyGate: 'reviewed' after verification +
+ * independent review have passed. Mid Coordinator coverage and integration
+ * conflicts must not release dependents.
+ */
+const REVIEWED_GATE_STATUSES: ReadonlySet<WorkerStatusKind> = new Set([
+  'awaiting-acceptance',
+  'integration-queued',
+  'integrating',
+  'accepted',
+  'done',
+]);
 // Should-be-transient parks. If one persists this long the harness is hung on
 // an await that will never settle (a throw Fix 2's try/catch didn't catch, e.g.
 // a never-settling review driver) - fail the attempt closed and free the slot.
@@ -493,10 +505,10 @@ export class WorkerScheduler {
       }
       if (h.summary && (h.status === 'accepted' || h.status === 'done')) parts.push(`summary="${h.summary}"`);
       if (h.deps.length > 0) {
-                const pending = h.deps.filter((d) => {
-                  const status = this.workers.get(d)?.status;
-                  return status !== 'accepted' && status !== 'done';
-                });
+        const pending = h.deps.filter((d) => {
+          const dependency = this.workers.get(d);
+          return !dependency || !this.dependencyGateSatisfied(dependency);
+        });
         if (pending.length > 0) parts.push(`waiting_on=${pending.join(',')}`);
       }
       lines.push(parts.join(' | '));
@@ -518,6 +530,7 @@ export class WorkerScheduler {
     contextSelection?: PlanMeetingTask['contextSelection'];
     workspaceMode?: PlanMeetingTask['workspaceMode'];
     authorityRequest?: PlanMeetingTask['authorityRequest'];
+    dependencyGate?: 'reviewed' | 'accepted';
     budget?: TaskBudget;
     budgetAttempts?: TaskBudgetAttempt[];
     budgetPauseReason?: string;
@@ -554,6 +567,7 @@ export class WorkerScheduler {
       contextSelection: handle.contextSelection ? structuredClone(handle.contextSelection) : undefined,
       workspaceMode: handle.workspaceMode,
       authorityRequest: handle.authorityRequest ? structuredClone(handle.authorityRequest) : undefined,
+      dependencyGate: handle.dependencyGate,
       budget: structuredClone(handle.budget),
       budgetAttempts: structuredClone(handle.budgetAttempts),
       budgetPauseReason: handle.budgetPauseReason,
@@ -642,6 +656,7 @@ export class WorkerScheduler {
         authorityRequest: original.authorityRequest
           ? structuredClone(original.authorityRequest)
           : undefined,
+        dependencyGate: original.dependencyGate,
         budget: structuredClone(original.budget),
         approvalDecisionId: original.approvalDecisionId,
         approvalRecordedAt: original.approvalRecordedAt,
@@ -667,7 +682,9 @@ export class WorkerScheduler {
     if (!task) return [];
     return task.deps.flatMap((dependencyId) => {
       const dependency = this.workers.get(dependencyId);
-      if (!dependency || dependency.status !== 'accepted' || !dependency.report) return [];
+      if (!dependency || !dependency.report || !this.dependencyGateSatisfied(dependency)) {
+        return [];
+      }
       return [{
         taskId: dependencyId,
         reportHash: hashVisibleContextValue(dependency.report),
@@ -700,6 +717,9 @@ export class WorkerScheduler {
           contextSelection: task.contextSelection,
           workspaceMode: task.workspaceMode,
           authorityRequest: task.authorityRequest,
+          dependencyGate: task.dependencyGate === 'reviewed' || task.dependencyGate === 'accepted'
+            ? task.dependencyGate
+            : undefined,
           budget: task.budget,
           acceptanceCriteria: task.acceptanceCriteria,
           requiresDecision: task.requiresDecision,
@@ -723,6 +743,7 @@ export class WorkerScheduler {
         contextSelection: normalized.contextSelection,
         workspaceMode: normalized.workspaceMode,
         authorityRequest: normalized.authorityRequest,
+        dependencyGate: normalized.dependencyGate,
         budget: normalized.budget,
         approvalDecisionId: typeof task.approvalDecisionId === 'string'
           ? task.approvalDecisionId
@@ -853,6 +874,7 @@ export class WorkerScheduler {
           contextSelection: structuredClone(handle.contextSelection!),
           workspaceMode: handle.workspaceMode!,
           authorityRequest: structuredClone(handle.authorityRequest!),
+          dependencyGate: handle.dependencyGate,
           budget: structuredClone(handle.budget),
           acceptanceCriteria: handle.acceptanceCriteria
             ? structuredClone(handle.acceptanceCriteria)
@@ -1107,6 +1129,7 @@ export class WorkerScheduler {
         contextSelection: task.contextSelection,
         workspaceMode: task.workspaceMode,
         authorityRequest: task.authorityRequest,
+        dependencyGate: task.dependencyGate,
         budget: task.budget,
         approvalDecisionId: approval?.decisionId,
         approvalRecordedAt: approval?.approvedAt,
@@ -1144,6 +1167,7 @@ export class WorkerScheduler {
         contextSelection: handle.contextSelection ? structuredClone(handle.contextSelection) : undefined,
         workspaceMode: handle.workspaceMode,
         authorityRequest: handle.authorityRequest ? structuredClone(handle.authorityRequest) : undefined,
+        dependencyGate: handle.dependencyGate,
         budget: structuredClone(handle.budget),
         acceptanceCriteria: handle.acceptanceCriteria
           ? structuredClone(handle.acceptanceCriteria)
@@ -1298,6 +1322,7 @@ export class WorkerScheduler {
           contextSelection: operation.task.contextSelection,
           workspaceMode: operation.task.workspaceMode,
           authorityRequest: operation.task.authorityRequest,
+          dependencyGate: operation.task.dependencyGate,
           budget: operation.task.budget,
           acceptanceCriteria: operation.task.acceptanceCriteria,
         });
@@ -1466,6 +1491,44 @@ export class WorkerScheduler {
       await mailbox.markFailed(handle.id, message.id);
     }
     return mailbox.get(handle.id, message.id) ?? message;
+  }
+
+  /** Re-deliver Worker questions that were queued while the Coordinator host
+   *  was unavailable. recordWorkerQuestion enqueues durably but only delivers
+   *  when a Coordinator session exists; if it was null at ask time the question
+   *  stayed 'queued' forever (only follow-up/instruction/steer are re-driven on
+   *  activity). Called from the orchestrator after a Coordinator (re)start. */
+  async redeliverPendingWorkerQuestions(): Promise<void> {
+    const mailbox = this.opts.taskMailbox;
+    if (!mailbox) return;
+    const coordinator = this.talkerProvider();
+    if (!coordinator) return;
+    for (const handle of this.workers.values()) {
+      if (handle.status !== 'running' || !handle.session) continue;
+      const questions = mailbox.list(handle.id).filter((message) => (
+        message.sender === 'worker'
+        && message.kind === 'question'
+        && message.status === 'queued'
+        && message.attempt === handle.attempt
+      ));
+      for (const message of questions) {
+        let text: string;
+        try {
+          text = this.messageText(message);
+        } catch {
+          continue;
+        }
+        try {
+          coordinator.sendUserText(
+            `(task question from ${handle.id}, message ${message.id}) ${text}`,
+            'high',
+          );
+          await mailbox.markDelivered(handle.id, message.id);
+        } catch {
+          await mailbox.markFailed(handle.id, message.id).catch(() => undefined);
+        }
+      }
+    }
   }
 
   async forwardTaskMessage(
@@ -1811,6 +1874,13 @@ export class WorkerScheduler {
           retryable: true,
         });
       } else if (e.kind === 'ended') {
+        // Intentional park: we already nullled session and kept a delivery
+        // status. Ignore the adapter's follow-on ended so parked workers are
+        // not reclassified as crashes.
+        if (PARKED_SLOT_STATUSES.has(handle.status) && !handle.session) {
+          this.steeringMessageByWorker.delete(handle.id);
+          return;
+        }
         // A BackendSession `ended` is a real session end, not a steer
         // interrupt: steer interrupts (`session.interrupt('steer')`) emit a
         // `worker-signal { kind: 'ended', reason: 'interrupted' }` that is
@@ -2226,7 +2296,11 @@ export class WorkerScheduler {
     }
 
     handle.status = 'verifying';
+    // Delivery no longer needs the Backend session: free the concurrency slot
+    // while verification / coordinator review / user acceptance run.
+    this.releaseWorkerSession(handle);
     this.emitPlanUpdate();
+    this.spawnReadyWorkers();
     let view: DeliveryView;
     try {
       view = await this.opts.deliveryHarness.submitExternalReport(handle.deliveryId, signal.report);
@@ -2334,6 +2408,17 @@ export class WorkerScheduler {
         handle.parkedSinceTs = Date.now();
         handle.parkedNotified = false;
       }
+      // Parked delivery states never execute tools — drop the Backend session
+      // so capacity is available for independent pending work.
+      if (this.releaseWorkerSession(handle)) {
+        this.spawnReadyWorkers();
+      } else if (
+        prevStatus !== handle.status
+        && this.dependencyGateSatisfied(handle)
+      ) {
+        // Gate may have just opened for dependents even if session was already gone.
+        this.spawnReadyWorkers();
+      }
     } else if (handle.parkedSinceTs !== undefined) {
       handle.parkedSinceTs = undefined;
       handle.parkedNotified = false;
@@ -2433,6 +2518,8 @@ export class WorkerScheduler {
       handle.acceptedFinalized = false;
       throw error;
     }
+    const delivery = this.deliverySnapshotFor(handle);
+    const reportOnly = delivery?.integration?.kind === 'report-only';
     this.disposeWorker(handle, 'accepted', handle.summary);
     this.opts.workspaceManager?.release(handle.id, false);
     this.opts.emit({
@@ -2441,8 +2528,14 @@ export class WorkerScheduler {
     });
     this.emitCoordinatorBriefing({
       kind: 'accepted',
-      title: `${handle.title} 已集成到 Meeting 分支`,
-      summary: handle.summary || 'Delivery integrated and accepted.',
+      title: reportOnly
+        ? `${handle.title} 报告已确认（未进 Meeting 分支）`
+        : `${handle.title} 已集成到 Meeting 分支`,
+      summary: handle.summary || (
+        reportOnly
+          ? 'Report-only delivery accepted without Meeting-branch staging.'
+          : 'Delivery integrated and accepted.'
+      ),
       recommendedAction: 'continue',
       workerId: handle.id,
       taskId: handle.currentTaskId,
@@ -2937,6 +3030,7 @@ export class WorkerScheduler {
     contextSelection?: PlanMeetingTask['contextSelection'];
     workspaceMode?: PlanMeetingTask['workspaceMode'];
     authorityRequest?: PlanMeetingTask['authorityRequest'];
+    dependencyGate?: 'reviewed' | 'accepted';
     budget?: TaskBudget;
     approvalDecisionId?: string;
     approvalRecordedAt?: number;
@@ -2955,6 +3049,7 @@ export class WorkerScheduler {
       contextSelection: spec.contextSelection,
       workspaceMode: spec.workspaceMode,
       authorityRequest: spec.authorityRequest,
+      dependencyGate: spec.dependencyGate ?? 'accepted',
       budget: structuredClone(spec.budget ?? DEFAULT_TASK_BUDGET),
       budgetAttempts: [],
       budgetPauseReason: undefined,
@@ -3028,7 +3123,7 @@ export class WorkerScheduler {
   private satisfiedDependencyIds(): Set<string> {
     const ids = new Set<string>();
     for (const handle of this.workers.values()) {
-      if (handle.status === 'accepted' || handle.status === 'done') {
+      if (this.dependencyGateSatisfied(handle)) {
         ids.add(handle.id);
       }
     }
@@ -3159,14 +3254,100 @@ export class WorkerScheduler {
   private countRunning(): number {
     const active = new Set(this.launching);
     for (const handle of this.workers.values()) {
-      if (
-        handle.session
-        && !['accepted', 'failed', 'interrupted', 'done'].includes(handle.status)
-      ) {
-        active.add(handle.id);
+      if (!handle.session) continue;
+      // Parked delivery statuses must not consume concurrency even if a
+      // session pointer leaked; releaseWorkerSession is the primary free path.
+      if (PARKED_SLOT_STATUSES.has(handle.status)) continue;
+      if (['accepted', 'failed', 'interrupted', 'done', 'budget-paused'].includes(handle.status)) {
+        continue;
       }
+      active.add(handle.id);
     }
     return active.size;
+  }
+
+  /** End a Worker Backend session without terminalizing the handle. Returns
+   *  true when a live session was released (slot may now be free). */
+  private releaseWorkerSession(handle: WorkerHandle): boolean {
+    if (!handle.session) return false;
+    const session = handle.session;
+    handle.backendSession = session.snapshot?.() ?? handle.backendSession;
+    handle.session = null;
+    handle.pendingDelegateAck = false;
+    handle.live.busy = false;
+    handle.live.currentTool = null;
+    handle.live.currentToolInput = null;
+    this.steeringMessageByWorker.delete(handle.id);
+    this.clearPermissionTimersForHandle(handle.id);
+    try {
+      session.end();
+    } catch (err) {
+      console.warn(`[scheduler] parked worker.end() threw for ${handle.id}:`, err);
+    }
+    return true;
+  }
+
+  /** Whether dependents of this task may start under its dependencyGate. */
+  /**
+   * How far this upstream task has progressed for DAG release.
+   * - accepted: Meeting-branch staging (or true empty-file report-only accept)
+   * - reviewed: verification + review passed; not freeze-deferred / not conflict
+   */
+  private dependencyReleaseLevel(dependency: WorkerHandle): 'none' | 'reviewed' | 'accepted' {
+    if (this.acceptedGateSatisfied(dependency)) return 'accepted';
+    if (this.reviewedGateSatisfied(dependency)) return 'reviewed';
+    return 'none';
+  }
+
+  private dependencyGateSatisfied(dependency: WorkerHandle): boolean {
+    const level = this.dependencyReleaseLevel(dependency);
+    if (dependency.dependencyGate === 'reviewed') {
+      return level === 'reviewed' || level === 'accepted';
+    }
+    return level === 'accepted';
+  }
+
+  private deliverySnapshotFor(handle: WorkerHandle): DeliveryView | undefined {
+    if (!handle.deliveryId || !this.opts.deliveryHarness) return undefined;
+    return this.opts.deliveryHarness.snapshot(handle.deliveryId);
+  }
+
+  /** ADR-0001: writers open the accepted gate only after Meeting-branch staging. */
+  private acceptedGateSatisfied(dependency: WorkerHandle): boolean {
+    if (dependency.status !== 'accepted' && dependency.status !== 'done') return false;
+    const delivery = this.deliverySnapshotFor(dependency);
+    if (!delivery) {
+      // Legacy shells without a DeliveryView — status alone.
+      return true;
+    }
+    if (delivery.status !== 'accepted') {
+      return dependency.status === 'done';
+    }
+    const kind = delivery.integration?.kind;
+    if (kind === 'meeting-branch') return true;
+    if (kind === 'report-only') {
+      // Empty-file explore reports may accept without staging; file-bearing
+      // report-only acceptance is rejected by the harness and must not release.
+      return (dependency.report?.files.length ?? 0) === 0;
+    }
+    // Integrator stubs / non-git paths that returned an integration object
+    // without a kind still completed the integrate() path (not report-only).
+    if (delivery.integration && kind == null) return true;
+    return false;
+  }
+
+  private reviewedGateSatisfied(dependency: WorkerHandle): boolean {
+    if (!dependency.report) return false;
+    if (!REVIEWED_GATE_STATUSES.has(dependency.status)) return false;
+    if (dependency.status === 'awaiting-acceptance') {
+      const delivery = this.deliverySnapshotFor(dependency);
+      const candidate = delivery?.candidate;
+      // Freeze-deferred writers never completed Coordinator coverage / freeze.
+      if (candidate?.freezeDeferred) return false;
+      // Legacy mislabel: reportOnly with files was the freeze-fail path.
+      if (candidate?.reportOnly && candidate.report.files.length > 0) return false;
+    }
+    return true;
   }
 
   private async ensureTaskAuthority(
@@ -3251,8 +3432,8 @@ export class WorkerScheduler {
     for (const handle of this.workers.values()) {
       if (handle.status !== 'pending') continue;
       const allDepsDone = handle.deps.every((d) => {
-        const status = this.workers.get(d)?.status;
-        return status === 'accepted' || status === 'done';
+        const dependency = this.workers.get(d);
+        return dependency ? this.dependencyGateSatisfied(dependency) : false;
       });
       if (!allDepsDone) continue;
       if (this.countRunning() >= MAX_CONCURRENT_WORKERS) break;
@@ -3313,8 +3494,8 @@ export class WorkerScheduler {
       handle.status === 'pending'
       && !this.launching.has(handle.id)
       && handle.deps.every((dep) => {
-        const status = this.workers.get(dep)?.status;
-        return status === 'accepted' || status === 'done';
+        const dependency = this.workers.get(dep);
+        return dependency ? this.dependencyGateSatisfied(dependency) : false;
       })
     )).length;
     if (running >= MAX_CONCURRENT_WORKERS && waiting > 0) {
@@ -3335,6 +3516,10 @@ export class WorkerScheduler {
 
   private async spawnWorker(handle: WorkerHandle): Promise<void> {
     this.launching.add(handle.id);
+    // Surface the launch immediately so the renderer's capacity banner reserves
+    // this slot during context/profile/workspace compilation (before status
+    // flips to 'running'). Without this the banner lags one emit behind.
+    this.emitPlanUpdate();
     try {
       let firstMessage = handle.prompt;
       if (handle.contextSelection && !handle.contextPackage) {
@@ -3479,6 +3664,10 @@ export class WorkerScheduler {
         },
       });
       handle.status = 'running';
+      // The launch is complete once the session exists and status is 'running':
+      // stop reserving the slot via the launching flag so emitPlanUpdate below
+      // reports launching=false. (The finally clause is a backstop for throws.)
+      this.launching.delete(handle.id);
       handle.pendingDelegateAck = true;
       handle.queuedAddenda = [];
       handle.live.busy = true;
@@ -3665,6 +3854,9 @@ export class WorkerScheduler {
       title: h.title,
       status: h.status,
       deps: h.deps,
+      // Surface the launch window so the renderer's capacity banner matches the
+      // backend's countRunning (which already reserves a slot via `launching`).
+      ...(this.launching.has(h.id) ? { launching: true } : {}),
       supersedesTaskId: h.supersedesTaskId,
       executorBackendId: h.executorBackendId,
       writePaths: h.writePaths ? [...h.writePaths] : undefined,
@@ -3672,6 +3864,9 @@ export class WorkerScheduler {
       contextSelection: h.contextSelection ? structuredClone(h.contextSelection) : undefined,
       workspaceMode: h.workspaceMode,
       authorityRequest: h.authorityRequest ? structuredClone(h.authorityRequest) : undefined,
+      dependencyGate: h.dependencyGate,
+      // Authoritative DAG readiness — renderer capacity must not re-derive from status alone.
+      dependencyRelease: this.dependencyReleaseLevel(h),
       budget: structuredClone(h.budget),
       budgetState: budgetStateFor(h),
       workspaceDiagnostic: h.workspaceDiagnostic
@@ -3799,6 +3994,21 @@ export class WorkerScheduler {
       + 'Use this summary to decide whether to continue, request rework, revise the plan, or ask the user. Do not echo raw Worker logs.',
       'high',
     );
+  }
+
+  /** Orchestrator-facing seam to push a structured Coordinator briefing for
+   *  stalls that aren't tied to a Worker handle (e.g. a host-to-host ask that
+   *  never got a reply). Emits the event and nudges the Coordinator talker. */
+  briefCoordinator(input: {
+    kind: CoordinatorBriefing['kind'];
+    title: string;
+    summary: string;
+    recommendedAction: CoordinatorBriefing['recommendedAction'];
+    blockers?: string[];
+    workerId?: string;
+    taskId?: string;
+  }): void {
+    this.emitCoordinatorBriefing(input);
   }
 
   private recordFileEdit(workerId: string, path: string): void {

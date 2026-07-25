@@ -39,6 +39,7 @@ export interface RendererTaskSnapshot {
     title: string;
     prompt: string;
     deps: string[];
+    dependencyGate?: 'reviewed' | 'accepted';
     status: string;
     backendId: string;
     attempt: number;
@@ -457,6 +458,9 @@ function safeTaskSnapshot(raw: Record<string, unknown>): RendererTaskSnapshot['t
     deps: Array.isArray(raw.deps)
       ? raw.deps.filter((entry): entry is string => typeof entry === 'string').slice(0, 1_000)
       : [],
+    ...(raw.dependencyGate === 'reviewed' || raw.dependencyGate === 'accepted'
+      ? { dependencyGate: raw.dependencyGate }
+      : {}),
     status: String(raw.status ?? 'pending'),
     backendId: String(raw.executorBackendId ?? raw.backendId ?? 'unknown'),
     attempt: typeof raw.attempt === 'number' ? raw.attempt : 1,

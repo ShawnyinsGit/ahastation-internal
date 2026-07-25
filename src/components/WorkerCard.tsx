@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { AlertTriangle, Bell, RotateCcw, Terminal } from 'lucide-react';
 import type { WorkerState } from '../lib/meeting-store';
+import { WORKER_STATUS_LABEL } from '../lib/task-columns';
 import { BackendAvatar } from './BackendAvatar';
 
 interface WorkerCardProps {
@@ -58,24 +59,8 @@ function statusLabel(worker: WorkerState, speaking: boolean): string {
   if (speaking) return '发言中';
   if (worker.pendingPermission) return '等待权限';
   if (worker.currentTool) return '执行中';
-  switch (worker.status) {
-    case 'running': return '执行中';
-    case 'verifying': return '校验中';
-    case 'reviewing': return '评审中';
-    case 'coordinator-reviewing': return 'Coordinator 审查中';
-    case 'awaiting-acceptance': return '等待验收';
-    case 'integration-queued': return '等待集成';
-    case 'integrating': return '集成中';
-    case 'integration-conflict': return '集成冲突';
-    case 'reworking': return '需要返工';
-    case 'budget-paused': return '预算暂停';
-    case 'accepted': return '已接受';
-    case 'pending': return '等待调度';
-    case 'interrupted': return '已中断';
-    case 'done':    return '已完成';
-    case 'failed':  return '失败';
-    default:        return '空闲';
-  }
+  if (worker.status === 'idle') return '空闲';
+  return WORKER_STATUS_LABEL[worker.status] ?? '空闲';
 }
 
 const PULSE_MS = 600;

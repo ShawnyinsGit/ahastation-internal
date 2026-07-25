@@ -19,6 +19,10 @@ import {
   meetingStore,
   type WorkerState,
 } from '../lib/meeting-store';
+import {
+  dependencyGateDetail,
+  dependencyGateShortLabel,
+} from '../lib/dependency-gate';
 import type { RendererTaskSnapshot } from '../types';
 import { BackendAvatar } from './BackendAvatar';
 import { PermissionCard } from './PermissionCard';
@@ -46,11 +50,11 @@ const STATUS_LABEL: Record<string, string> = {
   verifying: '验证中',
   reviewing: 'Coordinator 审查中',
   'coordinator-reviewing': 'Coordinator 审查中',
-  'awaiting-acceptance': '等待验收',
+  'awaiting-acceptance': '待人手确认',
   'integration-queued': '等待集成',
   integrating: '集成中',
   reworking: '返工中',
-  accepted: '已集成',
+  accepted: '已进 Meeting 分支',
   interrupted: '已中断',
   done: '已完成',
   blocked: '已阻塞',
@@ -104,6 +108,14 @@ function ContextDetails({ snapshot }: { snapshot: RendererTaskSnapshot }) {
             ? snapshot.task.deps.map((dependency) => <code key={dependency}>{dependency}</code>)
             : <small>无前置依赖</small>}
         </div>
+        <p className="task-dependency-gate-note">
+          下游启动门槛：
+          <span className={`task-gate-chip is-${snapshot.task.dependencyGate ?? 'accepted'}`}>
+            {dependencyGateShortLabel(snapshot.task.dependencyGate)}
+          </span>
+          {' · '}
+          {dependencyGateDetail(snapshot.task.dependencyGate)}
+        </p>
       </section>
     </div>
   );

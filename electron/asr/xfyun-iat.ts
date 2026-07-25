@@ -149,6 +149,14 @@ export class XfyunResultAssembler {
   }
 }
 
+function websocketErrorMessage(event: WebSocketEvent): string {
+  if (typeof event.message === 'string' && event.message.trim()) return event.message;
+  const nested = event.error;
+  if (nested instanceof Error && nested.message.trim()) return nested.message;
+  if (typeof nested === 'string' && nested.trim()) return nested;
+  return 'Xunfei WebSocket connection failed';
+}
+
 function defaultWebSocketFactory(url: string): WebSocketLike {
   const Constructor = (globalThis as unknown as {
     WebSocket?: new (target: string) => WebSocketLike;
@@ -215,7 +223,7 @@ export class XfyunIatSession {
       };
       const onOpen = () => finish();
       const onError = (event: WebSocketEvent) => {
-        finish(new Error(event.message || 'Xunfei WebSocket connection failed'));
+        finish(new Error(websocketErrorMessage(event)));
       };
       const onClose = () => finish(new Error('Xunfei WebSocket closed during connection'));
       socket.addEventListener('open', onOpen);
@@ -347,7 +355,7 @@ export class XfyunIatSession {
   };
 
   private readonly onRuntimeError = (event: WebSocketEvent) => {
-    this.fail(new Error(event.message || 'Xunfei WebSocket failed'));
+    this.fail(new Error(websocketErrorMessage(event)));
   };
 
   private readonly onRuntimeClose = () => {

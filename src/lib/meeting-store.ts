@@ -288,6 +288,8 @@ export interface AggregatedTask {
   statusLabel: string;
   backendId: string | null;
   deps: string[];
+  /** When dependents of this task may start. */
+  dependencyGate: 'reviewed' | 'accepted';
   attempt: number;
   /** Why this task is parked on the user, or null when nothing is blocking. */
   blockedReason: string | null;
@@ -751,6 +753,7 @@ class MeetingStore {
           statusLabel: WORKER_STATUS_LABEL[status],
           backendId: worker?.backendId ?? node.executorBackendId ?? null,
           deps: node.deps,
+          dependencyGate: node.dependencyGate === 'reviewed' ? 'reviewed' : 'accepted',
           attempt: worker?.attempt ?? 1,
           blockedReason,
         });
@@ -1659,11 +1662,14 @@ class MeetingStore {
           candidateHostId,
           error: e.error,
         },
-        lastError: `主持人 ${e.hostId} 已退出，可在参与者面板选 ${candidateHostId} 接管`,
+        lastError: `主持人 ${e.hostId} 已退出，可在参与者面板把对话角色交给 ${candidateHostId}（Worker 执行仍在 default）`,
       }));
       this.bumpUnread(slot);
       if (slot.id === this.activeId) {
-        this.announce(`主持人 ${e.hostId} 已退出。可在参与者面板选择 ${e.candidateHostId} 接管，已有 Worker 会继续运行。`);
+        this.announce(
+          `主持人 ${e.hostId} 已退出。可在参与者面板把 Coordinator 对话角色交给 ${e.candidateHostId}；`
+          + '任务调度与工作区仍留在 default，不会跟着迁移。',
+        );
       }
       return;
     }

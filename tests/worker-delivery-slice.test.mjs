@@ -233,3 +233,415 @@ test('capacity saturation pauses new work and sends one structured coordinator b
   );
   scheduler.endAll();
 });
+
+test('parked awaiting-acceptance releases the concurrency slot for pending work', async () => {
+  const sessions = [];
+  const harness = new DeliveryHarness({
+    executionMode: 'external',
+    verifier: { async verify() { return { passed: true, checks: [{ id: 'tests' }] }; } },
+    reviewer: { async review() { return { passed: true, findings: [] }; } },
+    integrator: {
+      async integrate() {
+        return {
+          kind: 'meeting-branch',
+          sourceRevision: 'base',
+          resultRevision: 'integrated',
+          workspace: process.cwd(),
+        };
+      },
+    },
+  });
+  const scheduler = new WorkerScheduler({
+    emit() {},
+    cwd: process.cwd(),
+    autoApproveScope: 'off',
+    sessionFactory(opts) {
+      const session = {
+        opts,
+        ended: false,
+        async start() {},
+        sendUserText() {},
+        sendUserContent() {},
+        resolvePermission() {},
+        async interrupt() {},
+        end() { this.ended = true; },
+      };
+      sessions.push(session);
+      return session;
+    },
+    buildWorkerMcp() { return {}; },
+    getTalker() { return null; },
+    isClosed() { return false; },
+    getSpeechFilterMode() { return 'strict'; },
+    meetingId: 'meeting-parked-slot',
+    deliveryHarness: harness,
+  });
+  const tasks = Array.from({ length: 5 }, (_, index) => ({
+    id: `slot-${index + 1}`,
+    title: `Slot ${index + 1}`,
+    prompt: `do slot ${index + 1}`,
+    deps: [],
+    acceptanceCriteria: [{
+      id: 'manual',
+      description: 'Host accepts',
+      verification: { kind: 'manual' },
+    }],
+  }));
+  assert.deepEqual(scheduler.installPlan(tasks), { ok: true });
+  await waitFor(() => sessions.length === 4, 'four worker slots were not filled');
+
+  sessions[0].opts.emit({ kind: 'worker-signal', signal: { kind: 'delivery', report } });
+  await waitFor(
+    () => scheduler.snapshot().find((task) => task.id === 'slot-1')?.status === 'awaiting-acceptance',
+    'first worker did not park in awaiting-acceptance',
+  );
+  assert.equal(sessions[0].ended, true, 'parked worker must end its Backend session');
+  await waitFor(() => sessions.length === 5, 'freed slot did not start the fifth pending worker');
+  assert.equal(
+    scheduler.snapshot().find((task) => task.id === 'slot-5')?.status,
+    'running',
+  );
+  scheduler.endAll();
+});
+
+test('dependencyGate reviewed releases dependents before user acceptance', async () => {
+  const sessions = [];
+  const harness = new DeliveryHarness({
+    executionMode: 'external',
+    verifier: { async verify() { return { passed: true, checks: [{ id: 'tests' }] }; } },
+    reviewer: { async review() { return { passed: true, findings: [] }; } },
+    integrator: {
+      async integrate() {
+        return {
+          kind: 'meeting-branch',
+          sourceRevision: 'base',
+          resultRevision: 'integrated',
+          workspace: process.cwd(),
+        };
+      },
+    },
+  });
+  const scheduler = new WorkerScheduler({
+    emit() {},
+    cwd: process.cwd(),
+    autoApproveScope: 'off',
+    sessionFactory(opts) {
+      const session = {
+        opts,
+        async start() {},
+        sendUserText() {},
+        sendUserContent() {},
+        resolvePermission() {},
+        async interrupt() {},
+        end() {},
+      };
+      sessions.push(session);
+      return session;
+    },
+    buildWorkerMcp() { return {}; },
+    getTalker() { return null; },
+    isClosed() { return false; },
+    getSpeechFilterMode() { return 'strict'; },
+    meetingId: 'meeting-reviewed-gate',
+    deliveryHarness: harness,
+  });
+
+  assert.deepEqual(scheduler.installPlan([
+    {
+      id: 'analysis',
+      title: 'Analysis',
+      prompt: 'inspect and report',
+      deps: [],
+      dependencyGate: 'reviewed',
+      acceptanceCriteria: [{
+        id: 'manual',
+        description: 'Host accepts',
+        verification: { kind: 'manual' },
+      }],
+    },
+    {
+      id: 'follow-on',
+      title: 'Follow on',
+      prompt: 'use the analysis',
+      deps: ['analysis'],
+    },
+  ]), { ok: true });
+
+  await waitFor(() => sessions.length === 1, 'analysis worker did not start');
+  sessions[0].opts.emit({ kind: 'worker-signal', signal: { kind: 'delivery', report } });
+  await waitFor(
+    () => scheduler.snapshot().find((task) => task.id === 'analysis')?.status === 'awaiting-acceptance',
+    'analysis did not reach awaiting-acceptance',
+  );
+  await waitFor(() => sessions.length === 2, 'reviewed gate did not release the dependent');
+  assert.equal(
+    scheduler.snapshot().find((task) => task.id === 'follow-on')?.status,
+    'running',
+  );
+  assert.equal(
+    scheduler.snapshot().find((task) => task.id === 'analysis')?.status,
+    'awaiting-acceptance',
+    'reviewed gate must not invent acceptance',
+  );
+  scheduler.endAll();
+});
+
+test('freeze-deferred Accept cannot open the accepted dependency gate', async () => {
+  const sessions = [];
+  const harness = new DeliveryHarness({
+    executionMode: 'external',
+    verifier: { async verify() { return { passed: true, checks: [{ id: 'tests' }] }; } },
+    reviewer: { async review() { return { passed: true, findings: [] }; } },
+    integrator: {
+      async integrate() {
+        return {
+          kind: 'meeting-branch',
+          sourceRevision: 'base',
+          resultRevision: 'integrated',
+          workspace: process.cwd(),
+        };
+      },
+    },
+    candidatePreparer: {
+      async prepare() {
+        throw new Error('worktree contains unreported changes: package.json');
+      },
+    },
+    reviewDriver: {
+      async request() {
+        throw new Error('review driver must not run when freeze fails');
+      },
+    },
+  });
+  const scheduler = new WorkerScheduler({
+    emit() {},
+    cwd: process.cwd(),
+    autoApproveScope: 'off',
+    sessionFactory(opts) {
+      const session = {
+        opts,
+        async start() {},
+        sendUserText() {},
+        sendUserContent() {},
+        resolvePermission() {},
+        async interrupt() {},
+        end() {},
+      };
+      sessions.push(session);
+      return session;
+    },
+    buildWorkerMcp() { return {}; },
+    getTalker() { return null; },
+    isClosed() { return false; },
+    getSpeechFilterMode() { return 'strict'; },
+    meetingId: 'meeting-freeze-gate',
+    deliveryHarness: harness,
+    workspaceManager: {
+      inspectBaseline() {
+        return {
+          kind: 'git-clean',
+          revision: 'base-revision',
+          changedPaths: [],
+          untrackedPaths: [],
+          truncated: false,
+        };
+      },
+      preparationBlock() { return null; },
+      canPrepare() { return true; },
+      prepare(_taskId, input) {
+        return {
+          kind: input.mode,
+          cwd: process.cwd(),
+          sourceRevision: 'base-revision',
+          lockKeys: [],
+          baseline: this.inspectBaseline(),
+          managed: true,
+        };
+      },
+      release() {},
+    },
+  });
+
+  assert.deepEqual(scheduler.installPlan([
+    {
+      id: 'writer',
+      title: 'Writer',
+      prompt: 'change code',
+      deps: [],
+      dependencyGate: 'accepted',
+      writePaths: ['src'],
+      workspaceMode: 'git-worktree',
+      acceptanceCriteria: [{
+        id: 'tests',
+        description: 'Tests pass',
+        verification: { kind: 'manual' },
+      }],
+    },
+    {
+      id: 'follow-on',
+      title: 'Follow on',
+      prompt: 'use writer output',
+      deps: ['writer'],
+      writePaths: ['src'],
+      workspaceMode: 'git-worktree',
+    },
+  ]), { ok: true });
+
+  await waitFor(() => sessions.length === 1, 'writer did not start');
+  sessions[0].opts.emit({ kind: 'worker-signal', signal: { kind: 'delivery', report } });
+  await waitFor(
+    () => scheduler.snapshot().find((task) => task.id === 'writer')?.status === 'awaiting-acceptance',
+    'writer did not park after freeze deferral',
+  );
+  const writer = scheduler.snapshot().find((task) => task.id === 'writer');
+  const delivery = writer.delivery;
+  assert.equal(delivery?.candidate?.freezeDeferred, true);
+
+  await assert.rejects(
+    () => scheduler.acceptDelivery(delivery.id, delivery.candidate.id),
+    /freeze was deferred|Meeting branch/,
+  );
+  assert.equal(
+    scheduler.snapshot().find((task) => task.id === 'follow-on')?.status,
+    'pending',
+    'accepted gate must stay closed without Meeting-branch staging',
+  );
+  assert.equal(sessions.length, 1);
+  scheduler.endAll();
+});
+
+test('reviewed gate stays closed during coordinator-reviewing', async () => {
+  const sessions = [];
+  let resolveReview;
+  const reviewRequested = new Promise((resolve) => { resolveReview = resolve; });
+  const frozenFixture = (await import('./fixtures/coordinator-review-candidate.json', {
+    with: { type: 'json' },
+  })).default;
+  const harness = new DeliveryHarness({
+    executionMode: 'external',
+    verifier: { async verify() { return { passed: true, checks: [{ id: 'tests' }] }; } },
+    reviewer: { async review() { return { passed: true, findings: [] }; } },
+    integrator: {
+      async integrate() {
+        return {
+          kind: 'meeting-branch',
+          sourceRevision: 'base',
+          resultRevision: 'integrated',
+          workspace: process.cwd(),
+        };
+      },
+    },
+    candidatePreparer: {
+      async prepare(order) {
+        const frozen = structuredClone(frozenFixture);
+        frozen.deliveryId = order.deliveryId;
+        frozen.attempt = order.attempt;
+        frozen.taskId = order.taskId;
+        frozen.workspace = order.workspace;
+        frozen.baseRevision = order.sourceRevision;
+        return frozen;
+      },
+    },
+    reviewDriver: {
+      async request(input) {
+        resolveReview(input);
+        return {
+          id: 'review-1',
+          deliveryId: input.candidate.deliveryId,
+          candidateId: input.candidate.id,
+          reviewHash: input.candidate.diffHash,
+          status: 'active',
+        };
+      },
+    },
+  });
+  const scheduler = new WorkerScheduler({
+    emit() {},
+    cwd: process.cwd(),
+    autoApproveScope: 'off',
+    sessionFactory(opts) {
+      const session = {
+        opts,
+        async start() {},
+        sendUserText() {},
+        sendUserContent() {},
+        resolvePermission() {},
+        async interrupt() {},
+        end() {},
+      };
+      sessions.push(session);
+      return session;
+    },
+    buildWorkerMcp() { return {}; },
+    getTalker() { return null; },
+    isClosed() { return false; },
+    getSpeechFilterMode() { return 'strict'; },
+    meetingId: 'meeting-coord-review-gate',
+    deliveryHarness: harness,
+    workspaceManager: {
+      inspectBaseline() {
+        return {
+          kind: 'git-clean',
+          revision: 'base-revision',
+          changedPaths: [],
+          untrackedPaths: [],
+          truncated: false,
+        };
+      },
+      preparationBlock() { return null; },
+      canPrepare() { return true; },
+      prepare(_taskId, input) {
+        return {
+          kind: input.mode,
+          cwd: process.cwd(),
+          sourceRevision: 'base-revision',
+          lockKeys: [],
+          baseline: this.inspectBaseline(),
+          managed: true,
+        };
+      },
+      release() {},
+    },
+  });
+
+  assert.deepEqual(scheduler.installPlan([
+    {
+      id: 'writer',
+      title: 'Writer',
+      prompt: 'change code',
+      deps: [],
+      dependencyGate: 'reviewed',
+      writePaths: ['src'],
+      workspaceMode: 'git-worktree',
+      acceptanceCriteria: [{
+        id: 'tests',
+        description: 'Tests pass',
+        verification: { kind: 'manual' },
+      }],
+    },
+    {
+      id: 'follow-on',
+      title: 'Follow on',
+      prompt: 'use writer output',
+      deps: ['writer'],
+      writePaths: ['src'],
+      workspaceMode: 'git-worktree',
+    },
+  ]), { ok: true });
+
+  await waitFor(() => sessions.length === 1, 'writer did not start');
+  sessions[0].opts.emit({ kind: 'worker-signal', signal: { kind: 'delivery', report } });
+  await reviewRequested;
+  await waitFor(
+    () => scheduler.snapshot().find((task) => task.id === 'writer')?.status === 'coordinator-reviewing',
+    'writer did not enter coordinator-reviewing',
+  );
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(
+    scheduler.snapshot().find((task) => task.id === 'follow-on')?.status,
+    'pending',
+    'reviewed gate must not release during coordinator-reviewing',
+  );
+  assert.equal(sessions.length, 1);
+  scheduler.endAll();
+});

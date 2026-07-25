@@ -210,7 +210,56 @@ test('a connecting host cannot take over coordination before readiness', async (
     });
     releaseSecond();
     await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(orchestrator.setCoordinator('connecting-codex').ok, true);
+    const handed = orchestrator.setCoordinator('connecting-codex');
+    assert.deepEqual(handed, {
+      ok: true,
+      coordinatorHostId: 'connecting-codex',
+      executionHostId: 'default',
+      handoff: 'talker-role-only',
+    });
+    assert.equal(orchestrator.getCoordinatorHostId(), 'connecting-codex');
+  } finally {
+    await orchestrator.end();
+  }
+});
+
+test('cross-host messages queue until the target Host talker is ready', async () => {
+  let sessionCount = 0;
+  let releaseSecond;
+  const secondReady = new Promise((resolve) => { releaseSecond = resolve; });
+  const sessions = [];
+  const orchestrator = new Orchestrator({
+    emit() {},
+    cwd: process.cwd(),
+    sessionFactory: () => {
+      sessionCount += 1;
+      const inputs = [];
+      const session = {
+        inputs,
+        async start() { if (sessionCount === 2) await secondReady; },
+        end() {},
+        sendUserText(text) { inputs.push(text); },
+        sendUserContent() {},
+        resolvePermission() {},
+        async interrupt() {},
+      };
+      sessions.push(session);
+      return session;
+    },
+  });
+  try {
+    await orchestrator.start();
+    assert.equal(orchestrator.addHost('codex', 'late-expert').ok, true);
+    assert.equal(
+      orchestrator.sendHostMessage('default', 'late-expert', 'hello while connecting').ok,
+      true,
+    );
+    assert.equal(sessions[1]?.inputs.length ?? 0, 0, 'message must not drop before readiness');
+    releaseSecond();
+    await waitFor(
+      () => (sessions[1]?.inputs.some((text) => text.includes('hello while connecting')) ?? false),
+      'queued cross-host message was not flushed after host ready',
+    );
   } finally {
     await orchestrator.end();
   }
