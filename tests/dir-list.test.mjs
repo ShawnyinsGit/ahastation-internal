@@ -43,19 +43,30 @@ async function makeTree() {
   await mkdir(join(base, '.hidden'));
   await writeFile(join(base, 'file.txt'), 'not a dir');
   // Symlink to a real directory should be listed; a broken one skipped.
-  await symlink(join(base, 'alpha'), join(base, 'alpha-link'), 'dir');
-  await symlink(join(base, 'missing'), join(base, 'broken-link'), 'dir');
-  return base;
+  // Windows only allows symlink creation with Developer Mode or elevation —
+  // fall back to a link-free tree there instead of failing the whole suite.
+  let hasSymlinks = true;
+  try {
+    await symlink(join(base, 'alpha'), join(base, 'alpha-link'), 'dir');
+    await symlink(join(base, 'missing'), join(base, 'broken-link'), 'dir');
+  } catch (error) {
+    if (process.platform === 'win32' && error.code === 'EPERM') {
+      hasSymlinks = false;
+    } else {
+      throw error;
+    }
+  }
+  return { base, hasSymlinks };
 }
 
 test('listSubdirs lists only directories, hides dot-dirs by default, sorted', async (t) => {
-  const base = await makeTree();
+  const { base, hasSymlinks } = await makeTree();
   t.after(() => rm(base, { recursive: true, force: true }));
 
   const entries = await listSubdirs(base, false);
   assert.deepEqual(
     entries.map((e) => e.name),
-    ['alpha', 'alpha-link', 'Beta'],
+    hasSymlinks ? ['alpha', 'alpha-link', 'Beta'] : ['alpha', 'Beta'],
   );
   for (const e of entries) {
     assert.equal(e.path, join(base, e.name));
@@ -63,13 +74,13 @@ test('listSubdirs lists only directories, hides dot-dirs by default, sorted', as
 });
 
 test('listSubdirs includes dot-dirs when showHidden is true', async (t) => {
-  const base = await makeTree();
+  const { base, hasSymlinks } = await makeTree();
   t.after(() => rm(base, { recursive: true, force: true }));
 
   const entries = await listSubdirs(base, true);
   assert.deepEqual(
     entries.map((e) => e.name),
-    ['.hidden', 'alpha', 'alpha-link', 'Beta'],
+    hasSymlinks ? ['.hidden', 'alpha', 'alpha-link', 'Beta'] : ['.hidden', 'alpha', 'Beta'],
   );
 });
 
