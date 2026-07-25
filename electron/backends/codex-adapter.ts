@@ -83,7 +83,10 @@ const CODEX_CAPABILITIES: BackendCapabilities = {
   interrupt: true,
   defaultModel: 'gpt-5.4',
   // Suggestions for the settings UI; free-text still accepts any model ID.
-  models: ['gpt-5.4', 'gpt-5.4-mini', 'gpt-5.2', 'glm-5.2'],
+  // Do not list third-party models here: with ChatGPT-account auth the Codex
+  // service rejects them with a 400 (e.g. glm-5.2), so suggesting one steers
+  // users into a meeting that dies on the first turn.
+  models: ['gpt-5.4', 'gpt-5.4-mini', 'gpt-5.2'],
   npmPackage: '@openai/codex',
   installHint: 'npm install -g @openai/codex',
 };
@@ -514,7 +517,9 @@ class CodexAppServerSession implements BackendSession {
       const turnId = typeof turn.id === 'string' ? turn.id : '';
       const suppressed = turnId ? this.suppressedWorkerTurns.delete(turnId) : false;
       if (turn.status === 'failed') {
-        const detail = isRecord(turn.error) ? String(turn.error.message ?? 'Turn failed') : 'Turn failed';
+        const detail = describeCodexTurnError(
+          isRecord(turn.error) ? String(turn.error.message ?? 'Turn failed') : 'Turn failed',
+        );
         if (isCodexAuthError(detail)) this.emitAuthRequired();
         else if (this.isWorker && !suppressed) {
           this.emit({
@@ -537,7 +542,7 @@ class CodexAppServerSession implements BackendSession {
     }
     if (notification.method === 'error') {
       const error = isRecord(notification.params.error) ? notification.params.error : {};
-      const detail = String(error.message ?? 'Codex app-server error');
+      const detail = describeCodexTurnError(String(error.message ?? 'Codex app-server error'));
       if (isCodexAuthError(detail)) this.emitAuthRequired();
       else if (!notification.params.willRetry) {
         if (this.isWorker) {
@@ -1151,6 +1156,18 @@ function imageExtension(mediaType: string): string {
 
 function isCodexAuthError(message: string): boolean {
   return /\b401\b|unauthorized|missing bearer|authentication (?:is )?required/i.test(message);
+}
+
+/** Turn a raw Codex service rejection into an actionable message. The
+ *  unsupported-model 400 (third-party model ID with ChatGPT-account auth)
+ *  otherwise surfaces as opaque JSON and the meeting idles dead. */
+export function describeCodexTurnError(detail: string): string {
+  if (/model.{0,40}not supported/i.test(detail)) {
+    const model = /'([^']+)' model/i.exec(detail)?.[1];
+    return `${detail} — 当前 Codex 登录方式不支持模型${model ? ` "${model}"` : ''}。`
+      + '请在设置中为 Codex 后端选择 gpt-5.x 系列模型，或改用 API key + 自定义 baseURL 接入该模型。';
+  }
+  return detail;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
