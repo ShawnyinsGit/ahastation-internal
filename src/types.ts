@@ -830,6 +830,18 @@ export interface VoicePrint {
   enrolledAt: number;
 }
 
+// Enrollment progress broadcast from the main window's voice pipeline to the
+// settings window's VoiceLockPanel (the panel UI lives in settings, the mic
+// lives in the main window).
+export interface VoiceLockEnrollState {
+  enrollment: {
+    targetSeconds: number;
+    capturedSeconds: number;
+    segments: number;
+  } | null;
+  toast: 'saved' | 'tooShort' | 'cancelled' | null;
+}
+
 export type MemoryCategory = 'point' | 'decision' | 'todo' | 'fact';
 
 export interface MemoryEntry {
@@ -1204,6 +1216,13 @@ export interface VibeMeetApi {
   getVoiceConfig: () => Promise<{ enabled: boolean; voicePrint: VoicePrint | null }>;
   setVoiceLockEnabled: (on: boolean) => Promise<{ ok: boolean }>;
   setVoicePrint: (vp: VoicePrint | null) => Promise<{ ok: boolean }>;
+  // Voice-lock enrollment bridge (settings window <-> main window mic pipeline).
+  voiceLockEnrollStart: () => Promise<{ ok: boolean }>;
+  voiceLockEnrollCancel: () => Promise<{ ok: boolean }>;
+  onVoiceLockEnrollCmd: (cb: (cmd: 'start' | 'cancel') => void) => () => void;
+  sendVoiceLockEnrollState: (state: VoiceLockEnrollState) => void;
+  onVoiceLockEnrollState: (cb: (state: VoiceLockEnrollState) => void) => () => void;
+  onVoiceConfigChanged: (cb: () => void) => () => void;
   getVoicePref: () => Promise<{ selectedVoiceName: string | null; guidanceDismissed: boolean; speechFilterMode: 'strict' | 'off'; voicePolishEnabled: boolean; reportModeEnabled: boolean; handheldMode: 'auto' | 'handheld' | 'desktop'; xfyunAsr: XfyunAsrCredentials }>;
   setVoicePref: (patch: { selectedVoiceName?: string | null; guidanceDismissed?: boolean; speechFilterMode?: 'strict' | 'off'; voicePolishEnabled?: boolean; reportModeEnabled?: boolean; handheldMode?: 'auto' | 'handheld' | 'desktop'; xfyunAsr?: Partial<XfyunAsrCredentials> }) => Promise<{ ok: boolean; error?: string }>;
   onVoicePrefChanged: (cb: () => void) => () => void;

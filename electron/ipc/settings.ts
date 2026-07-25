@@ -1,6 +1,15 @@
 import { ipcMain, shell, webContents } from 'electron';
 import { getSettings, updateSettings, clearVoicePrint, type Settings, type VoicePrint, type XfyunAsrCredentials } from '../store.js';
 
+// Tell every other window that the stored voice config (voiceprint / lock
+// toggle) changed, so their hooks re-fetch instead of running on stale state.
+function broadcastVoiceConfigChanged(excludeWebContentsId?: number): void {
+  for (const wc of webContents.getAllWebContents()) {
+    if (wc.id === excludeWebContentsId) continue;
+    wc.send('voiceconfig:changed');
+  }
+}
+
 export interface VoicePrefPatch {
   selectedVoiceName?: string | null;
   guidanceDismissed?: boolean;
@@ -87,18 +96,48 @@ export function registerSettingsIpc(): void {
     };
   });
 
-  ipcMain.handle('settings:set-voice-lock-enabled', async (_e, enabled: boolean) => {
+  ipcMain.handle('settings:set-voice-lock-enabled', async (e, enabled: boolean) => {
     await updateSettings({ voiceLockEnabled: !!enabled });
+    broadcastVoiceConfigChanged(e.sender.id);
     return { ok: true };
   });
 
-  ipcMain.handle('settings:set-voice-print', async (_e, vp: VoicePrint | null) => {
+  ipcMain.handle('settings:set-voice-print', async (e, vp: VoicePrint | null) => {
     if (!vp) {
       await clearVoicePrint();
     } else {
       await updateSettings({ voicePrint: vp });
     }
+    broadcastVoiceConfigChanged(e.sender.id);
     return { ok: true };
+  });
+
+  // Voice-lock enrollment bridge. The enrollment UI lives in the settings
+  // window, but the mic/VAD/embedding pipeline only exists in the main
+  // window's App. Commands travel settings -> here -> main window; the main
+  // window streams enrollment progress back on 'voicelock:enroll-state'.
+  ipcMain.handle('voicelock:enroll-start', async () => {
+    for (const wc of webContents.getAllWebContents()) {
+      wc.send('voicelock:enroll-cmd', { cmd: 'start' });
+    }
+    return { ok: true };
+  });
+
+  ipcMain.handle('voicelock:enroll-cancel', async () => {
+    for (const wc of webContents.getAllWebContents()) {
+      wc.send('voicelock:enroll-cmd', { cmd: 'cancel' });
+    }
+    return { ok: true };
+  });
+
+  ipcMain.on('voicelock:enroll-state', (e, state: unknown) => {
+    for (const wc of webContents.getAllWebContents()) {
+      if (wc.id !== e.sender.id) wc.send('voicelock:enroll-state', state);
+    }
+  });
+
+  ipcMain.on('voiceconfig:changed', (e) => {
+    broadcastVoiceConfigChanged(e.sender.id);
   });
 
   ipcMain.handle('settings:get-voice-pref', async () => {

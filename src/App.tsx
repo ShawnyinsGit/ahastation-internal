@@ -275,6 +275,25 @@ export function App() {
   const voiceLock = useVoiceLock({ muted, setMuted, setAiSpeaking, speakingRef });
   const voicePrefs = useVoicePreferences();
 
+  // Voice-lock enrollment bridge: the enrollment UI lives in the settings
+  // window, but the mic/VAD pipeline lives here. The settings window sends
+  // start/cancel commands over IPC; we run enrollment on this hook and stream
+  // progress back so the panel can render it.
+  useEffect(() => {
+    return window.vibeMeet.onVoiceLockEnrollCmd((cmd) => {
+      if (cmd === 'start') voiceLock.handleStartEnrollment();
+      else if (cmd === 'cancel') voiceLock.handleCancelEnrollment();
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [voiceLock.handleStartEnrollment, voiceLock.handleCancelEnrollment]);
+
+  useEffect(() => {
+    window.vibeMeet.sendVoiceLockEnrollState({
+      enrollment: voiceLock.enrollment,
+      toast: voiceLock.enrollmentToast,
+    });
+  }, [voiceLock.enrollment, voiceLock.enrollmentToast]);
+
   // Stable element for both header variants — an inline JSX slot would break
   // the memoized MeetingHeader/AppTopBar on every App render.
   const settingsSlot = useMemo(
@@ -465,7 +484,9 @@ export function App() {
     retryable: micRetryable,
     retry: retryMic,
   } = useAsr({
-    enabled: micEnabled,
+    // Enrollment must capture even when the mic toggle is off — useAsr mounts
+    // VAD for a tapSegment request, but only while `enabled` is true.
+    enabled: micEnabled || voiceLock.enrollmentActive,
     onTranscript: onVoiceFinal,
     onBargeIn,
     paused: muted,
