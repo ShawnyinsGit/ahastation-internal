@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, lstatSync, mkdirSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -476,11 +476,32 @@ test('existing symbolic-link ancestors are rejected', (t) => {
   );
 });
 
-test('replacing a workspace at the same path invalidates its identity binding', () => {
+test('replacing a workspace at the same path invalidates its identity binding', (t) => {
   const root = workspace();
   const authority = grant(root);
+  const original = lstatSync(root);
   rmSync(root, { recursive: true, force: true });
-  mkdirSync(root, { recursive: true });
+  // Linux CI filesystems aggressively hand the freed inode straight back to
+  // the next mkdir — which would make dev+inode identical and the identity
+  // check under test unobservable. Churn allocations until the replacement
+  // workspace provably occupies a different inode.
+  const parent = join(root, '..');
+  const churn = [];
+  let replaced = null;
+  for (let attempt = 0; attempt < 64 && !replaced; attempt += 1) {
+    const filler = join(parent, `.inode-churn-${process.pid}-${attempt}`);
+    mkdirSync(filler, { recursive: true });
+    churn.push(filler);
+    mkdirSync(root, { recursive: true });
+    const stat = lstatSync(root);
+    if (stat.dev !== original.dev || stat.ino !== original.ino) {
+      replaced = stat;
+    } else {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+  t.after(() => churn.forEach((dir) => rmSync(dir, { recursive: true, force: true })));
+  assert.ok(replaced, 'could not allocate the replacement workspace on a fresh inode');
   assert.deepEqual(
     evaluateTaskAuthority(authority, canonical(root), APPROVED_AT + 1),
     { kind: 'deny', reason: 'workspace-identity-mismatch' },

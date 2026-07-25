@@ -126,7 +126,13 @@ test('packaged Qoder runtime resolves to an unpacked executable', async (t) => {
   await mkdir(join(binary, '..'), { recursive: true });
   await writeFile(binary, '#!/usr/bin/env node\n');
   await chmod(binary, 0o755);
-  assert.equal(resolveQoderRuntime(resources, () => null), await realpath(binary));
+  // Windows CI runners expose %TEMP% as an 8.3 short path, and the sync
+  // realpath inside resolveQoderRuntime preserves it while the promise
+  // variant resolves to the long name — canonicalize both sides before
+  // comparing so the assertion is about the file, not the path spelling.
+  const resolved = resolveQoderRuntime(resources, () => null);
+  assert.ok(resolved, 'unpacked runtime was not resolved');
+  assert.equal(await realpath(resolved), await realpath(binary));
 });
 
 test('failed Qoder readiness handshake closes the spawned SDK session', async () => {
