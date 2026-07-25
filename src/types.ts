@@ -1416,6 +1416,22 @@ export interface VibeMeetApi {
     onData: (cb: (e: { workerId: string; data: string }) => void) => () => void;
     onExit: (cb: (e: { workerId: string; exitCode: number | null }) => void) => () => void;
   };
+  /** Main-window bottom-drawer shell PTY. Renderer owns lifecycle (create/kill). */
+  shellPty: {
+    create: (opts?: {
+      cwd?: string;
+      cols?: number;
+      rows?: number;
+    }) => Promise<
+      | { ok: true; ptyId: string; replay: string }
+      | { ok: false; error?: string }
+    >;
+    input: (ptyId: string, data: string) => Promise<{ ok: boolean; error?: string; dropped?: boolean }>;
+    resize: (ptyId: string, rows: number, cols: number) => Promise<{ ok: boolean; error?: string }>;
+    kill: (ptyId: string) => Promise<{ ok: boolean; error?: string }>;
+    onData: (cb: (e: { ptyId: string; data: string }) => void) => () => void;
+    onExit: (cb: (e: { ptyId: string; exitCode: number | null }) => void) => () => void;
+  };
   /** Editor-window live panel state. Only exposed by the narrow editor
    *  preload (preload-editor.cjs) — absent from the main window's bridge. */
   ideSession: {

@@ -13,17 +13,11 @@ interface ShellTerminalProps {
 }
 
 export function ShellTerminal({ cwd }: ShellTerminalProps) {
-  const attach = useCallback(
-    () =>
-      window.vibeMeet.shellPty
-        .create({ cwd, cols: 100, rows: 30 })
-        .then((r) =>
-          r.ok
-            ? { ok: true, ptyId: r.ptyId, replay: r.replay }
-            : { ok: false, error: r.error ?? '无法启动终端' },
-        ),
-    [cwd],
-  );
+  const attach = useCallback(async () => {
+    const r = await window.vibeMeet.shellPty.create({ cwd, cols: 100, rows: 30 });
+    if (r.ok) return { ok: true as const, ptyId: r.ptyId, replay: r.replay };
+    return { ok: false as const, error: r.error ?? '无法启动终端' };
+  }, [cwd]);
   const input = useCallback((ptyId: string, data: string) => {
     void window.vibeMeet.shellPty.input(ptyId, data);
   }, []);

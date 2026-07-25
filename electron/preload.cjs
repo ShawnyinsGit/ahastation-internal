@@ -278,6 +278,24 @@ const api = {
       return () => ipcRenderer.removeListener('worker-pty:exit', listener);
     },
   },
+  // Main-window bottom-drawer shell. Renderer owns create/kill lifecycle.
+  shellPty: {
+    create: (opts) => ipcRenderer.invoke('shell-pty:create', opts ?? {}),
+    input: (ptyId, data) => ipcRenderer.invoke('shell-pty:input', { ptyId, data }),
+    resize: (ptyId, rows, cols) =>
+      ipcRenderer.invoke('shell-pty:resize', { ptyId, rows, cols }),
+    kill: (ptyId) => ipcRenderer.invoke('shell-pty:kill', { ptyId }),
+    onData: (cb) => {
+      const listener = (_, e) => cb(e);
+      ipcRenderer.on('shell-pty:data', listener);
+      return () => ipcRenderer.removeListener('shell-pty:data', listener);
+    },
+    onExit: (cb) => {
+      const listener = (_, e) => cb(e);
+      ipcRenderer.on('shell-pty:exit', listener);
+      return () => ipcRenderer.removeListener('shell-pty:exit', listener);
+    },
+  },
   ideOverlay: {
     bind: (hostId, sessionId) => ipcRenderer.invoke('ide-editor:overlay-bind', { active: true, hostId, sessionId }),
     close: () => ipcRenderer.invoke('ide-editor:overlay-bind', { active: false }),
