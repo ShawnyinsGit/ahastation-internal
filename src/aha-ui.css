@@ -215,6 +215,7 @@
   font-size: var(--aha-fs-body);
   color: var(--aha-text-primary);
   animation: aha-pop-in var(--aha-dur-base) var(--aha-ease-standard);
+  flex-shrink: 0;
 }
 .aha-broadcast-icon { font-size: 14px; }
 .aha-broadcast-label {

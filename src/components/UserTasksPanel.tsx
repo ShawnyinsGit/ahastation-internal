@@ -11,6 +11,11 @@
 
 import { useState } from 'react';
 import type { WorkerState } from '../lib/meeting-store';
+import {
+  dependencyGateShortLabel,
+  type DependencyGate,
+} from '../lib/dependency-gate';
+import { WORKER_STATUS_LABEL } from '../lib/task-columns';
 import type { MeetingPlan, WorkerStatus } from '../types';
 
 interface UserTasksPanelProps {
@@ -27,26 +32,13 @@ interface TaskRow {
   status: WorkerStatus | 'idle';
   owner: string;
   detail: string;
+  dependencyGate: DependencyGate;
   recovery?: MeetingPlan['nodes'][number]['recovery'];
 }
 
 const STATUS_LABEL: Record<TaskRow['status'], string> = {
   idle: '空闲',
-  pending: '等待调度',
-  interrupted: '已中断',
-  running: '执行中',
-  verifying: '校验中',
-  reviewing: '评审中',
-  'coordinator-reviewing': 'Coordinator 审查中',
-  'awaiting-acceptance': '等待验收',
-  'integration-queued': '等待集成',
-  integrating: '集成中',
-  'integration-conflict': '集成冲突',
-  reworking: '需要返工',
-  'budget-paused': '预算暂停',
-  accepted: '已接受',
-  done: '已完成',
-  failed: '失败',
+  ...WORKER_STATUS_LABEL,
 };
 
 const STATUS_TONE: Record<TaskRow['status'], string> = {
@@ -72,14 +64,18 @@ function buildRows(workers: WorkerState[], plan?: MeetingPlan | null): TaskRow[]
   const planById = new Map((plan?.nodes ?? []).map((node) => [node.id, node]));
   const rows = workers
     .filter((w) => w.role !== 'talker')
-    .map((w) => ({
-      id: w.id,
-      title: w.title || w.id,
-      status: w.status,
-      owner: w.id,
-      detail: w.summary || w.lastText || '',
-      recovery: planById.get(w.id)?.recovery,
-    }))
+    .map((w) => {
+      const node = planById.get(w.id);
+      return {
+        id: w.id,
+        title: w.title || w.id,
+        status: w.status,
+        owner: w.id,
+        detail: w.summary || w.lastText || '',
+        dependencyGate: node?.dependencyGate === 'reviewed' ? 'reviewed' as const : 'accepted' as const,
+        recovery: node?.recovery,
+      };
+    })
     .reverse();
   const known = new Set(rows.map((row) => row.id));
   for (const node of plan?.nodes ?? []) {
@@ -87,6 +83,7 @@ function buildRows(workers: WorkerState[], plan?: MeetingPlan | null): TaskRow[]
       id: node.id, title: node.title, status: node.status,
       owner: 'recovery',
       detail: node.status === 'interrupted' ? 'Recovered after restart; choose how to proceed.' : '',
+      dependencyGate: node.dependencyGate === 'reviewed' ? 'reviewed' : 'accepted',
       recovery: node.recovery,
     });
   }
@@ -163,9 +160,14 @@ export function UserTasksPanel({ workers, plan, sessionId, onOpenTask }: UserTas
                     )}
                   </td>
                   <td className="user-tasks-col-status">
-                    <span className={`user-tasks-pill ${STATUS_TONE[row.status]}`}>
-                      {STATUS_LABEL[row.status]}
-                    </span>
+                    <div className="user-tasks-status-stack">
+                      <span className={`user-tasks-pill ${STATUS_TONE[row.status]}`}>
+                        {STATUS_LABEL[row.status]}
+                      </span>
+                      <span className={`user-tasks-gate is-${row.dependencyGate}`}>
+                        {dependencyGateShortLabel(row.dependencyGate)}
+                      </span>
+                    </div>
                     {row.status === 'interrupted' && (
                       <>
                         <div className="user-tasks-recovery-actions" onClick={(event) => event.stopPropagation()}>

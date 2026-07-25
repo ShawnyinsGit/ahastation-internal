@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { memo, useEffect, useRef, useState, type ReactNode } from 'react';
 import { Compass, Mic } from 'lucide-react';
 
 export type AppViewMode = 'meeting' | 'tasks';
@@ -19,7 +19,7 @@ interface AppTopBarProps {
  * 共享同一份任务真相、切换不丢状态。AhaTalk 路径与额度为占位胶囊（M3-7 /
  * M8-1 后端未建，标「开发中」徽章）。
  */
-export function AppTopBar({ viewMode, onChangeViewMode, attendCount, settingsSlot, onOpenExplore }: AppTopBarProps) {
+export const AppTopBar = memo(function AppTopBar({ viewMode, onChangeViewMode, attendCount, settingsSlot, onOpenExplore }: AppTopBarProps) {
   const [pathOpen, setPathOpen] = useState(false);
   const [quotaOpen, setQuotaOpen] = useState(false);
   const pathRef = useRef<HTMLDivElement>(null);
@@ -136,4 +136,4 @@ export function AppTopBar({ viewMode, onChangeViewMode, attendCount, settingsSlo
       {settingsSlot}
     </header>
   );
-}
+});

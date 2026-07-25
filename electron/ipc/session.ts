@@ -125,10 +125,17 @@ export function registerSessionIpc(ctx: IpcContext): void {
 
   ipcMain.handle(
     'session:resolve-permission',
-    async (_e, payload: { sessionId?: string; id: string; decision: 'allow' | 'deny'; message?: string }) => {
+    async (_e, payload: {
+      sessionId?: string;
+      id: string;
+      decision: 'allow' | 'deny';
+      message?: string;
+      scope?: 'worker' | 'task-wide';
+    }) => {
       const slot = ctx.registry.resolve(pickSessionId(payload));
       if (!slot) return { ok: false };
-      slot.orchestrator.resolvePermission(payload.id, payload.decision, payload.message);
+      const scope = payload.scope === 'task-wide' ? 'task-wide' : 'worker';
+      slot.orchestrator.resolvePermission(payload.id, payload.decision, payload.message, scope);
       return { ok: true };
     },
   );

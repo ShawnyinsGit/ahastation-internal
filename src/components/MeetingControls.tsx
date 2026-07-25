@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import type { AutoApproveScope } from '../types';
 
 interface MeetingControlsProps {
@@ -18,7 +18,7 @@ const SCOPE_LABELS: Record<AutoApproveScope, string> = {
  * 会议工具栏控制组（04 §9.3 会议工具栏的 auto 档 + 多 Agent 开关）。
  * 从原 MeetingHeader 右侧迁入 BottomToolbar——顶栏让位给视图切换器。
  */
-export function MeetingControls({
+export const MeetingControls = memo(function MeetingControls({
   autoApproveScope,
   onChangeAutoApproveScope,
   multiAgent,
@@ -119,4 +119,4 @@ export function MeetingControls({
       </div>
     </>
   );
-}
+});

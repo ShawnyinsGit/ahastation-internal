@@ -139,25 +139,6 @@ export function ActivityTabContent({
           workerEvents={selectedWorker.workerEvents}
           workReport={selectedWorker.workReport}
           coordinatorBriefings={selectedWorker.role === 'talker' ? coordinatorBriefings : undefined}
-          onInterruptTask={
-            selectedWorker.role === 'worker'
-              && selectedWorker.status === 'running'
-              && sessionId
-              ? () => window.vibeMeet.interruptWorker(sessionId, selectedWorker.id)
-              : undefined
-          }
-          onSteerTask={
-            selectedWorker.role === 'worker'
-              && selectedWorker.status === 'running'
-              && sessionId
-              ? (instruction) => window.vibeMeet.steerWorker(sessionId, selectedWorker.id, instruction)
-              : undefined
-          }
-          onOpenWorkspace={
-            selectedWorker.role === 'worker' && sessionId
-              ? () => window.vibeMeet.documents.openExternal(sessionId, '.')
-              : undefined
-          }
           onOpenInTerminal={onOpenInTerminal ? handleOpenInTerminal : undefined}
           isTalker={selectedWorker.role === 'talker'}
           commandLog={selectedWorker.commandLog}

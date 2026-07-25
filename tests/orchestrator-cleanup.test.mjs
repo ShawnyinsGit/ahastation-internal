@@ -90,18 +90,18 @@ test('legacy task_done cannot release a worker; reviewed WorkReport does', async
     { worktreeRoot: join(root, '.task-worktrees') },
   );
   const { orch, sessions, events } = makeOrch(root, workspaceManager, meetingId);
-  // A live Coordinator host is required: without one every review notify
-  // falls into pauseForDisconnect, and the chunk-review loop below races the
-  // pause landing (flaky on slower CI runners).
+  // Start the Coordinator host before requesting reviews. Without a live
+  // Coordinator session every review briefing lands on a null host and the
+  // driver pauses the review for disconnect, racing the manual submit loop
+  // below into 'review is paused' failures on slow runners.
   await orch.start();
-  const coordinator = sessions[0];
-  assert.ok(coordinator, 'coordinator host session was not created');
+  assert.equal(sessions.length, 1, 'coordinator host session created');
   const result = await orch.installPlan([
     { id: 'a', title: 'A', prompt: 'do A', deps: [], writePaths: ['result.txt'] },
   ]);
   assert.equal(result.ok, true);
-  const worker = await waitUntil(() => sessions[1], 'worker session was not created');
-  assert.equal(sessions.length, 2, 'coordinator + worker sessions created');
+  await waitUntil(() => sessions.length === 2, 'worker session was not created');
+  const worker = sessions[1];
   assert.equal(worker.started, true);
   assert.equal(worker.ended, false, 'session live during task');
 
@@ -127,7 +127,11 @@ test('legacy task_done cannot release a worker; reviewed WorkReport does', async
     },
     'delivery did not reach Coordinator review',
   );
-  assert.equal(worker.ended, false, 'Coordinator review keeps the Worker resource live');
+  // The scheduler releases the Backend session as soon as a WorkReport enters
+  // verification (freeing the concurrency slot during review/acceptance), so by
+  // the time Coordinator review opens the session is already ended. Legacy
+  // task_done above must NOT have ended it; the reviewed WorkReport did.
+  assert.equal(worker.ended, true, 'a reviewed WorkReport releases the Backend session for verification/review');
   for (;;) {
     if (orch.inspectDeliveryReview(review.id)?.status === 'paused') {
       await orch.coordinatorReviewDriver.resume(review.id);

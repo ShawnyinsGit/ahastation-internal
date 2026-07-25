@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { WorkerDeliveryFile } from '../types';
 import type { DeliverySnapshot } from '../lib/meeting-store';
+import {
+  canHostAcceptDelivery,
+  hostAcceptancePrimaryLabel,
+  hostAcceptanceReason,
+} from '../lib/delivery-acceptance';
 import { FileContent, ViewState, basename } from './FileViewer';
 import { useAutoScroll } from '../hooks/useAutoScroll';
 
@@ -101,8 +106,7 @@ export function DeliveryViewer({
     if (scrollRef.current) scrollRef.current.scrollTop = 0;
   }, [activePath, state.phase]);
 
-  const canAccept = delivery.status === 'awaiting-delivery-acceptance'
-    || (delivery.status === 'reworking' && Boolean(delivery.report));
+  const canAccept = canHostAcceptDelivery(delivery);
 
   const handleAccept = useCallback(async () => {
     if (submitting || !canAccept) return;
@@ -146,16 +150,18 @@ export function DeliveryViewer({
   const activeFileName = basename(activePath);
   const report = delivery.report;
   const attempts = delivery.view?.attempts ?? [];
+  const acceptanceReason = useMemo(() => hostAcceptanceReason(delivery), [delivery]);
+  const acceptLabel = useMemo(() => hostAcceptancePrimaryLabel(delivery), [delivery]);
   const statusLabel: Record<string, string> = {
     verifying: '正在校验',
     reviewing: '正在评审',
     'coordinator-reviewing': 'Coordinator 审查中',
-    'awaiting-delivery-acceptance': '等待验收',
+    'awaiting-delivery-acceptance': '待人手确认',
     'integration-queued': '等待自动集成',
     integrating: '正在集成到 Meeting 分支',
     'integration-conflict': '集成冲突',
     reworking: '需要返工',
-    accepted: '已接受',
+    accepted: '已进 Meeting 分支',
     failed: '失败',
   };
   const canReturn = delivery.status === 'awaiting-delivery-acceptance'
@@ -172,7 +178,7 @@ export function DeliveryViewer({
     <div className="delivery-viewer">
       <header className="delivery-viewer-header">
         <div className="delivery-viewer-title">
-          <span className="delivery-viewer-badge">交付验收</span>
+          <span className="delivery-viewer-badge">交付确认</span>
           <h2>{delivery.title}</h2>
         </div>
         <div className="delivery-viewer-meta">
@@ -183,6 +189,12 @@ export function DeliveryViewer({
         </div>
         {delivery.summary && (
           <p className="delivery-viewer-summary">{delivery.summary}</p>
+        )}
+        {acceptanceReason && (
+          <div className="delivery-risk-note delivery-host-accept-reason" role="note">
+            <strong>为什么要人手确认</strong>
+            <span>{acceptanceReason}</span>
+          </div>
         )}
       </header>
 
@@ -399,18 +411,14 @@ export function DeliveryViewer({
               onClick={() => { void handleAccept(); }}
               disabled={submitting || !canAccept}
             >
-              {submitting
-                ? '处理中…'
-                : delivery.status === 'reworking'
-                  ? '接受当前报告'
-                  : '通过 · 验收'}
+              {submitting ? '处理中…' : acceptLabel}
             </button>
           </div>
         ) : feedbackOpen ? (
           <div className="delivery-viewer-feedback">
             <textarea
               className="delivery-viewer-feedback-input"
-              placeholder="说明哪里不对、希望怎么改。若已满意，直接点「通过 · 验收」。"
+              placeholder="说明哪里不对、希望怎么改。若已满意，直接点确认。"
               rows={3}
               value={feedback}
               onChange={(e) => setFeedback(e.target.value)}
@@ -436,7 +444,7 @@ export function DeliveryViewer({
                   onClick={() => { void handleAccept(); }}
                   disabled={submitting}
                 >
-                  通过 · 验收
+                  {acceptLabel}
                 </button>
               )}
               <button
@@ -453,12 +461,12 @@ export function DeliveryViewer({
           <div className="delivery-viewer-actions" role="status">
             <span className="delivery-viewer-toast">
               {delivery.status === 'accepted'
-                ? 'Coordinator 已审查并自动集成到 Meeting 分支。'
+                ? '已进入 Meeting 集成分支（尚未发布到你的工作区；发布要等「接受最终交付」）。'
                 : delivery.status === 'integration-conflict'
                   ? '自动集成发生冲突，任务将按证据返工；不会修改用户主分支。'
                   : delivery.status === 'coordinator-reviewing'
-                    ? 'Coordinator 审查中，完成后会进入自动集成。'
-                    : 'Coordinator 正在审查或集成；单任务无需用户验收。'}
+                    ? 'Coordinator 审查中，通过后会自动集成到 Meeting 分支（通常不必点确认）。'
+                    : 'Coordinator 正在审查或集成；冻结成功时单任务无需人手确认。'}
             </span>
           </div>
         )}

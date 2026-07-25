@@ -1,12 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useClaude } from './hooks/useClaude';
 import { useWorkers } from './hooks/useWorkers';
+import { useMeetingSelector } from './hooks/useMeetingSelector';
 import { useTabs } from './hooks/useTabs';
 import { useCrossProjectTasks } from './hooks/useCrossProjectTasks';
 import { useScreenShare } from './hooks/useScreenShare';
 import { useBrowser } from './hooks/useBrowser';
 import { useStageWindows } from './hooks/useStageWindows';
-import { useElapsedSeconds } from './hooks/useTimer';
 import { cancelSpeech, isSpeechActive } from './hooks/useSpeech';
 import { useAsr } from './hooks/useAsr';
 import { useVoiceLock } from './hooks/useVoiceLock';
@@ -16,8 +15,9 @@ import { useTtsWiring } from './hooks/useTtsWiring';
 import { useDragAndDrop } from './hooks/useDragAndDrop';
 import { useHandheldMode } from './lib/handheld-mode';
 import { planDisplayMigration } from './lib/display-migration';
-import { meetingStore } from './lib/meeting-store';
-import { browserStore } from './lib/browser-store';
+import { meetingStore, type MeetingState } from './lib/meeting-store';
+import { browserStore, requestHideBrowser } from './lib/browser-store';
+import { toast } from './lib/toast';
 import { Lobby } from './components/Lobby';
 import { TabStrip } from './components/TabStrip';
 import { MeetingHeader, type MeetingView } from './components/MeetingHeader';
@@ -39,6 +39,8 @@ import { VoiceGuideModal } from './components/VoiceGuideModal';
 import { ParticipantPanel } from './components/ParticipantPanel';
 import { ApprovalCard } from './components/ApprovalCard';
 import { EditorOverlay } from './components/EditorOverlay';
+import { Modal } from './components/Modal';
+import { ToastViewport } from './components/ToastViewport';
 import { PlanMeetingModal } from './components/PlanMeetingModal';
 import {
   buildDirectAttachmentDirective,
@@ -47,11 +49,30 @@ import {
   buildPlanDirective,
   type DispatchMode,
 } from './lib/dispatch-mode';
-import type { AutoApproveScope, BackendInfo, DesktopSource, SkillInfo } from './types';
+import type { AutoApproveScope, BackendInfo, DesktopSource, PendingPermission, SkillInfo } from './types';
+
+/** First pending permission across all workers, mirroring the legacy useClaude
+ *  aggregate. Low-frequency: only changes when a permission appears/resolves. */
+function selectFirstPendingPermission(s: MeetingState): PendingPermission | null {
+  for (const ws of s.workers.values()) {
+    if (ws.pendingPermission) return ws.pendingPermission;
+  }
+  return null;
+}
 
 export function App() {
-  const { state, restartSession, sendText, sendImage, sendAttachments, publishDroppedFiles, onDroppedFiles, resolvePermission, interrupt, setSpeakCallback } = useClaude();
   const workers = useWorkers();
+  const {
+    restartSession, sendText, sendImage, sendAttachments, publishDroppedFiles,
+    onDroppedFiles, resolvePermission, interrupt, setSpeakCallback,
+  } = workers;
+  // Low-frequency slices subscribed individually. High-frequency streams
+  // (transcript/activity) are subscribed inside SideDrawer; the mic level and
+  // elapsed timer bypass React entirely (mic-level channel / ElapsedTime).
+  const running = useMeetingSelector((s) => s.running);
+  const lastError = useMeetingSelector((s) => s.lastError);
+  const pendingPermission = useMeetingSelector(selectFirstPendingPermission);
+  const cwd = workers.cwd;
   const tabs = useTabs();
   const crossProjectTasks = useCrossProjectTasks();
   const { state: share, start: startShare, startSystemPicker, stop: stopShare, captureFrame, videoRef } = useScreenShare();
@@ -83,11 +104,10 @@ export function App() {
   const [pickerOpen, setPickerOpen] = useState(false);
   const [aiSpeaking, setAiSpeaking] = useState(false);
   const [viewingFile, setViewingFile] = useState<{ relativePath: string } | null>(null);
-  const [openParticipantsTab, setOpenParticipantsTab] = useState(false);
+  const [openParticipantsTabSignal, setOpenParticipantsTab] = useState(false);
   const [backends, setBackends] = useState<BackendInfo[]>([]);
   const [mutedHostIds, setMutedHostIds] = useState<Set<string>>(new Set());
   const [skills, setSkills] = useState<SkillInfo[]>([]);
-  const elapsed = useElapsedSeconds(activeOpenedAt);
   const visualFixture = import.meta.env.DEV
     && new URLSearchParams(window.location.search).has('ui-fixture');
 
@@ -125,21 +145,16 @@ export function App() {
     const active = nodes.filter(
       (node) => !['accepted', 'done', 'failed', 'interrupted'].includes(node.status),
     ).length;
-    return active + (state.pendingPermission ? 1 : 0) + (workers.pendingPlan ? 1 : 0);
-  }, [workers.plan, state.pendingPermission, workers.pendingPlan]);
+    return active + (pendingPermission ? 1 : 0) + (workers.pendingPlan ? 1 : 0);
+  }, [workers.plan, pendingPermission, workers.pendingPlan]);
 
   // The embedded browser is a native WebContentsView painted above the
   // renderer, so no amount of CSS can tuck it behind the task board. Drop it
-  // while the board is up and put it back the way we found it on return.
-  const browserWasVisible = useRef(false);
+  // while the board is up; the request counter restores it once the board
+  // (and any other overlay) is gone.
   useEffect(() => {
-    if (view === 'tasks') {
-      browserWasVisible.current = browserStore.getSnapshot().visible;
-      if (browserWasVisible.current) void browserStore.setVisible(false);
-    } else if (browserWasVisible.current) {
-      browserWasVisible.current = false;
-      void browserStore.setVisible(true);
-    }
+    if (view !== 'tasks') return;
+    return requestHideBrowser();
   }, [view]);
 
   const handleOpenTaskFromBoard = useCallback((sessionId: string, taskId: string) => {
@@ -198,36 +213,43 @@ export function App() {
   // matching worker's resolving/error flags so that card stays in lock-step
   // with WorkerCard and TaskInspector for the same permission id.
   const drawerPermissionState = useMemo(() => {
-    const pending = state.pendingPermission;
+    const pending = pendingPermission;
     if (!pending) return { resolving: false, error: null as string | null };
     const owner = workers.workerList.find((w) => w.pendingPermission?.id === pending.id);
     return {
       resolving: owner?.resolvingPermissionId === pending.id,
       error: owner?.permissionError ?? null,
     };
-  }, [state.pendingPermission, workers.workerList]);
+  }, [pendingPermission, workers.workerList]);
 
   // 批准卡片四要素上下文（04 BR-A2：项目/任务/客户端/动作缺一不渲染）
   const approvalMeta = useMemo(() => {
-    const pending = state.pendingPermission;
+    const pending = pendingPermission;
     const ownerW = pending
       ? workers.workerList.find((w) => w.pendingPermission?.id === pending.id)
       : undefined;
-    const project = state.cwd
-      ? (state.cwd.split('/').filter(Boolean).pop() ?? state.cwd)
+    const project = cwd
+      ? (cwd.split('/').filter(Boolean).pop() ?? cwd)
       : '当前项目';
     return {
       owner: ownerW?.title ?? 'Coordinator',
       backendId: ownerW?.backendId,
       project,
     };
-  }, [state.pendingPermission, workers.workerList, state.cwd]);
+  }, [pendingPermission, workers.workerList, cwd]);
 
   const speakingRef = useRef(false);
   const sendWithModeRef = useRef<(text: string) => void>(sendText);
 
   const voiceLock = useVoiceLock({ muted, setMuted, setAiSpeaking, speakingRef });
   const voicePrefs = useVoicePreferences();
+
+  // Stable element for both header variants — an inline JSX slot would break
+  // the memoized MeetingHeader/AppTopBar on every App render.
+  const settingsSlot = useMemo(
+    () => <SettingsMenu badge={voiceLock.enrollmentActive} />,
+    [voiceLock.enrollmentActive],
+  );
   useSpacebarMute(muted, setMuted);
   useTtsWiring({ ttsOn, speakingRef, setAiSpeaking, setSpeakCallback });
   const dragDrop = useDragAndDrop({
@@ -249,10 +271,10 @@ export function App() {
 
   // Reset the participants-tab signal once SideDrawer has consumed it
   useEffect(() => {
-    if (openParticipantsTab && drawerOpen) {
+    if (openParticipantsTabSignal && drawerOpen) {
       setOpenParticipantsTab(false);
     }
-  }, [openParticipantsTab, drawerOpen]);
+  }, [openParticipantsTabSignal, drawerOpen]);
 
   useEffect(() => {
     meetingStore.hydrateRestore().catch((err) => {
@@ -270,13 +292,12 @@ export function App() {
     // Open each delivery file as its own independent top-level tab
     // Use the snapshot path (inside deliveries/) when available so files
     // are always read from the project directory, not external locations.
-    const cwd = state.cwd;
     for (const f of delivery.files) {
       const filePath = f.snapshotPath
         ?? (f.snapshotRelativePath && cwd ? `${cwd}/${f.snapshotRelativePath}` : f.path);
       stageWindows.openFile(filePath);
     }
-  }, [workers.currentDelivery, stageWindows, state.cwd]);
+  }, [workers.currentDelivery, stageWindows, cwd]);
 
   // Auto-open saved documents (from save_document MCP tool) as file tabs
   const lastSavedDocCount = useRef(0);
@@ -403,7 +424,6 @@ export function App() {
     mode: asrMode,
     listening: effectiveListening,
     supported: micSupported,
-    speechLevel,
     lastError: micError,
     status: micStatus,
     retryable: micRetryable,
@@ -424,20 +444,26 @@ export function App() {
     meetingStore.setAutoApproveScope(autoApproveScope);
     void (async () => {
       const res = await window.vibeMeet.setAutoApprove(autoApproveScope);
-      if (!res.ok || !state.running) return;
+      if (!res.ok || !running) return;
       const id = meetingStore.getActiveId();
+      // Only 'all' bypasses SDK permission checks entirely. 'read' keeps the
+      // default mode so canUseTool still runs — the session-level scope then
+      // auto-allows safe tools and escalates destructive ones.
       void window.vibeMeet.setPermissionMode(
         id,
-        autoApproveScope !== 'off' ? 'bypassPermissions' : 'default',
+        autoApproveScope === 'all' ? 'bypassPermissions' : 'default',
       );
     })();
-  }, [autoApproveScope, state.running]);
+  }, [autoApproveScope, running]);
 
   useEffect(() => {
-    if (autoApproveScope !== 'off' && state.pendingPermission) {
-      void resolvePermission(state.pendingPermission.id, 'allow');
+    // Auto-resolve pending cards only under 'all'. Under 'read', anything
+    // that reached the UI card was already classified as non-safe upstream
+    // (safe tools never become pending), so it must stay a manual decision.
+    if (autoApproveScope === 'all' && pendingPermission) {
+      void resolvePermission(pendingPermission.id, 'allow');
     }
-  }, [autoApproveScope, state.pendingPermission, resolvePermission]);
+  }, [autoApproveScope, pendingPermission, resolvePermission]);
 
   const leave = useCallback(async () => {
     cancelSpeech();
@@ -476,6 +502,40 @@ export function App() {
     await sendImage(dataUrl, caption);
   }, [captureFrame, sendImage, share.sourceName]);
 
+  // Stable callbacks for memoized children — inline arrows in JSX would
+  // create fresh references every render and silently defeat React.memo.
+  const toggleMute = useCallback(() => setMuted((v) => !v), []);
+  const toggleTts = useCallback(() => setTtsOn((v) => !v), []);
+  const toggleChat = useCallback(() => setDrawerOpen((v) => !v), []);
+  const toggleCompanion = useCallback(() => { void window.vibeMeet.companion?.toggle(); }, []);
+  const openPermissionModal = useCallback(() => setPermModalOpen(true), []);
+  const toggleMultiAgent = useCallback(() => setMultiAgent((v) => !v), []);
+  const openExplore = useCallback(() => setExploreOpen(true), []);
+  const closeAgentPanel = useCallback(() => setAgentPanelId(null), []);
+  const openParticipantsTab = useCallback(() => {
+    setDrawerOpen(true);
+    setOpenParticipantsTab(true);
+  }, []);
+  const handleSelectParticipant = useCallback((id: string) => {
+    if (id !== 'user') setAgentPanelId(id);
+  }, []);
+  const handleViewFile = useCallback((path: string) => {
+    setViewingFile({ relativePath: path });
+    stageWindows.openFile(path);
+    // stageWindows.openFile is a stable useCallback; the wrapper object is not.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stageWindows.openFile]);
+  const handleAddHost = useCallback(async (backendId: string) => {
+    const result = await workers.addHostGroup(backendId);
+    if (result && !result.ok) {
+      toast.error(`邀请成员失败：${result.error ?? '未知原因'}`);
+      return;
+    }
+    // Refresh backends after adding a host
+    window.vibeMeet.backendAuth.list().then(setBackends).catch(() => setBackends([]));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workers.addHostGroup]);
+
   const handleToggleMuteHost = useCallback((hostId: string) => {
     setMutedHostIds((prev) => {
       const next = new Set(prev);
@@ -487,17 +547,18 @@ export function App() {
 
   const handleRemoveHost = useCallback(async (hostId: string) => {
     if (hostId === 'default') return;
-    await workers.removeHostGroup(hostId);
+    const result = await workers.removeHostGroup(hostId);
+    if (result && !result.ok) toast.error(`移出成员失败：${result.error ?? '未知原因'}`);
   }, [workers]);
 
   const handleSetCoordinator = useCallback(async (hostId: string) => {
     const result = await workers.setCoordinator(hostId);
-    if (!result.ok) console.warn('[coordinator] transfer failed:', result.error);
+    if (!result.ok) toast.error(`切换主持人失败：${result.error ?? '未知原因'}`);
   }, [workers]);
 
   const handleRestartHost = useCallback(async (hostId: string) => {
     const result = await workers.restartHost(hostId);
-    if (!result.ok) console.warn('[host] reconnect failed:', result.error);
+    if (!result.ok) toast.error(`重连成员失败：${result.error ?? '未知原因'}`);
   }, [workers]);
 
   // Handheld UI mode (§3.3): resolved mode drives the root <html> class via
@@ -528,16 +589,16 @@ export function App() {
       return;
     }
     const sessionId = activeTab?.id ?? 'default';
-    const cwd = state.cwd || '.';
+    const editorCwd = cwd || '.';
     const title = `${backendId} - ${hostId}`;
     void window.vibeMeet.openCodeEditor.open({
       backendId,
       hostId,
       sessionId,
-      cwd,
+      cwd: editorCwd,
       title,
     });
-  }, [handheld, activeTab?.id, state.cwd]);
+  }, [handheld, activeTab?.id, cwd]);
 
   // Dual-display migration (Phase 6a §3.2, AUTO mode only): when the
   // resolved mode flips after a display add/remove, convert the editor form
@@ -567,7 +628,7 @@ export function App() {
             backendId,
             hostId,
             sessionId: activeTab?.id ?? 'default',
-            cwd: state.cwd || '.',
+            cwd: cwd || '.',
             title: `${backendId} - ${hostId}`,
           });
         } else {
@@ -611,13 +672,64 @@ export function App() {
     [dispatchMode, multiAgent, sendAttachments],
   );
 
+  // Memoized element trees handed to memoized children. Inline JSX in props
+  // is a fresh object every render and would defeat React.memo downstream.
+  const selfTile = useMemo(() => (
+    <ParticipantTile
+      name="You"
+      role="You"
+      initials="You"
+      variant="self"
+      speaking={effectiveListening && !muted}
+      muted={muted}
+      status={muted ? 'Muted' : effectiveListening ? 'Speaking' : 'Mic idle'}
+      ariaLabel="查看我派出的任务"
+    />
+  ), [effectiveListening, muted]);
+
+  const galleryContent = useMemo(() => (
+    <ParticipantPanel
+      workers={workers.workerList}
+      hostGroups={workers.hostGroups}
+      customAvatars={customAvatars}
+      mutedHostIds={mutedHostIds}
+      aiSpeaking={aiSpeaking}
+      onResolvePermission={resolvePermission}
+      onToggleMuteHost={handleToggleMuteHost}
+      onRemoveHost={handleRemoveHost}
+      coordinatorHostId={workers.coordinatorHostId}
+      onSetCoordinator={handleSetCoordinator}
+      onRestartHost={handleRestartHost}
+      onOpenParticipantsTab={openParticipantsTab}
+      onOpenEditor={handleOpenEditor}
+      onSelectParticipant={handleSelectParticipant}
+      selfTile={selfTile}
+    />
+  ), [
+    workers.workerList, workers.hostGroups, workers.coordinatorHostId,
+    customAvatars, mutedHostIds, aiSpeaking, resolvePermission,
+    handleToggleMuteHost, handleRemoveHost, handleSetCoordinator,
+    handleRestartHost, openParticipantsTab, handleOpenEditor,
+    handleSelectParticipant, selfTile,
+  ]);
+
+  const controlsSlot = useMemo(() => (!handheld ? (
+    <MeetingControls
+      autoApproveScope={autoApproveScope}
+      onChangeAutoApproveScope={setAutoApproveScope}
+      multiAgent={multiAgent}
+      onToggleMultiAgent={toggleMultiAgent}
+    />
+  ) : undefined), [handheld, autoApproveScope, multiAgent, toggleMultiAgent]);
+
   if (!hasTabs) {
     return (
       <>
-        <Lobby lastError={state.lastError} />
+        <Lobby lastError={lastError} />
         {showOnboarding && (
           <OnboardingModal backends={backends} projectCount={0} onFinish={handleOnboardingFinish} />
         )}
+        <ToastViewport />
       </>
     );
   }
@@ -635,28 +747,24 @@ export function App() {
       {(handheld || tabs.length > 1) && <TabStrip tabs={tabs} />}
       {handheld ? (
         <MeetingHeader
-          cwd={state.cwd}
-          elapsed={elapsed}
+          cwd={cwd}
+          startedAt={activeOpenedAt}
           autoApproveScope={autoApproveScope}
           onChangeAutoApproveScope={setAutoApproveScope}
           multiAgent={multiAgent}
-          onToggleMultiAgent={() => setMultiAgent((v) => !v)}
+          onToggleMultiAgent={toggleMultiAgent}
           view={view}
           onChangeView={setView}
           attentionCount={attentionCount}
-          settingsSlot={
-            <SettingsMenu badge={voiceLock.enrollmentActive} />
-          }
+          settingsSlot={settingsSlot}
         />
       ) : (
         <AppTopBar
           viewMode={view}
           onChangeViewMode={setView}
           attendCount={attentionCount}
-          onOpenExplore={() => setExploreOpen(true)}
-          settingsSlot={
-            <SettingsMenu badge={voiceLock.enrollmentActive} />
-          }
+          onOpenExplore={openExplore}
+          settingsSlot={settingsSlot}
         />
       )}
 
@@ -675,41 +783,9 @@ export function App() {
             hostGroups={workers.hostGroups}
             plan={workers.plan}
             coordinatorBriefings={workers.coordinatorBriefings}
-            running={state.running}
+            running={running}
             aiSpeaking={aiSpeaking}
-            galleryContent={
-              <ParticipantPanel
-                workers={workers.workerList}
-                hostGroups={workers.hostGroups}
-                customAvatars={customAvatars}
-                mutedHostIds={mutedHostIds}
-                aiSpeaking={aiSpeaking}
-                onResolvePermission={resolvePermission}
-                onToggleMuteHost={handleToggleMuteHost}
-                onRemoveHost={handleRemoveHost}
-                coordinatorHostId={workers.coordinatorHostId}
-                onSetCoordinator={handleSetCoordinator}
-                onRestartHost={handleRestartHost}
-                onOpenParticipantsTab={() => {
-                  setDrawerOpen(true);
-                  setOpenParticipantsTab(true);
-                }}
-                onOpenEditor={handleOpenEditor}
-                onSelectParticipant={(id) => { if (id !== 'user') setAgentPanelId(id); }}
-                selfTile={
-                  <ParticipantTile
-                    name="You"
-                    role="You"
-                    initials="You"
-                    variant="self"
-                    speaking={effectiveListening && !muted}
-                    muted={muted}
-                    status={muted ? 'Muted' : effectiveListening ? 'Speaking' : 'Mic idle'}
-                    ariaLabel="查看我派出的任务"
-                  />
-                }
-              />
-            }
+            galleryContent={galleryContent}
             delivery={workers.currentDelivery}
             finalMeetingDelivery={workers.finalMeetingDelivery}
             finalMeetingDecision={workers.finalMeetingDecision}
@@ -736,7 +812,7 @@ export function App() {
             browserTabs={browser.state.tabs}
             browserActiveTabId={browser.state.activeTabId}
             browserViewportRef={browser.viewportRef}
-            onBrowserOpenTab={() => browser.openTab()}
+            onBrowserOpenTab={browser.openTab}
             onBrowserCloseTab={browser.closeTab}
             onBrowserSetActive={browser.setActiveTab}
             onBrowserNavigate={browser.navigate}
@@ -749,9 +825,7 @@ export function App() {
 
         <SideDrawer
           open={drawerOpen}
-          transcript={state.transcript}
-          activity={state.activity}
-          pending={state.pendingPermission}
+          pending={pendingPermission}
           pendingResolving={drawerPermissionState.resolving}
           pendingError={drawerPermissionState.error}
           approvalMeta={approvalMeta}
@@ -762,22 +836,14 @@ export function App() {
           multiAgent={multiAgent}
           dispatchMode={dispatchMode}
           onChangeDispatchMode={setDispatchMode}
-          disabled={!state.running}
+          disabled={!running}
           sessionId={activeTab?.id ?? null}
-          onViewFile={(path) => {
-            setViewingFile({ relativePath: path });
-            stageWindows.openFile(path);
-          }}
+          onViewFile={handleViewFile}
           viewingFilePath={viewingFile?.relativePath ?? null}
           backends={backends}
           activeBackendIds={activeBackendIds}
-          hostGroups={workers.hostGroups}
-          onAddHost={(backendId) => {
-            workers.addHostGroup(backendId);
-            // Refresh backends after adding a host
-            window.vibeMeet.backendAuth.list().then(setBackends).catch(() => setBackends([]));
-          }}
-          forceParticipantsTab={openParticipantsTab}
+          onAddHost={handleAddHost}
+          forceParticipantsTab={openParticipantsTabSignal}
         />
 
         {!handheld && view === 'meeting' && agentPanelData && (
@@ -785,8 +851,8 @@ export function App() {
             worker={agentPanelData.worker}
             hostGroup={agentPanelData.hostGroup}
             backends={backends}
-            cwd={state.cwd}
-            onClose={() => setAgentPanelId(null)}
+            cwd={cwd}
+            onClose={closeAgentPanel}
             onOpenEditor={handleOpenEditor}
           />
         )}
@@ -805,71 +871,67 @@ export function App() {
 
       <BottomToolbar
         muted={muted}
-        onToggleMute={() => setMuted((v) => !v)}
+        onToggleMute={toggleMute}
         micSupported={micSupported}
         listening={effectiveListening}
-        speechLevel={speechLevel}
         asrMode={asrMode}
         micStatus={micStatus}
         micRetryable={micRetryable}
         onRetryMic={retryMic}
         ttsOn={ttsOn}
-        onToggleTts={() => setTtsOn((v) => !v)}
+        onToggleTts={toggleTts}
         sharing={share.active}
         onToggleShare={toggleShare}
-        snapshotEnabled={share.active && state.running}
+        snapshotEnabled={share.active && running}
         onSnapshot={handleSnapshot}
         onInterrupt={interrupt}
         chatOpen={drawerOpen}
-        onToggleChat={() => setDrawerOpen((v) => !v)}
+        onToggleChat={toggleChat}
         onLeave={leave}
-        onToggleCompanion={() => { void window.vibeMeet.companion?.toggle(); }}
+        onToggleCompanion={toggleCompanion}
         handheld={handheld}
         permissionCount={permissionCount}
-        onOpenPermission={() => setPermModalOpen(true)}
-        controlsSlot={!handheld ? (
-          <MeetingControls
-            autoApproveScope={autoApproveScope}
-            onChangeAutoApproveScope={setAutoApproveScope}
-            multiAgent={multiAgent}
-            onToggleMultiAgent={() => setMultiAgent((v) => !v)}
-          />
-        ) : undefined}
+        onOpenPermission={openPermissionModal}
+        controlsSlot={controlsSlot}
       />
 
       {!handheld && (
         <StatusBar
           clientCount={workers.hostGroups.size}
           activeTaskCount={activeTaskCount}
-          cwd={state.cwd}
-          elapsed={elapsed}
+          cwd={cwd}
+          startedAt={activeOpenedAt}
           viewLabel={view === 'meeting' ? '会议模式' : '任务模式'}
         />
       )}
 
-      {handheld && permModalOpen && state.pendingPermission && (
-        <div className="perm-modal-backdrop" onClick={() => setPermModalOpen(false)}>
-          <div className="perm-modal" onClick={(e) => e.stopPropagation()}>
-            <ApprovalCard
-              pending={state.pendingPermission}
-              owner={approvalMeta.owner}
-              backendId={approvalMeta.backendId}
-              project={approvalMeta.project}
-              onDecide={async (id, decision) => {
-                const res = await resolvePermission(id, decision);
-                if (res && res.ok) setPermModalOpen(false);
-                return res;
-              }}
-            />
-          </div>
-        </div>
+      {handheld && permModalOpen && pendingPermission && (
+        <Modal
+          open
+          backdropClassName="perm-modal-backdrop"
+          className="perm-modal"
+          ariaLabel="权限审批"
+          onClose={() => setPermModalOpen(false)}
+        >
+          <ApprovalCard
+            pending={pendingPermission}
+            owner={approvalMeta.owner}
+            backendId={approvalMeta.backendId}
+            project={approvalMeta.project}
+            onDecide={async (id, decision) => {
+              const res = await resolvePermission(id, decision);
+              if (res && res.ok) setPermModalOpen(false);
+              return res;
+            }}
+          />
+        </Modal>
       )}
 
       {overlayHostId && (
         <EditorOverlay
           hostId={overlayHostId}
           sessionId={activeTab?.id ?? 'default'}
-          cwd={state.cwd || '.'}
+          cwd={cwd || '.'}
           hosts={[...workers.hostGroups.entries()].map(([id, hg]) => ({ hostId: id, backendId: hg.backendId }))}
           onSwitchHost={setOverlayHostId}
           onClose={() => setOverlayHostId(null)}
@@ -892,6 +954,8 @@ export function App() {
         onDismissForever={voicePrefs.handleDismissForever}
       />
 
+      <ToastViewport />
+
       <PlanMeetingModal
         open={Boolean(workers.pendingPlan)}
         brief={workers.pendingPlanBrief}
@@ -906,36 +970,40 @@ export function App() {
         <OnboardingModal backends={backends} projectCount={tabs.length} onFinish={handleOnboardingFinish} />
       )}
 
-      {(state.lastError || micError) && (
-        <div className="error-banner">
-          <span className="error-banner__text">{state.lastError ?? micError}</span>
-          {state.lastError && !state.running && (
-            <button
-              type="button"
-              className="error-banner__reconnect"
-              onClick={() => { void restartSession(); }}
-            >
-              Reconnect
-            </button>
+      {(lastError || micError || updateInfo) && (
+        <div className="banner-stack">
+          {(lastError || micError) && (
+            <div className="error-banner">
+              <span className="error-banner__text">{lastError ?? micError}</span>
+              {lastError && !running && (
+                <button
+                  type="button"
+                  className="error-banner__reconnect"
+                  onClick={() => { void restartSession(); }}
+                >
+                  Reconnect
+                </button>
+              )}
+              {!lastError && micError && micRetryable && (
+                <button
+                  type="button"
+                  className="error-banner__reconnect"
+                  onClick={retryMic}
+                >
+                  Retry microphone
+                </button>
+              )}
+            </div>
           )}
-          {!state.lastError && micError && micRetryable && (
-            <button
-              type="button"
-              className="error-banner__reconnect"
-              onClick={retryMic}
-            >
-              Retry microphone
-            </button>
-          )}
-        </div>
-      )}
 
-      {updateInfo && (
-        <div className="error-banner">
-          <span className="error-banner__text">新版本 {updateInfo.latest} 可用</span>
-          <a className="error-banner__reconnect" href={updateInfo.url} target="_blank" rel="noreferrer">
-            前往下载
-          </a>
+          {updateInfo && (
+            <div className="error-banner error-banner--info">
+              <span className="error-banner__text">新版本 {updateInfo.latest} 可用</span>
+              <a className="error-banner__reconnect" href={updateInfo.url} target="_blank" rel="noreferrer">
+                前往下载
+              </a>
+            </div>
+          )}
         </div>
       )}
     </div>

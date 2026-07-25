@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react';
 import { Activity, ChevronDown, Clock, DownloadCloud, FolderOpen, KeyRound, LogIn, Mic, MonitorUp } from 'lucide-react';
 import { meetingStore } from '../lib/meeting-store';
+import { toast } from '../lib/toast';
 import type { BackendInfo } from '../types';
 import { usePickCwd } from './DirPickerModal';
 
@@ -108,6 +109,7 @@ export function Lobby({ lastError }: LobbyProps) {
       meetingStore.defaultBackendId = selected;
     } catch (err) {
       console.warn('[Lobby] failed to load backends:', err);
+      toast.error('加载 AI 后端列表失败，请重试或重启应用');
     }
   }, []);
 
@@ -115,7 +117,10 @@ export function Lobby({ lastError }: LobbyProps) {
     void reloadBackends();
     void window.vibeMeet.sessions.listRecoverable()
       .then((result) => setRecoverable(result.meetings))
-      .catch((error) => console.warn('[Lobby] failed to load recoverable meetings:', error));
+      .catch((error) => {
+        console.warn('[Lobby] failed to load recoverable meetings:', error);
+        toast.error('无法加载可恢复的会议记录');
+      });
   }, [reloadBackends]);
 
   // When selected backend changes, prefill inputs from its config

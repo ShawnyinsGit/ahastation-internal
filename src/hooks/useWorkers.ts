@@ -38,7 +38,11 @@ export interface UseWorkersResult {
   ) => Promise<{ ok: boolean; error?: string }>;
   publishDroppedFiles: (files: File[]) => void;
   onDroppedFiles: (cb: (files: File[]) => void) => () => void;
-  resolvePermission: (id: string, decision: 'allow' | 'deny') => Promise<{ ok: true } | { ok: false; error: string }>;
+  resolvePermission: (
+    id: string,
+    decision: 'allow' | 'deny',
+    scope?: 'worker' | 'task-wide',
+  ) => Promise<{ ok: true } | { ok: false; error: string }>;
   interrupt: () => Promise<void>;
   endSession: () => Promise<void>;
   setSpeakCallback: (cb: SpeakHandle | null) => void;
@@ -94,7 +98,8 @@ export function useWorkers(): UseWorkersResult {
     [],
   );
   const resolvePermission = useCallback(
-    (id: string, decision: 'allow' | 'deny') => meetingStore.resolvePermission(id, decision),
+    (id: string, decision: 'allow' | 'deny', scope?: 'worker' | 'task-wide') =>
+      meetingStore.resolvePermission(id, decision, scope),
     [],
   );
   const interrupt = useCallback(() => meetingStore.interrupt(), []);

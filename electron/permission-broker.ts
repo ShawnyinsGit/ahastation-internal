@@ -19,7 +19,12 @@
 // Electron-free: timers and the risk classifier are injectable, so the whole
 // decision core is unit-testable under plain node.
 
-import { classifyToolRisk, type AutoApproveScope, type ToolRisk } from './auto-approve-policy.js';
+import {
+  classifyToolRisk,
+  isInProcSafeTool,
+  type AutoApproveScope,
+  type ToolRisk,
+} from './auto-approve-policy.js';
 import type { BackendSessionEvent } from './backends/cli-backend.js';
 import type { PermissionNormalizationResult } from './backends/canonical-execution.js';
 import type { TaskAuthorityGrant } from './task-collaboration.js';
@@ -70,6 +75,20 @@ export function decideTaskPermission(
         normalizationDiagnostic: normalized.diagnostic,
         requiresUser: true,
       },
+    };
+  }
+  // In-proc meeting MCP tools and Task delegation drive orchestrator/UI state
+  // only — they classify as 'external' yet cannot touch the workspace, so an
+  // approval card per progress report would be pure noise. Journalled like any
+  // other decision.
+  if (
+    normalized.request.kind === 'external'
+    && identity?.toolName
+    && isInProcSafeTool(identity.toolName)
+  ) {
+    return {
+      decision: { kind: 'allow', reason: 'in-proc-tool-safe' },
+      safeInput: summarizeCanonicalRequest(normalized.request),
     };
   }
   if (!grant) {

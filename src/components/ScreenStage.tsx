@@ -1,4 +1,5 @@
 import {
+  memo,
   ReactNode,
   RefObject,
   useState,
@@ -20,6 +21,7 @@ import type {
   MeetingPlan,
 } from '../types';
 import type { StageWindow, StageWindowType } from '../lib/stage-window-store';
+import { computeWorkerCapacity } from '../lib/worker-capacity';
 import { FileViewer } from './FileViewer';
 import { BrowserStage } from './BrowserStage';
 import { StageTabBar } from './StageTabBar';
@@ -80,7 +82,7 @@ interface ScreenStageProps {
 
 const ACTIVITY_TAB_ID = 'activity-default';
 
-export function ScreenStage({
+export const ScreenStage = memo(function ScreenStage({
   share,
   videoRef,
   onPickSource: _onPickSource,
@@ -233,22 +235,10 @@ export function ScreenStage({
   const selectedTaskWorker = selectedTaskId
     ? workers.find((worker) => worker.role !== 'talker' && worker.id === selectedTaskId)
     : undefined;
-  const capacity = useMemo(() => {
-    const nodes = plan?.nodes ?? [];
-    const statusById = new Map(nodes.map((node) => [node.id, node.status]));
-    const active = nodes.filter((node) => (
-      node.status === 'running'
-      || node.status === 'verifying'
-      || node.status === 'reviewing'
-      || node.status === 'awaiting-acceptance'
-      || node.status === 'reworking'
-    )).length;
-    const waiting = nodes.filter((node) => (
-      node.status === 'pending'
-      && node.deps.every((dependencyId) => statusById.get(dependencyId) === 'accepted')
-    )).length;
-    return { active, waiting, saturated: active >= 4 && waiting > 0 };
-  }, [plan]);
+  const capacity = useMemo(
+    () => computeWorkerCapacity(plan?.nodes ?? []),
+    [plan],
+  );
 
   // For terminal stage windows, project the high-fidelity Bash command log.
   // When no workerId is specified, aggregate every worker chronologically.
@@ -461,4 +451,4 @@ export function ScreenStage({
       )}
     </div>
   );
-}
+});

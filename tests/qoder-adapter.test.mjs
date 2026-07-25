@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { chmod, mkdir, realpath, rm, writeFile } from 'node:fs/promises';
+import { realpathSync } from 'node:fs';
+import { chmod, mkdir, rm, writeFile } from 'node:fs/promises';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -126,13 +127,9 @@ test('packaged Qoder runtime resolves to an unpacked executable', async (t) => {
   await mkdir(join(binary, '..'), { recursive: true });
   await writeFile(binary, '#!/usr/bin/env node\n');
   await chmod(binary, 0o755);
-  // Windows CI runners expose %TEMP% as an 8.3 short path, and the sync
-  // realpath inside resolveQoderRuntime preserves it while the promise
-  // variant resolves to the long name — canonicalize both sides before
-  // comparing so the assertion is about the file, not the path spelling.
-  const resolved = resolveQoderRuntime(resources, () => null);
-  assert.ok(resolved, 'unpacked runtime was not resolved');
-  assert.equal(await realpath(resolved), await realpath(binary));
+  // Match the resolver's realpathSync.native: on Windows runners the temp dir
+  // comes back as an 8.3 short name (RUNNER~1) that only native realpath expands.
+  assert.equal(resolveQoderRuntime(resources, () => null), realpathSync.native(binary));
 });
 
 test('failed Qoder readiness handshake closes the spawned SDK session', async () => {

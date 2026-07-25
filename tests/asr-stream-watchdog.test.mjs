@@ -94,12 +94,19 @@ async function loadAsrIpc() {
     '../electron/asr/xfyun-iat.ts',
     [["'./pcm16.js'", JSON.stringify(pcmUrl)]],
   );
+  const wsTransportUrl = moduleDataUrl(`
+    export const createWsWebSocketFactory = () => (url) => {
+      const socket = new globalThis.WebSocket(url);
+      return socket;
+    };
+  `);
   const asrUrl = await transpileDataUrl('../electron/ipc/asr.ts', [
     ["'electron'", JSON.stringify(electronUrl)],
     ["'../store.js'", JSON.stringify(storeUrl)],
     ["'../asr-polish.js'", JSON.stringify(polishUrl)],
     ["'../format-error.js'", JSON.stringify(formatErrorUrl)],
     ["'../asr/xfyun-iat.js'", JSON.stringify(xfyunUrl)],
+    ["'../asr/ws-transport.js'", JSON.stringify(wsTransportUrl)],
   ]);
 
   globalThis.__asrHandlers = handlers;
@@ -185,12 +192,16 @@ test('stream-start without configured credentials returns an error', async () =>
   const formatErrorUrl = moduleDataUrl(`export const errorMessage = (error) => String(error?.message ?? error);`);
   const pcmUrl = await transpileDataUrl('../electron/asr/pcm16.ts');
   const xfyunUrl = await transpileDataUrl('../electron/asr/xfyun-iat.ts', [["'./pcm16.js'", JSON.stringify(pcmUrl)]]);
+  const wsTransportUrl = moduleDataUrl(`
+    export const createWsWebSocketFactory = () => (url) => new globalThis.WebSocket(url);
+  `);
   const asrUrl = await transpileDataUrl('../electron/ipc/asr.ts', [
     ["'electron'", JSON.stringify(electronUrl)],
     ["'../store.js'", JSON.stringify(storeUrl)],
     ["'../asr-polish.js'", JSON.stringify(polishUrl)],
     ["'../format-error.js'", JSON.stringify(formatErrorUrl)],
     ["'../asr/xfyun-iat.js'", JSON.stringify(xfyunUrl)],
+    ["'../asr/ws-transport.js'", JSON.stringify(wsTransportUrl)],
   ]);
   globalThis.__asrHandlers = handlers;
   globalThis.__asrListeners = listeners;

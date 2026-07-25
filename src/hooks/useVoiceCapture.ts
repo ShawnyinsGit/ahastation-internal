@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { MicVAD } from '@ricky0123/vad-web';
+import { getMicLevel, setMicLevel } from '../lib/mic-level';
 import { cosineSimilarity, embedSpeaker } from '../lib/speaker-embedding';
 import {
   serializeMicrophoneOperation,
@@ -68,7 +69,6 @@ interface UseVoiceCaptureResult {
   listening: boolean;
   lastError: string | null;
   permissionDenied: boolean;
-  speechLevel: number;
   asrAvailable: boolean | null;
   status: MicrophoneCaptureStatus;
   retry: () => void;
@@ -94,7 +94,6 @@ export function useVoiceCapture({
   const [listening, setListening] = useState(false);
   const [lastError, setLastError] = useState<string | null>(null);
   const [permissionDenied, setPermissionDenied] = useState(false);
-  const [speechLevel, setSpeechLevel] = useState(0);
   const [asrAvailable, setAsrAvailable] = useState<boolean | null>(null);
   const [status, setStatus] = useState<MicrophoneCaptureStatus>('idle');
   const [retryVersion, setRetryVersion] = useState(0);
@@ -225,7 +224,7 @@ export function useVoiceCapture({
       void queueRelease(v, stream);
       setActive(false);
       setListening(false);
-      setSpeechLevel(0);
+      setMicLevel(0);
       setStatus('idle');
       return;
     }
@@ -579,7 +578,9 @@ export function useVoiceCapture({
               window.vibeMeet.sendAsrStreamFrame(copy.buffer, true);
             }
             // Cheap UI signal: smoothed speech probability for the mic meter.
-            setSpeechLevel((prev) => prev * 0.6 + probs.isSpeech * 0.4);
+            // Emitted through the module-level mic-level channel (not React
+            // state) so per-frame updates never re-render the App tree.
+            setMicLevel(getMicLevel() * 0.6 + probs.isSpeech * 0.4);
             // Accumulate per-segment stats used by the barge-in gate at
             // speech-end. The library calls this for every frame, including
             // silence between segments; the running totals are reset in
@@ -639,5 +640,5 @@ export function useVoiceCapture({
     };
   }, [enabled, retryVersion, queueRelease]);
 
-  return { active, listening, lastError, permissionDenied, speechLevel, asrAvailable, status, retry };
+  return { active, listening, lastError, permissionDenied, asrAvailable, status, retry };
 }

@@ -32,8 +32,8 @@ const api = {
     ipcRenderer.invoke('session:user-image', { sessionId, dataUrl, caption }),
   sendUserAttachments: (sessionId, items, caption) =>
     ipcRenderer.invoke('session:user-attachments', { sessionId, items, caption }),
-  resolvePermission: (sessionId, id, decision, message) =>
-    ipcRenderer.invoke('session:resolve-permission', { sessionId, id, decision, message }),
+  resolvePermission: (sessionId, id, decision, message, scope) =>
+    ipcRenderer.invoke('session:resolve-permission', { sessionId, id, decision, message, scope }),
   interrupt: (sessionId) => ipcRenderer.invoke('session:interrupt', { sessionId }),
   setPermissionMode: (sessionId, mode) =>
     ipcRenderer.invoke('session:set-permission-mode', { sessionId, mode }),
@@ -278,12 +278,6 @@ const api = {
     // Phase 1 defaults to AhaBar; pass { view: 'companion' } for the Phaser office.
     toggle: (opts) => ipcRenderer.invoke('companion:toggle', opts ?? {}),
     ttsState: (active) => ipcRenderer.send('companion:tts-state', { active }),
-  },
-  // Secure editor file browsing. No cwd is ever sent — the main process
-  // resolves the workspace from the sender's editor-window registration.
-  ideFiles: {
-    list: (path) => ipcRenderer.invoke('ide-files:list', { path }),
-    read: (path) => ipcRenderer.invoke('ide-files:read', { path }),
   },
   popoutSession: (tabId) => ipcRenderer.invoke('popout:open-session', { tabId }),
   popoutStage: (windowId, type) => ipcRenderer.invoke('popout:open-stage', { windowId, type }),

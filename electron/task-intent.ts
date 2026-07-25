@@ -201,6 +201,23 @@ export interface TaskDispatchDefaults {
   networkHint?: boolean;
 }
 
+/**
+ * Default when the plan omits dependencyGate.
+ * - read-only / analysis → reviewed (dependents may start after machine gates)
+ * - writers / command sandboxes → accepted (wait for durable integration)
+ */
+export function inferDefaultDependencyGate(input: {
+  workspaceMode?: 'read-only' | 'git-worktree' | 'shared-locked';
+  writePaths?: readonly string[];
+  title?: string;
+  prompt?: string;
+}): 'reviewed' | 'accepted' {
+  if (input.workspaceMode === 'read-only') return 'reviewed';
+  if ((input.writePaths?.length ?? 0) > 0) return 'accepted';
+  const intent = inferTaskIntent(`${input.title ?? ''} ${input.prompt ?? ''}`);
+  return intent.wantsWrite ? 'accepted' : 'reviewed';
+}
+
 /** Fill missing authority fields from prompt intent + cwd probes. Explicit
  *  caller values always win; never widens an explicit read-only mode. */
 export function applyTaskDispatchDefaults(input: {
