@@ -15,12 +15,13 @@ import { randomUUID } from 'node:crypto';
 import {
   existsSync,
   mkdirSync,
+  mkdtempSync,
   readFileSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join } from 'node:path';
 import test from 'node:test';
 
 import { ClaudeCodeBackend } from '../dist-electron/backends/claude-code-adapter.js';
@@ -29,12 +30,40 @@ import {
   getBackendRegistry,
   resetBackendRegistry,
 } from '../dist-electron/backends/registry.js';
+import {
+  assessWorkerRuntime,
+  probeWorkerRuntimeVersion,
+} from '../dist-electron/backends/worker-runtime-contract.js';
 import { MeetingRepository } from '../dist-electron/meeting-repository.js';
 import { Orchestrator } from '../dist-electron/orchestrator.js';
 import { TaskWorkspaceManager } from '../dist-electron/task-workspace.js';
 
 const NODE = process.execPath;
 const REAL_CHECK = [NODE, '-e', 'process.exit(0)'];
+
+/** Stub CLI that only answers `--version` with a pinned Worker contract version.
+ *  This vertical slice injects sessions — it must not require a real Claude/Codex
+ *  install. CI and clean developer machines otherwise fail plan approval probes. */
+function fakeRuntimeBinary(version) {
+  const dir = mkdtempSync(join(tmpdir(), 'ahastation-fake-runtime-'));
+  const binary = join(dir, 'runtime.cjs');
+  writeFileSync(
+    binary,
+    `'use strict';\nconsole.log(${JSON.stringify(version)});\n`,
+  );
+  return { dir, binary };
+}
+
+function runtimeReady(backendId, binaryPath) {
+  const version = probeWorkerRuntimeVersion(backendId, binaryPath);
+  return assessWorkerRuntime({
+    backendId,
+    installed: true,
+    implementationEnabled: true,
+    authenticated: true,
+    version,
+  }).state === 'available';
+}
 
 function git(cwd, args) {
   return execFileSync('git', args, {
@@ -235,6 +264,13 @@ async function acceptedTask(orchestrator, taskId) {
 test('injected-review orchestration drives the complete multi-backend Meeting workflow', {
   timeout: 120_000,
 }, async (t) => {
+  const claudeRuntime = fakeRuntimeBinary('2.1.150');
+  const codexRuntime = fakeRuntimeBinary('0.144.1');
+  if (!runtimeReady('claude-code', claudeRuntime.binary) || !runtimeReady('codex', codexRuntime.binary)) {
+    t.skip('stub Worker runtime version probe unavailable on this host');
+    return;
+  }
+
   const repo = createRepository();
   const meetingId = `vertical-${randomUUID()}`;
   const taskWorktreeRoot = join(tmpdir(), 'ahastation-vertical-worktrees', meetingId);
@@ -258,6 +294,8 @@ test('injected-review orchestration drives the complete multi-backend Meeting wo
     try { git(repo.root, ['worktree', 'prune']); } catch {}
     rmSync(taskWorktreeRoot, { recursive: true, force: true });
     rmSync(repo.root, { recursive: true, force: true });
+    rmSync(claudeRuntime.dir, { recursive: true, force: true });
+    rmSync(codexRuntime.dir, { recursive: true, force: true });
   });
 
   resetBackendRegistry();
@@ -267,13 +305,13 @@ test('injected-review orchestration drives the complete multi-backend Meeting wo
   registry.register(wrapBackend(
     claude,
     'claude-code',
-    resolve('node_modules/@anthropic-ai/claude-agent-sdk-win32-x64/claude.exe'),
+    claudeRuntime.binary,
     sessions,
   ));
   registry.register(wrapBackend(
     codex,
     'codex',
-    resolve('node_modules/@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc/bin/codex.exe'),
+    codexRuntime.binary,
     sessions,
   ));
 

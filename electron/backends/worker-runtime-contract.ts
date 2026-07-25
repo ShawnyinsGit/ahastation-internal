@@ -230,12 +230,19 @@ export function assessWorkerRuntime(input: {
 export function probeWorkerRuntimeVersion(backendId: string, binaryPath: string | null): string | null {
   if (!binaryPath) return null;
   try {
-    const output = execFileSync(binaryPath, ['--version'], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-      timeout: 3_000,
-      windowsHide: true,
-    });
+    // JS stubs (used by injected-session tests) are not directly exec-able on
+    // Windows; run them through the current Node binary instead.
+    const isJsStub = /\.(c|m)?js$/i.test(binaryPath);
+    const output = execFileSync(
+      isJsStub ? process.execPath : binaryPath,
+      isJsStub ? [binaryPath, '--version'] : ['--version'],
+      {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+        timeout: 3_000,
+        windowsHide: true,
+      },
+    );
     return extractRuntimeVersion(output);
   } catch {
     return null;

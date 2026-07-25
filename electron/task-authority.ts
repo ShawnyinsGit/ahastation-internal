@@ -5,7 +5,10 @@ import {
   realpathSync,
 } from 'node:fs';
 import {
+  dirname,
+  extname,
   isAbsolute,
+  join,
   relative,
   resolve,
   sep,
@@ -81,6 +84,45 @@ function isWithin(root: string, candidate: string): boolean {
     || normalizedCandidate.startsWith(`${normalizedRoot}${sep}`);
 }
 
+/**
+ * Re-anchor absolute paths that use OS path aliases onto the canonical
+ * workspace root (macOS `/var` → `/private/var`) without following
+ * in-workspace symlinks. In-workspace link rejection stays in
+ * `assertNoLinkEscape`.
+ */
+function reanchorToWorkspaceRoot(root: string, absolute: string): string {
+  if (
+    isWithin(root, absolute)
+    || normalizedForComparison(root) === normalizedForComparison(absolute)
+  ) {
+    return absolute;
+  }
+  let cursor = absolute;
+  for (;;) {
+    if (existsSync(cursor)) {
+      try {
+        const real = realpathSync.native(cursor);
+        if (
+          normalizedForComparison(real) === normalizedForComparison(root)
+          || isWithin(root, real)
+        ) {
+          const suffix = absolute.slice(cursor.length).replace(/^[\\/]+/, '');
+          const relativeReal = normalizedForComparison(real) === normalizedForComparison(root)
+            ? ''
+            : relative(root, real);
+          if (!relativeReal) return suffix ? join(root, suffix) : root;
+          return suffix ? join(root, relativeReal, suffix) : join(root, relativeReal);
+        }
+      } catch {
+        // Keep walking toward volume root.
+      }
+    }
+    const parent = dirname(cursor);
+    if (parent === cursor) return absolute;
+    cursor = parent;
+  }
+}
+
 function assertNoLinkEscape(root: string, candidate: string): void {
   if (!isWithin(root, candidate)) {
     throw new Error(`path escapes workspace: ${candidate}`);
@@ -113,7 +155,8 @@ function canonicalWorkspaceRoot(workspaceRoot: string): string {
 }
 
 function canonicalWorkspacePath(root: string, requested: string): string {
-  const candidate = isAbsolute(requested) ? resolve(requested) : resolve(root, requested);
+  const absolute = isAbsolute(requested) ? resolve(requested) : resolve(root, requested);
+  const candidate = reanchorToWorkspaceRoot(root, absolute);
   assertNoLinkEscape(root, candidate);
   return candidate;
 }
@@ -180,7 +223,9 @@ function normalizeAuthorityRequest(
   return {
     schemaVersion: 1,
     workspaceRoot: root,
-    writePaths: uniqueSorted(request.writePaths.map((path) => canonicalWorkspacePath(root, path))),
+    writePaths: uniqueSorted(
+      request.writePaths.flatMap((path) => expandWritePathCoverage(root, path)),
+    ),
     allowedToolKinds: uniqueSorted(request.toolKinds.map(canonicalToolKind)),
     allowedWorkingDirectories: uniqueSorted(
       request.workingDirectories.map((path) => canonicalWorkspacePath(root, path)),
@@ -290,10 +335,7 @@ export function compileReworkTaskAuthority(
     })
   );
   const commandsCovered = next.allowedCommands.every((command) => (
-    previous.allowedCommands.some((allowed) => (
-      allowed.length === command.length
-      && allowed.every((argument, index) => argument === command[index])
-    ))
+    previous.allowedCommands.some((allowed) => commandMatchesGrant(allowed, command))
   ));
   if (
     !relativePathsCovered(
@@ -346,10 +388,144 @@ function pathCovered(candidate: string, roots: readonly string[]): boolean {
   return roots.some((root) => isWithin(root, candidate));
 }
 
+/** File-scoped grants also cover siblings by including the parent directory.
+ *  Root-level files stay file-scoped so they cannot widen to the whole workspace. */
+function expandWritePathCoverage(root: string, path: string): string[] {
+  const canonical = canonicalWorkspacePath(root, path);
+  if (!extname(canonical)) return [canonical];
+  const parent = dirname(canonical);
+  if (!parent || parent === canonical) return [canonical];
+  if (normalizedForComparison(parent) === normalizedForComparison(root)) {
+    return [canonical];
+  }
+  return isWithin(root, parent) ? [canonical, parent] : [canonical];
+}
+
+/** Exact match, or a granted argv that is a prefix of the requested command.
+ *  Prefix allow requires at least executable + one argument so a bare `npm`
+ *  grant cannot silently authorize `npm publish`. */
+export function commandMatchesGrant(allowed: readonly string[], command: readonly string[]): boolean {
+  if (allowed.length === 0 || allowed.length > command.length) return false;
+  if (!allowed.every((argument, index) => argument === command[index])) return false;
+  if (allowed.length === command.length) return true;
+  return allowed.length >= 2;
+}
+
+/** Authority misses the user can sensibly approve once without rewriting the plan. */
+const REMEDIABLE_AUTHORITY_DENIALS = new Set([
+  'command-not-granted',
+  'write-path-not-granted',
+  'network-host-not-granted',
+  'cwd-not-granted',
+]);
+
+function maybeAskUser(decision: AuthorityDecision): AuthorityDecision {
+  if (decision.kind === 'deny' && REMEDIABLE_AUTHORITY_DENIALS.has(decision.reason)) {
+    return { kind: 'ask-user', reason: `authority-miss:${decision.reason}` };
+  }
+  return decision;
+}
+
+/** What the user already approved by hand during this attempt.
+ *
+ *  The compiled grant stays immutable and hash-bound — widening it needs a new
+ *  approved plan version. This is the narrower escape hatch: once the user
+ *  clicks allow on a remediable miss (a business directory outside the inferred
+ *  sandbox, an extra command, a network host), the same target stops asking for
+ *  the rest of the attempt. It never crosses attempts, grants, or tool kinds:
+ *  a read-only task still fails `tool-kind-not-granted` before any of this. */
+export interface TaskAuthorityAddendum {
+  taskId: string;
+  attempt: number;
+  grantHash: string;
+  writePaths: string[];
+  workingDirectories: string[];
+  commands: string[][];
+  networkHosts: string[];
+}
+
+/** Bound on user-approved entries per dimension, so a runaway Worker cannot
+ *  turn repeated approvals into an unbounded allowlist. */
+const ADDENDUM_ENTRY_LIMIT = 16;
+
+function addBounded<T>(values: T[], candidate: T, key: (value: T) => string): T[] {
+  if (values.length >= ADDENDUM_ENTRY_LIMIT) return values;
+  const candidateKey = key(candidate);
+  if (values.some((value) => key(value) === candidateKey)) return values;
+  return [...values, candidate];
+}
+
+function emptyAddendum(grant: TaskAuthorityGrant): TaskAuthorityAddendum {
+  return {
+    taskId: grant.taskId,
+    attempt: grant.attempt,
+    grantHash: grant.grantHash,
+    writePaths: [],
+    workingDirectories: [],
+    commands: [],
+    networkHosts: [],
+  };
+}
+
+function addendumForGrant(
+  grant: TaskAuthorityGrant,
+  addendum: TaskAuthorityAddendum | undefined,
+): TaskAuthorityAddendum | undefined {
+  if (!addendum) return undefined;
+  return addendum.taskId === grant.taskId
+    && addendum.attempt === grant.attempt
+    && addendum.grantHash === grant.grantHash
+    ? addendum
+    : undefined;
+}
+
+/** Fold one hand-approved request into the attempt's addendum. Paths follow the
+ *  same coverage rule as compiled grants (a file also covers its directory) so
+ *  approving one edit does not re-ask for every sibling the Worker touches. */
+export function extendAuthorityAddendum(
+  grant: TaskAuthorityGrant,
+  request: CanonicalExecutionRequest,
+  previous?: TaskAuthorityAddendum,
+): TaskAuthorityAddendum {
+  const base = addendumForGrant(grant, previous) ?? emptyAddendum(grant);
+  let { writePaths, workingDirectories, commands, networkHosts } = base;
+  for (const path of request.writePaths) {
+    let covered: string[];
+    try {
+      covered = expandWritePathCoverage(grant.workspaceRoot, path);
+    } catch {
+      continue;
+    }
+    for (const entry of covered) {
+      writePaths = addBounded(writePaths, entry, (value) => normalizedForComparison(value));
+    }
+  }
+  if (request.kind === 'command' && request.executable) {
+    const cwd = request.cwd ? canonicalRequestPath(grant.workspaceRoot, request.cwd) : null;
+    if (cwd) {
+      workingDirectories = addBounded(
+        workingDirectories,
+        cwd,
+        (value) => normalizedForComparison(value),
+      );
+    }
+    commands = addBounded(
+      commands,
+      [request.executable, ...(request.argv ?? [])],
+      (value) => value.join('\u0000'),
+    );
+  }
+  for (const host of request.networkHosts) {
+    networkHosts = addBounded(networkHosts, canonicalHost(host), (value) => value);
+  }
+  return { ...base, writePaths, workingDirectories, commands, networkHosts };
+}
+
 export function evaluateTaskAuthority(
   grant: TaskAuthorityGrant,
   request: CanonicalExecutionRequest,
   now = Date.now(),
+  addendum?: TaskAuthorityAddendum,
 ): AuthorityDecision {
   if (!verifyGrantIntegrity(grant)) return { kind: 'deny', reason: 'invalid-grant-hash' };
   if (request.taskId !== grant.taskId) return { kind: 'deny', reason: 'task-mismatch' };
@@ -362,8 +538,15 @@ export function evaluateTaskAuthority(
   } catch {
     return { kind: 'deny', reason: 'workspace-identity-unavailable' };
   }
-  const requestRoot = canonicalRequestPath(grant.workspaceRoot, request.workspaceRoot);
-  if (!requestRoot || normalizedForComparison(requestRoot) !== normalizedForComparison(grant.workspaceRoot)) {
+  // Compare realpath-canonical roots so macOS `/var` ↔ `/private/var`
+  // aliases of the same workspace are not denied as workspace-mismatch.
+  let requestRoot: string;
+  try {
+    requestRoot = canonicalWorkspaceRoot(request.workspaceRoot);
+  } catch {
+    return { kind: 'deny', reason: 'workspace-mismatch' };
+  }
+  if (normalizedForComparison(requestRoot) !== normalizedForComparison(grant.workspaceRoot)) {
     return { kind: 'deny', reason: 'workspace-mismatch' };
   }
   const highRisk = request.sideEffects.find((effect) => ALWAYS_ASK_SIDE_EFFECTS.has(effect));
@@ -373,6 +556,10 @@ export function evaluateTaskAuthority(
   if (!grant.allowedToolKinds.includes(request.kind)) {
     return { kind: 'deny', reason: 'tool-kind-not-granted' };
   }
+  // Hand-approved targets from this attempt widen only the remediable
+  // dimensions below, and only for the exact grant they were approved against.
+  const approved = addendumForGrant(grant, addendum);
+  let usedAddendum = false;
   if (request.kind === 'write' && request.writePaths.length === 0) {
     return { kind: 'deny', reason: 'write-target-missing' };
   }
@@ -385,23 +572,34 @@ export function evaluateTaskAuthority(
   }
   for (const path of request.writePaths) {
     const canonical = canonicalRequestPath(grant.workspaceRoot, path);
-    if (!canonical || !pathCovered(canonical, grant.writePaths)) {
-      return { kind: 'deny', reason: 'write-path-not-granted' };
+    if (!canonical) return { kind: 'deny', reason: 'write-path-escape' };
+    if (!pathCovered(canonical, grant.writePaths)) {
+      if (!approved || !pathCovered(canonical, approved.writePaths)) {
+        return maybeAskUser({ kind: 'deny', reason: 'write-path-not-granted' });
+      }
+      usedAddendum = true;
     }
   }
   if (request.kind === 'command') {
     const cwd = request.cwd
       ? canonicalRequestPath(grant.workspaceRoot, request.cwd)
       : grant.workspaceRoot;
-    if (!cwd || !pathCovered(cwd, grant.allowedWorkingDirectories)) {
-      return { kind: 'deny', reason: 'cwd-not-granted' };
+    if (!cwd) return { kind: 'deny', reason: 'cwd-escape' };
+    if (!pathCovered(cwd, grant.allowedWorkingDirectories)) {
+      if (!approved || !pathCovered(cwd, approved.workingDirectories)) {
+        return maybeAskUser({ kind: 'deny', reason: 'cwd-not-granted' });
+      }
+      usedAddendum = true;
     }
     const command = [request.executable!, ...(request.argv ?? [])];
-    if (!grant.allowedCommands.some((allowed) => (
-      allowed.length === command.length
-      && allowed.every((argument, index) => argument === command[index])
-    ))) {
-      return { kind: 'deny', reason: 'command-not-granted' };
+    if (!grant.allowedCommands.some((allowed) => commandMatchesGrant(allowed, command))) {
+      if (
+        !approved
+        || !approved.commands.some((allowed) => commandMatchesGrant(allowed, command))
+      ) {
+        return maybeAskUser({ kind: 'deny', reason: 'command-not-granted' });
+      }
+      usedAddendum = true;
     }
     if (request.environmentKeys.some((key) => !grant.allowedEnvironmentKeys.includes(key))) {
       return { kind: 'deny', reason: 'environment-key-not-granted' };
@@ -413,10 +611,18 @@ export function evaluateTaskAuthority(
       return { kind: 'deny', reason: 'command-timeout-exceeds-grant' };
     }
   }
-  if (request.networkHosts.some((host) => !grant.allowedNetworkHosts.includes(canonicalHost(host)))) {
-    return { kind: 'deny', reason: 'network-host-not-granted' };
+  for (const host of request.networkHosts) {
+    const canonical = canonicalHost(host);
+    if (grant.allowedNetworkHosts.includes(canonical)) continue;
+    if (!approved || !approved.networkHosts.includes(canonical)) {
+      return maybeAskUser({ kind: 'deny', reason: 'network-host-not-granted' });
+    }
+    usedAddendum = true;
   }
-  return { kind: 'allow', reason: 'within-task-authority' };
+  return {
+    kind: 'allow',
+    reason: usedAddendum ? 'within-user-approved-addendum' : 'within-task-authority',
+  };
 }
 
 export function summarizeCanonicalRequest(request: CanonicalExecutionRequest): Record<string, unknown> {

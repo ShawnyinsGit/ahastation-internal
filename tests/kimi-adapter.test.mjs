@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { chmod, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -141,9 +141,12 @@ test('Kimi ACP worker updates and terminal reports use the shared contract', () 
 test('Kimi ACP worker writes stay inside an existing workspace parent', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'ahastation-kimi-write-'));
   t.after(() => rm(root, { recursive: true, force: true }));
+  // resolveKimiWritePath returns realpath-canonical targets so macOS
+  // /var → /private/var aliases compare equal to the confined root.
+  const realRoot = await realpath(root);
   assert.equal(
     await resolveKimiWritePath(root, 'result.txt'),
-    join(root, 'result.txt'),
+    join(realRoot, 'result.txt'),
   );
   await assert.rejects(
     resolveKimiWritePath(root, '../outside.txt'),

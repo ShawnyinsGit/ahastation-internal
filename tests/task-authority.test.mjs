@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -8,6 +8,7 @@ import {
   compileReworkTaskAuthority,
   compileTaskAuthority,
   evaluateTaskAuthority,
+  extendAuthorityAddendum,
 } from '../dist-electron/task-authority.js';
 import { CodexBackend } from '../dist-electron/backends/codex-adapter.js';
 import { WorkerScheduler } from '../dist-electron/worker-scheduler.js';
@@ -109,10 +110,197 @@ test('in-grant source writes and exact test argv auto-allow', () => {
   );
 });
 
-test('path, cwd, argv, environment, timeout, and host escapes deny', () => {
+test('realpath aliases of the same workspace still authorize', () => {
+  // macOS tmpdir is often /var/folders/... while realpath is /private/var/...
+  // Grants store the realpath; requests may still carry the lexical form.
+  const lexical = workspace();
+  const authority = grant(lexical);
+  const forms = Array.from(new Set([lexical, realpathSync(lexical)]));
+  for (const root of forms) {
+    assert.deepEqual(
+      evaluateTaskAuthority(authority, canonical(root, {
+        kind: 'write',
+        readPaths: [],
+        writePaths: ['src/auth/login.ts'],
+        sideEffects: ['workspace-write'],
+      }), APPROVED_AT + 1),
+      { kind: 'allow', reason: 'within-task-authority' },
+      root,
+    );
+    assert.equal(
+      evaluateTaskAuthority(authority, canonical(root, {
+        kind: 'command',
+        readPaths: [],
+        cwd: root,
+        executable: 'npm',
+        argv: ['test', '--', 'auth'],
+        environmentKeys: ['CI'],
+        timeoutMs: 60_000,
+        sideEffects: ['process'],
+      }), APPROVED_AT + 1).kind,
+      'allow',
+      root,
+    );
+  }
+});
+
+test('a hand-approved miss stops asking for the same target this attempt', () => {
+  const root = workspace();
+  const authority = grant(root, {
+    writePaths: ['.vibe-assets/tasks/login'],
+    commands: [['npm', 'test']],
+    toolKinds: ['read', 'write', 'command', 'network'],
+    networkHosts: [],
+  });
+  const write = canonical(root, {
+    kind: 'write',
+    readPaths: [],
+    writePaths: ['src/auth/login.ts'],
+    sideEffects: ['workspace-write'],
+  });
+  assert.equal(
+    evaluateTaskAuthority(authority, write, APPROVED_AT + 1).reason,
+    'authority-miss:write-path-not-granted',
+  );
+
+  const addendum = extendAuthorityAddendum(authority, write);
+  assert.deepEqual(
+    evaluateTaskAuthority(authority, write, APPROVED_AT + 2, addendum),
+    { kind: 'allow', reason: 'within-user-approved-addendum' },
+  );
+  // Same coverage rule as compiled grants: the approved file covers siblings.
+  assert.equal(
+    evaluateTaskAuthority(authority, canonical(root, {
+      kind: 'write',
+      readPaths: [],
+      writePaths: ['src/auth/session.ts'],
+      sideEffects: ['workspace-write'],
+    }), APPROVED_AT + 2, addendum).kind,
+    'allow',
+  );
+  // Untouched dimensions and unrelated directories keep asking.
+  assert.equal(
+    evaluateTaskAuthority(authority, canonical(root, {
+      kind: 'write',
+      readPaths: [],
+      writePaths: ['tests/login.test.ts'],
+      sideEffects: ['workspace-write'],
+    }), APPROVED_AT + 2, addendum).reason,
+    'authority-miss:write-path-not-granted',
+  );
+  assert.equal(
+    evaluateTaskAuthority(authority, canonical(root, {
+      kind: 'command',
+      readPaths: [],
+      cwd: root,
+      executable: 'npm',
+      argv: ['run', 'build'],
+      sideEffects: ['process'],
+    }), APPROVED_AT + 2, addendum).reason,
+    'authority-miss:command-not-granted',
+  );
+});
+
+test('an addendum never crosses attempts, grants, or tool kinds', () => {
+  const root = workspace();
+  const authority = grant(root, {
+    writePaths: ['.vibe-assets/tasks/login'],
+    commands: [['npm', 'test']],
+    toolKinds: ['read', 'write', 'command'],
+    networkHosts: [],
+  });
+  const command = canonical(root, {
+    kind: 'command',
+    readPaths: [],
+    cwd: root,
+    executable: 'npm',
+    argv: ['run', 'build'],
+    sideEffects: ['process'],
+  });
+  const addendum = extendAuthorityAddendum(authority, command);
+  assert.equal(
+    evaluateTaskAuthority(authority, command, APPROVED_AT + 2, addendum).reason,
+    'within-user-approved-addendum',
+  );
+
+  const rework = compileTaskAuthority(
+    'task-login',
+    2,
+    3,
+    'approval-42',
+    root,
+    authorityRequest({
+      writePaths: ['.vibe-assets/tasks/login'],
+      commands: [['npm', 'test']],
+      toolKinds: ['read', 'write', 'command'],
+      networkHosts: [],
+    }),
+    APPROVED_AT,
+  );
+  const reworkCommand = { ...command, attempt: 2 };
+  assert.equal(
+    evaluateTaskAuthority(rework, reworkCommand, APPROVED_AT + 2, addendum).reason,
+    'authority-miss:command-not-granted',
+  );
+
+  // A read-only task cannot be promoted: the tool kind is denied first.
+  const readOnly = grant(root, {
+    writePaths: [],
+    commands: [],
+    toolKinds: ['read'],
+    networkHosts: [],
+  });
+  const write = canonical(root, {
+    kind: 'write',
+    readPaths: [],
+    writePaths: ['src/auth/login.ts'],
+    sideEffects: ['workspace-write'],
+  });
+  assert.deepEqual(
+    evaluateTaskAuthority(
+      readOnly,
+      write,
+      APPROVED_AT + 2,
+      extendAuthorityAddendum(readOnly, write),
+    ),
+    { kind: 'deny', reason: 'tool-kind-not-granted' },
+  );
+});
+
+test('command grants allow argv prefixes and file grants cover siblings', () => {
+  const root = workspace();
+  const authority = grant(root, {
+    writePaths: ['src/auth/login.ts'],
+    commands: [['npm', 'test']],
+    toolKinds: ['read', 'write', 'command'],
+    networkHosts: [],
+  });
+  assert.equal(
+    evaluateTaskAuthority(authority, canonical(root, {
+      kind: 'command',
+      readPaths: [],
+      cwd: root,
+      executable: 'npm',
+      argv: ['test', '--coverage'],
+      sideEffects: ['process'],
+    }), APPROVED_AT + 1).kind,
+    'allow',
+  );
+  assert.equal(
+    evaluateTaskAuthority(authority, canonical(root, {
+      kind: 'write',
+      readPaths: [],
+      writePaths: ['src/auth/login.test.ts'],
+      sideEffects: ['workspace-write'],
+    }), APPROVED_AT + 1).kind,
+    'allow',
+  );
+});
+
+test('path, cwd, argv, environment, timeout, and host escapes deny or ask', () => {
   const root = workspace();
   const authority = grant(root);
-  const cases = [
+  const denyCases = [
     canonical(root, {
       kind: 'write',
       readPaths: [],
@@ -138,14 +326,6 @@ test('path, cwd, argv, environment, timeout, and host escapes deny', () => {
       readPaths: [],
       cwd: root,
       executable: 'npm',
-      argv: ['run', 'build'],
-      sideEffects: ['process'],
-    }),
-    canonical(root, {
-      kind: 'command',
-      readPaths: [],
-      cwd: root,
-      executable: 'npm',
       argv: ['test'],
       environmentKeys: ['API_KEY'],
       sideEffects: ['process'],
@@ -162,18 +342,40 @@ test('path, cwd, argv, environment, timeout, and host escapes deny', () => {
     canonical(root, {
       kind: 'network',
       readPaths: [],
-      networkHosts: ['evil.example.com'],
-      sideEffects: ['network'],
-    }),
-    canonical(root, {
-      kind: 'network',
-      readPaths: [],
       networkHosts: [],
       sideEffects: ['network'],
     }),
   ];
-  for (const request of cases) {
+  for (const request of denyCases) {
     assert.equal(evaluateTaskAuthority(authority, request, APPROVED_AT + 1).kind, 'deny');
+  }
+
+  const askCases = [
+    canonical(root, {
+      kind: 'command',
+      readPaths: [],
+      cwd: root,
+      executable: 'npm',
+      argv: ['run', 'build'],
+      sideEffects: ['process'],
+    }),
+    canonical(root, {
+      kind: 'network',
+      readPaths: [],
+      networkHosts: ['evil.example.com'],
+      sideEffects: ['network'],
+    }),
+    canonical(root, {
+      kind: 'write',
+      readPaths: [],
+      writePaths: ['docs/readme.md'],
+      sideEffects: ['workspace-write'],
+    }),
+  ];
+  for (const request of askCases) {
+    const decision = evaluateTaskAuthority(authority, request, APPROVED_AT + 1);
+    assert.equal(decision.kind, 'ask-user', JSON.stringify(request));
+    assert.match(decision.reason, /^authority-miss:/);
   }
 });
 
@@ -410,4 +612,115 @@ test('scheduler persists canonical allow before resolving the backend request', 
   assert.equal(approvalCard.id, 'permission-secret');
   assert.equal(approvalCard.input.normalizationDiagnostic, 'secret-bearing-argument');
   assert.doesNotMatch(JSON.stringify(approvalCard), /never-store-this/);
+});
+
+test('repeated identical authority denials fail the worker instead of burning budget', async () => {
+  const root = workspace();
+  const resolved = [];
+  const session = {
+    async start() {},
+    sendUserText() {},
+    sendUserContent() {},
+    resolvePermission(id, decision, reason) {
+      resolved.push({ id, decision, reason });
+    },
+    async interrupt() {},
+    end() {},
+  };
+  const backend = new CodexBackend();
+  const scheduler = new WorkerScheduler({
+    emit() {},
+    cwd: root,
+    autoApproveScope: 'off',
+    taskAuthorityCompilerRequired: true,
+    compileTaskAuthority(input) {
+      return compileTaskAuthority(
+        input.taskId,
+        input.attempt,
+        input.planVersion,
+        input.approvalDecisionId,
+        input.workspaceRoot,
+        input.authorityRequest,
+        input.approvedAt,
+      );
+    },
+    async persistTaskAuthority() {},
+    normalizePermissionRequest(_backendId, nativeRequest) {
+      return backend.normalizePermissionRequest(nativeRequest);
+    },
+    async persistPermissionDecision() {},
+    workspaceManager: {
+      inspectBaseline() {
+        return {
+          kind: 'git-clean',
+          revision: 'abc123',
+          changedPaths: [],
+          untrackedPaths: [],
+          truncated: false,
+        };
+      },
+      canPrepare() { return true; },
+      prepare() {
+        return {
+          kind: 'git-worktree',
+          cwd: root,
+          branch: 'task/deny-loop',
+          sourceRevision: 'abc123',
+          lockKeys: [],
+          baseline: {
+            kind: 'git-clean',
+            revision: 'abc123',
+            changedPaths: [],
+            untrackedPaths: [],
+            truncated: false,
+          },
+          managed: true,
+        };
+      },
+      release() {},
+    },
+    sessionFactory() { return session; },
+    buildWorkerMcp() { return {}; },
+    getTalker() { return null; },
+    isClosed() { return false; },
+    getSpeechFilterMode() { return 'strict'; },
+  });
+
+  assert.deepEqual(scheduler.installPlan([{
+    id: 'deny-loop',
+    title: 'Deny loop',
+    prompt: 'Only edit auth files.',
+    deps: [],
+    executorBackendId: 'codex',
+    writePaths: ['src/auth'],
+    workspaceMode: 'git-worktree',
+    authorityRequest: authorityRequest({
+      toolKinds: ['read', 'write'],
+      commands: [],
+      networkHosts: [],
+    }),
+  }], {
+    decisionId: 'approval-deny-loop',
+    approvedAt: Date.now(),
+  }), { ok: true });
+  await new Promise((resolvePromise) => setImmediate(resolvePromise));
+
+  for (let index = 0; index < 3; index += 1) {
+    scheduler.onWorkerEvent('deny-loop', {
+      kind: 'permission-request',
+      id: `bash-${index}`,
+      toolName: 'Bash',
+      input: {
+        executable: 'npm',
+        argv: ['test'],
+      },
+      toolUseID: `bash-${index}`,
+    });
+    await new Promise((resolvePromise) => setImmediate(resolvePromise));
+  }
+
+  assert.equal(resolved.filter((entry) => entry.decision === 'deny').length, 3);
+  const node = scheduler.snapshot().find((task) => task.id === 'deny-loop');
+  assert.equal(node?.status, 'failed');
+  assert.match(node?.summary ?? '', /repeated authority denial/);
 });
