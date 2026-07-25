@@ -212,7 +212,9 @@ test('ObserveService.tickOnce: publishes a full snapshot from the fixture home',
   const snap = await runService();
   assert.ok(snap.scannedAt > 0);
   const bySid = new Map(snap.sessions.map((s) => [s.nativeSessionId, s]));
-  assert.equal(bySid.size, 6);
+  // 6 CLI/Claude rows + 3 Codex Desktop threads (the two CLI rollout ids
+  // that also carry global-state descriptions are deduped, not duplicated).
+  assert.equal(bySid.size, 9);
   assert.equal(bySid.get(SID_IDLE).state, 'waiting');
   assert.equal(bySid.get(SID_EXEC).activity, 'executing');
   assert.equal(bySid.get(CODEX_PENDING).pid, 4302);

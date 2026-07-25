@@ -14,6 +14,9 @@
 //           descendant CPU > 5%                                 → Executing
 //           trailing llm request without llm response           → Thinking
 //           otherwise                                           → Waiting
+//   Desktop: live chat-spawned osPid                            → Executing
+//           else host app-server alive                          → Idle (host-backed)
+//           else                                                → Unknown (hidden)
 //
 // Disappearance asymmetry: a Claude session whose associated pid died
 // vanishes (null); Kimi follows the same rule. A Codex session without a
@@ -116,4 +119,29 @@ export function inferKimiState(input: KimiStateInput): InferredState | null {
     return { state: 'active', activity: 'thinking' };
   }
   return { state: 'waiting', activity: 'waiting' };
+}
+
+// ---------------------------------------------------------------------------
+// Codex Desktop (ChatGPT.app code mode)
+// ---------------------------------------------------------------------------
+
+export interface CodexDesktopStateInput {
+  /** Chat-spawned osPids alive in the current process snapshot. */
+  liveChatPids: number[];
+  /** Desktop host (`codex app-server`) alive and not self-excluded. */
+  hostAlive: boolean;
+}
+
+/** Desktop threads have no rollout tail, so state is pure liveness:
+ * a live chat-spawned process means a turn is running; otherwise a live
+ * host means "window open, nothing running" (host-backed idle); a dead
+ * host makes the thread unknowable (the board hides unknown rows). */
+export function inferCodexDesktopState(input: CodexDesktopStateInput): InferredState {
+  if (input.liveChatPids.length > 0) {
+    return { state: 'active', activity: 'executing' };
+  }
+  if (input.hostAlive) {
+    return { state: 'idle', activity: 'unknown' };
+  }
+  return { state: 'unknown', activity: 'unknown' };
 }

@@ -113,6 +113,11 @@ const EXCLUSION_PATTERNS: RegExp[] = [
   /mcp-server/,
   /\/plugins\//,
   /app-server-broker/,
+  // `codex ... app-server` is the Codex Desktop host (ChatGPT.app code
+  // mode) or AhaStation's own adapter child — never a user CLI session.
+  // Desktop hosts are routed to detectCodexDesktopHostPids instead. Token
+  // match: `app-server-broker` (above) must NOT match here.
+  /(?:^|\s)app-server(?:\s|$)/,
   /^\s*(grep|rg)\b/, // the search that found the name
 ];
 

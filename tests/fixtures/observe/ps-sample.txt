@@ -16,5 +16,8 @@
  5102  5000   1.0  90000 kimi-code        kimi-code
  5103  5102   2.5  30000 bash             bash -lc npm test
  5199  5000   0.1  90000 kimi-code        kimi-code
+ 8601     1   0.0  50000 codex            /usr/local/bin/codex app-server-broker --port 9100
+86693     1   0.0 274224 codex            /Applications/ChatGPT.app/Contents/Resources/codex -c features.code_mode_host=true app-server --analytics-default-enabled
+97611 86693   0.5  40000 node             /opt/homebrew/bin/node --test tests/onnx-session-init.test.mjs
  9001  9002   0.0   1000 loop-a           /tmp/loop-a
  9002  9001   0.0   1000 loop-b           /tmp/loop-b

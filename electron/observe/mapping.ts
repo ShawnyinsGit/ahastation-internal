@@ -100,6 +100,22 @@ export function detectMcpServerPids(snapshot: ProcessSnapshot): number[] {
   return pids;
 }
 
+/** Pids running the Codex Desktop host: a `codex` binary whose args carry
+ * the exact token `app-server` (e.g. ChatGPT.app's
+ * `Contents/Resources/codex -c features… app-server --analytics…`).
+ * `app-server-broker` is a different process and must not match. AhaStation's
+ * own adapter children (`codex app-server --stdio`) match too — callers must
+ * subtract the self-exclusion pid set. */
+export function detectCodexDesktopHostPids(snapshot: ProcessSnapshot): number[] {
+  const pids: number[] = [];
+  for (const info of snapshot.byPid.values()) {
+    if (!cmdHasBinary(info.command, 'codex')) continue;
+    const tokens = info.command.split(/\s+/).map((token) => token.replace(/^["']|["']$/g, ''));
+    if (tokens.includes('app-server')) pids.push(info.pid);
+  }
+  return pids.sort((a, b) => a - b);
+}
+
 const ROLLOUT_PATH_PATTERN = /\/\.codex\/sessions\/.+\.jsonl$/;
 
 /** Rollout file paths held open by the given (mcp-server) processes. */
