@@ -19,14 +19,24 @@ test('RK3588 release script keeps build, verification and manifest gates in orde
 
 test('Linux package declares both arm64 artifacts and Electron desktop dependencies', async () => {
   const config = JSON.parse(await readFile(new URL('electron-builder.json', root), 'utf8'));
-  assert.deepEqual(
-    config.linux.target.map((entry) => entry.target),
-    ['AppImage', 'deb'],
-  );
-  for (const target of config.linux.target) assert.ok(target.arch.includes('arm64'));
+  assert.deepEqual(config.linux.target, ['AppImage', 'deb']);
+  // Arch must NOT be pinned per target: a pinned x64+arm64 list made every
+  // `--arm64` run also build a wasted ~1 GB x64 package. Arch selection
+  // lives in the CLI flags (--x64 / --arm64) instead.
+  for (const target of config.linux.target) assert.equal(typeof target, 'string');
   for (const dependency of ['libasound2', 'libgbm1', 'libgtk-3-0', 'libnotify4', 'libxtst6', 'xdg-utils']) {
     assert.ok(config.deb.depends.includes(dependency), `${dependency} must be declared`);
   }
+});
+
+test('Linux CI jobs select their arch explicitly via CLI flags', async () => {
+  const pkg = JSON.parse(await readFile(new URL('package.json', root), 'utf8'));
+  assert.match(pkg.scripts['dist:linux:arm64'], /--linux --arm64/);
+  const workflow = await readFile(new URL('.github/workflows/build-matrix.yml', root), 'utf8');
+  // x64 ubuntu runner must not rely on the config default either.
+  assert.match(workflow, /electron-builder --linux --x64 --publish never/);
+  // linux-arm64 job keeps its explicit arm64 flag.
+  assert.match(workflow, /electron-builder --linux --arm64 --publish never/);
 });
 
 test('arm64 CI is built inside Debian 11 and signed releases depend on it', async () => {

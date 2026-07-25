@@ -5,6 +5,30 @@
  * 后端的 auto-approve 三档（off/read/all）照旧生效，与本模型互补。
  * ------------------------------------------------------------------------ */
 
+// NOTE: keep this list in sync with electron/meeting-tool-names.ts — this
+// renderer module is transpiled standalone by tests/risk-classify.test.mjs
+// (data: URL import), so it cannot import from electron/.
+const MEETING_TOOLS = {
+  DELEGATE: 'delegate_task',
+  DELEGATE_TO: 'delegate_to',
+  FOLLOW_UP_TASK: 'follow_up_task',
+  STEER_TASK: 'steer_task',
+  INTERRUPT_TASK: 'interrupt_task',
+  PLAN_MEETING: 'plan_meeting',
+} as const;
+
+/** 会议工具全集（低风险的纯状态同步工具）：与 electron/meeting-tool-names.ts 对齐。 */
+const MEETING_TOOL_NAMES_SET = new Set<string>([
+  'delegate_task', 'update_task', 'ask_worker_status', 'narrate_to_user',
+  'plan_meeting', 'delegate_to', 'send_task_message', 'follow_up_task',
+  'steer_task', 'interrupt_task', 'forward_task_message',
+  'inspect_delivery_review', 'get_delivery_review_chunk',
+  'submit_delivery_chunk_review', 'complete_delivery_review',
+  'request_delivery_rework', 'ask_coordinator', 'task_done',
+  'submit_work_report', 'submit_delivery', 'request_user_decision',
+  'ask_host', 'reply_to_coordinator',
+]);
+
 export type RiskLevel = 'low' | 'mid' | 'high' | 'blocked';
 
 export interface RiskAssessment {
@@ -118,6 +142,9 @@ export function assessRisk(toolName: string, input: Record<string, unknown>): Ri
     };
   }
 
+  const meeting = classifyMeetingTool(toolName);
+  if (meeting) return meeting;
+
   // 未知工具（MCP 等）：按高风险处理，要求详情确认
   return {
     level: 'high',
@@ -125,6 +152,46 @@ export function assessRisk(toolName: string, input: Record<string, unknown>): Ri
     target: '',
     impact: '未识别的工具调用，需查看完整参数后确认',
     impactList: [`工具：${toolName}`, '参数详见下方完整列表'],
+  };
+}
+
+/** 会议 MCP 前缀 → 工具动作名；非会议工具返回 null。 */
+function meetingActionName(toolName: string): string | null {
+  for (const prefix of ['mcp__meeting__', 'mcp__meeting-worker__']) {
+    if (toolName.startsWith(prefix)) return toolName.slice(prefix.length);
+  }
+  return null;
+}
+
+/** 应用自家的会议编排工具：只驱动 UI/编排状态，不该落到「未识别的工具调用」。
+ *  派单/转向类会拉起 Worker 或改派任务 → 中风险；状态汇报/旁白类 → 低风险。 */
+const MEETING_MID_TOOLS = new Set<string>([
+  MEETING_TOOLS.DELEGATE, // delegate_task
+  MEETING_TOOLS.DELEGATE_TO, // delegate_to
+  MEETING_TOOLS.FOLLOW_UP_TASK, // follow_up_task
+  MEETING_TOOLS.STEER_TASK, // steer_task
+  MEETING_TOOLS.INTERRUPT_TASK, // interrupt_task
+  MEETING_TOOLS.PLAN_MEETING, // plan_meeting
+]);
+
+function classifyMeetingTool(toolName: string): RiskAssessment | null {
+  const action = meetingActionName(toolName);
+  if (!action || !MEETING_TOOL_NAMES_SET.has(action)) return null;
+  if (MEETING_MID_TOOLS.has(action)) {
+    return {
+      level: 'mid',
+      action: `会议派单 ${action}`,
+      target: String(toolName),
+      impact: '将创建或调整后台 Worker 任务，Worker 自身的文件/命令请求仍会单独审批',
+      impactList: [`工具：${toolName}`, '派单类操作，仅影响会议编排状态'],
+    };
+  }
+  return {
+    level: 'low',
+    action: `会议状态同步 ${action}`,
+    target: String(toolName),
+    impact: '应用内置会议工具，只更新界面与任务状态，不触碰文件系统',
+    impactList: [`工具：${toolName}`, '内置工具，无外部副作用'],
   };
 }
 
