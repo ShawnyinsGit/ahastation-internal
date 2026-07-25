@@ -1,3 +1,14 @@
+// Orchestration coverage for the full plan → parallel delivery → review →
+// integration → acceptance pipeline.
+//
+// The Coordinator verdicts here are injected through the orchestrator API, not
+// produced by a model. That makes the state machine deterministic, but it means
+// this file proves nothing about whether a real Coordinator can finish a review
+// on its own. That property is covered by the model-driven loop in
+// tests/coordinator-review-loop.test.mjs and by the release gate in
+// scripts/real-worker-stability-smoke.mjs, which refuses to submit verdicts for
+// the meeting.
+
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -188,6 +199,7 @@ async function latestReview(meetingId, taskId, attempt) {
   }, `Coordinator review did not start for ${taskId} attempt ${attempt}`);
 }
 
+/** Injects Coordinator verdicts directly. See the file header: this is not model review. */
 async function reviewEveryChunk(orchestrator, reviewId, { pauseAfterFirst = false } = {}) {
   let reviewed = 0;
   for (;;) {
@@ -220,7 +232,7 @@ async function acceptedTask(orchestrator, taskId) {
   }, `${taskId} did not reach durable accepted integration`);
 }
 
-test('deterministic Coordinator drives the complete reviewed multi-backend Meeting workflow', {
+test('injected-review orchestration drives the complete multi-backend Meeting workflow', {
   timeout: 120_000,
 }, async (t) => {
   const repo = createRepository();

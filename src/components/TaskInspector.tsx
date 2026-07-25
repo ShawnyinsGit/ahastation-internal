@@ -127,6 +127,7 @@ export function TaskInspector({
   const [loading, setLoading] = useState(true);
   const [reviewConfirmationError, setReviewConfirmationError] = useState('');
   const [confirmingChunkId, setConfirmingChunkId] = useState('');
+  const [resumingReview, setResumingReview] = useState(false);
   const [budgetExtensionError, setBudgetExtensionError] = useState('');
   const [extendingBudget, setExtendingBudget] = useState(false);
   const [recoveryError, setRecoveryError] = useState('');
@@ -162,6 +163,27 @@ export function TaskInspector({
   const status = snapshot?.task.status ?? worker?.status ?? 'pending';
   const pendingPermission = worker?.pendingPermission ?? null;
   const pendingReviewEvidence = snapshot?.reviewEvidence?.pending ?? [];
+  const stalledReview = snapshot?.reviewEvidence?.status === 'paused'
+    ? snapshot.reviewEvidence
+    : null;
+
+  const resumeReview = useCallback(async (reviewId: string) => {
+    setReviewConfirmationError('');
+    setResumingReview(true);
+    try {
+      const result = await window.vibeMeet.tasks.resumeReview(sessionId, taskId, reviewId);
+      if (!result.ok) {
+        setReviewConfirmationError(result.error ?? '恢复审查失败');
+        return;
+      }
+      const refreshed = await meetingStore.openTaskInspector(sessionId, taskId);
+      if (!refreshed.ok) setReviewConfirmationError(refreshed.error);
+    } catch (error) {
+      setReviewConfirmationError(error instanceof Error ? error.message : '恢复审查失败');
+    } finally {
+      setResumingReview(false);
+    }
+  }, [sessionId, taskId]);
 
   const confirmReviewEvidence = useCallback(async (
     reviewId: string,
@@ -483,6 +505,29 @@ export function TaskInspector({
             {pendingPermission && (
               <PermissionCard pending={pendingPermission} onDecide={onResolvePermission} />
             )}
+            {stalledReview && (
+              <section className="task-review-evidence-confirmation">
+                <header>
+                  <ShieldAlert size={18} />
+                  <div>
+                    <strong>Coordinator 审查未完成</strong>
+                    <small>{stalledReview.pauseReason ?? 'user-required'}</small>
+                  </div>
+                </header>
+                <p>
+                  审查在覆盖全部分片前就停住了，交付没有通过，也不会自动通过。
+                  还有 {stalledReview.uncoveredChunkIds.length} 个分片没有结论：
+                  {stalledReview.uncoveredChunkIds.join('、') || '未知'}。
+                </p>
+                <button
+                  type="button"
+                  disabled={resumingReview}
+                  onClick={() => void resumeReview(stalledReview.reviewId)}
+                >
+                  {resumingReview ? '正在恢复…' : '让 Coordinator 继续审查'}
+                </button>
+              </section>
+            )}
             {pendingReviewEvidence.map((evidence) => (
               <section className="task-review-evidence-confirmation" key={evidence.chunkId}>
                 <header>
@@ -516,7 +561,7 @@ export function TaskInspector({
             {reviewConfirmationError && (
               <div className="task-inspector-error" role="alert">{reviewConfirmationError}</div>
             )}
-            {!pendingPermission && pendingReviewEvidence.length === 0 && (
+            {!pendingPermission && !stalledReview && pendingReviewEvidence.length === 0 && (
             <div className="task-permission-clear">
               <CheckCircle2 size={24} />
               <strong>没有待处理权限</strong>

@@ -503,6 +503,7 @@ function installFixture(fixture: string): void {
         budget,
       }),
       confirmReviewEvidence: ok,
+      resumeReview: ok,
     },
     auth: {
       loginSubscription: ok,

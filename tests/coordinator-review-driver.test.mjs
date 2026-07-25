@@ -9,11 +9,31 @@ import { DeliveryHarness } from '../dist-electron/delivery-harness.js';
 
 import candidate from './fixtures/coordinator-review-candidate.json' with { type: 'json' };
 
+/** Two-chunk candidate so stall accounting can be observed across partial coverage. */
+function twoChunkCandidate() {
+  const frozen = structuredClone(candidate);
+  frozen.manifest.chunks = [
+    structuredClone(candidate.manifest.chunks[0]),
+    {
+      ...structuredClone(candidate.manifest.chunks[0]),
+      id: 'fixture-chunk-2',
+      index: 1,
+      path: 'src/other.ts',
+      hash: '2'.repeat(64),
+    },
+  ];
+  return frozen;
+}
+
 function makeDriver(maxTurns = 3) {
   const calls = [];
   const completed = [];
   const reworks = [];
+  const paused = [];
   const driver = new CoordinatorReviewDriver({
+    onPaused: async (session) => {
+      paused.push(session);
+    },
     maxTurns,
     now: (() => {
       let value = 100;
@@ -36,7 +56,7 @@ function makeDriver(maxTurns = 3) {
       reworks.push(session);
     },
   });
-  return { driver, calls, completed, reworks };
+  return { driver, calls, completed, reworks, paused };
 }
 
 test('request persists and flushes before notifying the Coordinator', async () => {
@@ -82,6 +102,72 @@ test('incomplete Coordinator turns queue bounded continuation then pause', async
   assert.equal(driver.inspect(session.id).status, 'paused');
   assert.ok(calls.some((call) => call.type === 'coordinator-review-turn-queued'));
   assert.ok(calls.some((call) => call.type === 'coordinator-review-paused'));
+});
+
+test('briefing names every uncovered chunk and the exact next call', async () => {
+  const { driver, calls } = makeDriver();
+  await driver.request({
+    candidate: twoChunkCandidate(),
+    verification: { passed: true, checks: [] },
+  });
+  const { briefing } = calls.find((call) => call.kind === 'notify');
+  assert.deepEqual(briefing.uncoveredChunkIds, ['fixture-chunk-1', 'fixture-chunk-2']);
+  assert.equal(briefing.remainingChunks, 2);
+  assert.equal(briefing.turnCount, 0);
+  assert.match(briefing.nextAction, /get_delivery_review_chunk/);
+  assert.match(briefing.nextAction, /fixture-chunk-2/);
+});
+
+test('covering a chunk clears the stall budget so unrelated turns cannot pause a live review', async () => {
+  const { driver, paused } = makeDriver(2);
+  const frozen = twoChunkCandidate();
+  const session = await driver.request({
+    candidate: frozen,
+    verification: { passed: true, checks: [] },
+  });
+
+  await driver.onCoordinatorTurnEnded(session.id);
+  assert.equal(driver.inspect(session.id).turnCount, 1);
+
+  await driver.submitChunkReview(session.id, {
+    chunkId: 'fixture-chunk-1',
+    chunkHash: frozen.manifest.chunks[0].hash,
+    verdict: 'passed',
+    findings: [],
+  });
+  assert.equal(driver.inspect(session.id).turnCount, 0, 'real progress must reset the stall counter');
+
+  await driver.onCoordinatorTurnEnded(session.id);
+  assert.equal(driver.inspect(session.id).status, 'active');
+  assert.equal(paused.length, 0);
+});
+
+test('a review that never progresses pauses and escalates instead of passing', async () => {
+  const { driver, paused } = makeDriver(2);
+  const session = await driver.request({
+    candidate: twoChunkCandidate(),
+    verification: { passed: true, checks: [] },
+  });
+  await driver.onCoordinatorTurnEnded(session.id);
+  await driver.onCoordinatorTurnEnded(session.id);
+
+  const stalled = driver.inspect(session.id);
+  assert.equal(stalled.status, 'paused');
+  assert.equal(stalled.pauseReason, 'review-turn-budget-exhausted');
+  assert.equal(paused.length, 1);
+  assert.deepEqual(driver.activeSessions(), []);
+  assert.deepEqual(driver.pausedSessions().map((entry) => entry.id), [session.id]);
+  await assert.rejects(() => driver.complete(session.id), /incomplete review coverage/);
+});
+
+test('disconnect pause is reported to the escalation owner', async () => {
+  const { driver, paused } = makeDriver();
+  const session = await driver.request({
+    candidate,
+    verification: { passed: true, checks: [] },
+  });
+  await driver.pauseForDisconnect(session.id);
+  assert.deepEqual(paused.map((entry) => entry.pauseReason), ['coordinator-disconnected']);
 });
 
 test('restore resumes the exact unreviewed cursor without notifying twice', async () => {

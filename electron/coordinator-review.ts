@@ -110,6 +110,19 @@ export function getCoordinatorReviewChunk(
   return next ? structuredClone(next) : null;
 }
 
+/** Chunk ids the Coordinator still owes a hash-bound verdict or user confirmation for. */
+export function listUncoveredCoordinatorReviewChunkIds(
+  session: CoordinatorReviewSession,
+  limit = 20,
+): string[] {
+  assertSession(session);
+  const covered = coveredChunkIds(session);
+  return session.candidate.manifest.chunks
+    .filter((chunk) => !covered.has(chunk.id))
+    .slice(0, Math.max(0, limit))
+    .map((chunk) => chunk.id);
+}
+
 export function submitCoordinatorChunkReview(
   session: CoordinatorReviewSession,
   input: {
@@ -155,6 +168,10 @@ export function submitCoordinatorChunkReview(
   }
   next.reviews.push(review);
   next.updatedAt = input.reviewedAt;
+  // turnCount is a stall counter, not a lifetime turn budget: real coverage
+  // progress must not be punished just because the Coordinator also handled
+  // unrelated user turns while the review was open.
+  next.turnCount = 0;
   if (input.verdict === 'blocking') {
     next.status = 'rework-requested';
     next.rework = { findings: normalizedFindings.filter((finding) => finding.blocking) };
@@ -193,6 +210,7 @@ export function confirmCoordinatorReviewEvidence(
   }
   next.confirmations.push(confirmation);
   next.updatedAt = input.confirmedAt;
+  next.turnCount = 0;
   return refreshCoverage(next);
 }
 

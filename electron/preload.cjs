@@ -184,6 +184,8 @@ const api = {
         chunkId,
         chunkHash,
       }),
+    resumeReview: (sessionId, taskId, reviewId) =>
+      ipcRenderer.invoke('tasks:resume-review', { sessionId, taskId, reviewId }),
   },
   transcripts: {
     load: (cwd) => ipcRenderer.invoke('transcripts:load', { cwd }),

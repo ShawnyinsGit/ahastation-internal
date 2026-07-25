@@ -75,6 +75,14 @@ test('high-risk approval is visible and normal mode has no per-task accept actio
   assert.doesNotMatch(inspector, /acceptDelivery|通过 · 验收/);
 });
 
+test('a stalled Coordinator review is surfaced as unfinished, never as a pass', () => {
+  const inspector = read('src/components/TaskInspector.tsx');
+  assert.match(inspector, /Coordinator 审查未完成/);
+  assert.match(inspector, /交付没有通过，也不会自动通过/);
+  assert.match(inspector, /让 Coordinator 继续审查/);
+  assert.match(inspector, /tasks\.resumeReview/);
+});
+
 test('task statuses include text and icon semantics rather than color alone', () => {
   const rail = read('src/components/TaskRail.tsx');
   assert.match(rail, /const LABEL: Record<WorkerStatus, string>/);

@@ -47,6 +47,7 @@ import {
   extractText,
 } from './orchestrator-helpers.js';
 import {
+  type ActiveReviewGate,
   type DecisionCreationResult,
   type OrchestratorBridge,
   type SaveMemoryResult,
@@ -89,6 +90,7 @@ import {
   type CoordinatorReviewBriefing,
 } from './coordinator-review-driver.js';
 import {
+  listUncoveredCoordinatorReviewChunkIds,
   safeCoordinatorReviewProjection,
   type CoordinatorReviewFinding,
   type CoordinatorReviewSession,
@@ -181,6 +183,9 @@ interface OrchestratorOpts {
   recoveredTasks?: Array<Record<string, unknown>>;
   recoveredPlanVersion?: number;
   recoveredReviewSessions?: CoordinatorReviewSession[];
+  /** How long an active review may sit without Coordinator progress before the
+   * stall budget is charged. Set to 0 to disable the watchdog in tests. */
+  reviewStallTimeoutMs?: number;
   /** Optional workspace allocator override. Production uses the Meeting-owned
    * manager created below; tests with stub sessions may inject one to exercise
    * the real managed-worktree delivery path without spawning a backend CLI. */
@@ -225,6 +230,14 @@ export class Orchestrator implements OrchestratorBridge {
   private saveMemoryCallsThisSession = 0;
   private autoOrchestration = false;
   private pendingPlan: PlanMeetingTask[] | null = null;
+  /** True while the Coordinator host is mid-turn. A briefing queued during a live
+   *  turn is only read by the *next* turn, so the turn already in flight must not
+   *  be charged against the review stall budget. */
+  private coordinatorTurnActive = false;
+  /** Reviews whose briefing landed mid-turn; they skip exactly one turn boundary. */
+  private reviewsAwaitingFirstTurn = new Set<string>();
+  private reviewStallTimer: ReturnType<typeof setInterval> | null = null;
+  private readonly reviewStallTimeoutMs: number;
   // Active end-of-meeting recap, if any. Tracked so `interrupt()` can reach
   // into a closed orchestrator and abort the recap pass (B4) — otherwise
   // the user pressing the interrupt button after `end()` was a no-op while
@@ -329,6 +342,7 @@ export class Orchestrator implements OrchestratorBridge {
       },
       flush: () => this.repository.flush(),
     });
+    this.reviewStallTimeoutMs = opts.reviewStallTimeoutMs ?? 180_000;
     this.coordinatorReviewDriver = new CoordinatorReviewDriver({
       append: async (type, payload) => {
         const projection = (payload as {
@@ -349,6 +363,7 @@ export class Orchestrator implements OrchestratorBridge {
       onReworkRequested: async (session) => {
         await this.meetingScheduler.requestCoordinatorRework(session.deliveryId, session);
       },
+      onPaused: (session) => this.escalateStalledReview(session),
     });
     for (const session of opts.recoveredReviewSessions ?? []) {
       try {
@@ -708,6 +723,9 @@ export class Orchestrator implements OrchestratorBridge {
       + 'Do not schedule or speak for the meeting; answer only direct mentions or coordinator requests.',
       'high',
     );
+    // The incoming Coordinator inherits any review the previous one abandoned.
+    this.coordinatorTurnActive = false;
+    this.resumeDisconnectedReviews();
     return { ok: true, coordinatorHostId: hostId };
   }
 
@@ -865,6 +883,19 @@ export class Orchestrator implements OrchestratorBridge {
     if (
       hostId === this.coordinatorHostId
       && e.source === 'talker'
+      && e.event.kind === 'message'
+    ) {
+      const messageType = (e.event.message as { type?: unknown } | undefined)?.type;
+      if (messageType === 'result') {
+        this.coordinatorTurnActive = false;
+        void this.driveCoordinatorReviews();
+      } else if (messageType === 'assistant' || messageType === 'user') {
+        this.coordinatorTurnActive = true;
+      }
+    }
+    if (
+      hostId === this.coordinatorHostId
+      && e.source === 'talker'
       && e.event.kind === 'ended'
       && !this.closed
     ) {
@@ -888,6 +919,7 @@ export class Orchestrator implements OrchestratorBridge {
     try {
       await hg.start();
       this.safeEmit({ source: 'system', hostId, event: { kind: 'session-ready' } });
+      if (hostId === this.coordinatorHostId) this.resumeDisconnectedReviews();
       return { ok: true };
     } catch (err) {
       this.diagnostics.log('host-restart-failed', {
@@ -1327,6 +1359,7 @@ export class Orchestrator implements OrchestratorBridge {
     }
 
     this.closed = true;
+    this.stopReviewStallWatchdog();
 
     // End all host groups — wrap in try/finally so cleanup always runs.
     const errors: unknown[] = [];
@@ -2357,10 +2390,131 @@ export class Orchestrator implements OrchestratorBridge {
       void this.coordinatorReviewDriver.pauseForDisconnect(briefing.reviewId);
       return;
     }
+    if (this.coordinatorTurnActive) this.reviewsAwaitingFirstTurn.add(briefing.reviewId);
+    else this.reviewsAwaitingFirstTurn.delete(briefing.reviewId);
+    this.ensureReviewStallWatchdog();
     host.sendUserText(
       `(coordinator review)\n${JSON.stringify(briefing)}`,
       'high',
     );
+    this.coordinatorTurnActive = true;
+  }
+
+  /**
+   * A frozen candidate only leaves `coordinator-reviewing` when the Coordinator
+   * itself covers every chunk. Without this the briefing was a single
+   * fire-and-forget message: a Coordinator that reviewed two chunks and moved on
+   * left the delivery — and every task depending on it — stalled forever.
+   */
+  private async driveCoordinatorReviews(): Promise<void> {
+    if (this.closed) return;
+    for (const session of this.coordinatorReviewDriver.activeSessions()) {
+      if (this.reviewsAwaitingFirstTurn.delete(session.id)) continue;
+      try {
+        await this.coordinatorReviewDriver.onCoordinatorTurnEnded(session.id);
+      } catch (err) {
+        this.diagnostics.log('coordinator-review-turn-failed', {
+          reviewId: session.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  }
+
+  /** A silent Coordinator never emits a turn boundary, so time also charges the budget. */
+  private ensureReviewStallWatchdog(): void {
+    if (this.reviewStallTimer || this.reviewStallTimeoutMs <= 0) return;
+    const timer = setInterval(
+      () => { void this.sweepStalledReviews(); },
+      Math.max(1_000, Math.floor(this.reviewStallTimeoutMs / 2)),
+    );
+    timer.unref?.();
+    this.reviewStallTimer = timer;
+  }
+
+  private stopReviewStallWatchdog(): void {
+    if (!this.reviewStallTimer) return;
+    clearInterval(this.reviewStallTimer);
+    this.reviewStallTimer = null;
+  }
+
+  private async sweepStalledReviews(): Promise<void> {
+    const active = this.closed ? [] : this.coordinatorReviewDriver.activeSessions();
+    if (active.length === 0) {
+      this.stopReviewStallWatchdog();
+      return;
+    }
+    const deadline = Date.now() - this.reviewStallTimeoutMs;
+    for (const session of active) {
+      if (session.updatedAt > deadline) continue;
+      this.reviewsAwaitingFirstTurn.delete(session.id);
+      try {
+        await this.coordinatorReviewDriver.onCoordinatorTurnEnded(session.id);
+      } catch (err) {
+        this.diagnostics.log('coordinator-review-stall-sweep-failed', {
+          reviewId: session.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  }
+
+  /**
+   * A paused review is never an implicit pass. Surface it to the user and tell
+   * the Coordinator to hand the decision over instead of guessing.
+   */
+  private async escalateStalledReview(session: CoordinatorReviewSession): Promise<void> {
+    const uncoveredChunkIds = listUncoveredCoordinatorReviewChunkIds(session);
+    const remainingChunks = session.coverage.totalChunks - session.coverage.reviewedChunks;
+    this.safeEmit({
+      source: 'system',
+      event: {
+        kind: 'coordinator-review-stalled',
+        reviewId: session.id,
+        deliveryId: session.deliveryId,
+        ...(session.taskId ? { taskId: session.taskId } : {}),
+        reason: session.pauseReason ?? 'user-required',
+        uncoveredChunkIds,
+        remainingChunks,
+      },
+    });
+    if (session.pauseReason === 'coordinator-disconnected') return;
+    this.hostGroups.get(this.coordinatorHostId)?.getHost()?.sendUserText(
+      `(coordinator review paused) 审查 ${session.id} 因为 ${session.pauseReason ?? 'user-required'} 已暂停，还有 ${remainingChunks} 个分片没有覆盖：${uncoveredChunkIds.join(', ') || 'none'}。请直接告诉用户审查没走完、卡在哪里，并让用户决定是继续审查还是自己接手。不要声称交付已通过。`,
+      'normal',
+    );
+  }
+
+  /** Resume a paused review. Exposed so the user can restart a stalled Coordinator. */
+  async resumeDeliveryReview(reviewId: string) {
+    const session = await this.coordinatorReviewDriver.resume(reviewId);
+    return safeCoordinatorReviewProjection(session);
+  }
+
+  /** After the Coordinator comes back, reviews parked on disconnect resume themselves. */
+  private resumeDisconnectedReviews(): void {
+    if (this.closed) return;
+    if (!this.hostGroups.get(this.coordinatorHostId)?.getHost()) return;
+    for (const session of this.coordinatorReviewDriver.pausedSessions()) {
+      if (session.pauseReason !== 'coordinator-disconnected') continue;
+      void this.coordinatorReviewDriver.resume(session.id).catch((err) => {
+        this.diagnostics.log('coordinator-review-resume-failed', {
+          reviewId: session.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    }
+  }
+
+  activeReviewGate(): ActiveReviewGate | null {
+    const [session] = this.coordinatorReviewDriver.activeSessions();
+    if (!session) return null;
+    return {
+      reviewId: session.id,
+      deliveryId: session.deliveryId,
+      uncoveredChunkIds: listUncoveredCoordinatorReviewChunkIds(session),
+      remainingChunks: session.coverage.totalChunks - session.coverage.reviewedChunks,
+    };
   }
 
   // ===========================================================================

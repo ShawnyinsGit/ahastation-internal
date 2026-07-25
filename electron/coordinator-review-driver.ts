@@ -4,6 +4,7 @@ import {
   confirmCoordinatorReviewEvidence,
   createCoordinatorReviewSession,
   getCoordinatorReviewChunk,
+  listUncoveredCoordinatorReviewChunkIds,
   safeCoordinatorReviewProjection,
   submitCoordinatorChunkReview,
   updateCoordinatorReviewLifecycle,
@@ -29,7 +30,12 @@ export interface CoordinatorReviewBriefing {
   path?: string;
   evidenceKind?: string;
   requiresUserConfirmation?: boolean;
+  uncoveredChunkIds: string[];
+  remainingChunks: number;
+  turnCount: number;
+  maxTurns: number;
   instruction: string;
+  nextAction: string;
 }
 
 export interface CoordinatorReviewDriverOptions {
@@ -41,6 +47,7 @@ export interface CoordinatorReviewDriverOptions {
   notifyCoordinator: (briefing: CoordinatorReviewBriefing) => Promise<void> | void;
   onCompleted?: (session: CoordinatorReviewSession & { reviewHash: string }) => Promise<void> | void;
   onReworkRequested?: (session: CoordinatorReviewSession) => Promise<void> | void;
+  onPaused?: (session: CoordinatorReviewSession) => Promise<void> | void;
 }
 
 export class CoordinatorReviewDriver {
@@ -224,7 +231,9 @@ export class CoordinatorReviewDriver {
       this.sessions.set(reviewId, paused);
       await this.persist('coordinator-review-paused', paused, {
         reason: paused.pauseReason,
+        uncoveredChunkIds: listUncoveredCoordinatorReviewChunkIds(paused),
       });
+      await this.options.onPaused?.(structuredClone(paused));
       return structuredClone(paused);
     }
     const queued = updateCoordinatorReviewLifecycle(current, {
@@ -267,12 +276,27 @@ export class CoordinatorReviewDriver {
     this.sessions.set(reviewId, paused);
     await this.persist('coordinator-review-paused', paused, {
       reason: paused.pauseReason,
+      uncoveredChunkIds: listUncoveredCoordinatorReviewChunkIds(paused),
     });
+    await this.options.onPaused?.(structuredClone(paused));
     return structuredClone(paused);
+  }
+
+  /** Reviews still owed Coordinator coverage. Drives the turn loop and the review-mode tool gate. */
+  activeSessions(): CoordinatorReviewSession[] {
+    return this.snapshot().filter(
+      (session) => session.status === 'active' && !session.coverage.complete,
+    );
+  }
+
+  /** Reviews stalled behind a pause reason. These require a resume or user takeover. */
+  pausedSessions(): CoordinatorReviewSession[] {
+    return this.snapshot().filter((session) => session.status === 'paused');
   }
 
   private async notify(session: CoordinatorReviewSession): Promise<void> {
     const chunk = getCoordinatorReviewChunk(session);
+    const uncoveredChunkIds = listUncoveredCoordinatorReviewChunkIds(session);
     await this.options.notifyCoordinator({
       schemaVersion: 1,
       reviewId: session.id,
@@ -291,9 +315,14 @@ export class CoordinatorReviewDriver {
         evidenceKind: chunk.kind,
         requiresUserConfirmation: chunk.requiresUserConfirmation,
       } : {}),
+      uncoveredChunkIds,
+      remainingChunks: session.coverage.totalChunks - session.coverage.reviewedChunks,
+      turnCount: session.turnCount,
+      maxTurns: session.maxTurns,
       instruction: chunk?.requiresUserConfirmation
         ? 'This evidence is withheld from the model and requires a user decision.'
         : 'Inspect the bounded chunk with the Coordinator review tools and submit a hash-bound verdict.',
+      nextAction: buildNextAction(session, chunk, uncoveredChunkIds),
     });
   }
 
@@ -330,6 +359,25 @@ export class CoordinatorReviewDriver {
         && (attempt === undefined || session.attempt === attempt),
     );
   }
+}
+
+function buildNextAction(
+  session: CoordinatorReviewSession,
+  chunk: { id: string; hash: string; requiresUserConfirmation: boolean } | null,
+  uncoveredChunkIds: string[],
+): string {
+  if (!chunk) {
+    return `All chunks are covered. Call complete_delivery_review with reviewId=${session.id} now.`;
+  }
+  if (chunk.requiresUserConfirmation) {
+    return `Chunk ${chunk.id} is withheld evidence you may not confirm yourself. Tell the user it needs their confirmation, then continue with the remaining chunks: ${uncoveredChunkIds.filter((id) => id !== chunk.id).join(', ') || 'none'}.`;
+  }
+  const remaining = uncoveredChunkIds.length;
+  return [
+    `Call get_delivery_review_chunk(reviewId=${session.id}, chunkId=${chunk.id}), then submit_delivery_chunk_review with chunkHash=${chunk.hash}.`,
+    `${remaining} chunk(s) still uncovered: ${uncoveredChunkIds.join(', ')}.`,
+    'Do not stop this turn until every chunk is covered and complete_delivery_review has succeeded.',
+  ].join(' ');
 }
 
 function stableStringify(value: unknown): string {

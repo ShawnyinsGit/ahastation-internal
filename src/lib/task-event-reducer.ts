@@ -120,12 +120,25 @@ function applyTaskEvent(
           lineCount: typeof chunk.lineCount === 'number' ? chunk.lineCount : 0,
         }))
         .filter((chunk) => chunk.chunkId && /^[a-f0-9]{64}$/i.test(chunk.chunkHash));
+      const covered = new Set([
+        ...(Array.isArray(review.reviews) ? review.reviews : [])
+          .map((entry) => String((entry as Record<string, unknown> | null)?.chunkId ?? '')),
+        ...confirmations.map((entry) => String(entry.chunkId ?? '')),
+      ]);
+      const uncoveredChunkIds = (Array.isArray(review.chunkEvidence) ? review.chunkEvidence : [])
+        .map((chunk) => String((chunk as Record<string, unknown> | null)?.id ?? ''))
+        .filter((chunkId) => chunkId && !covered.has(chunkId))
+        .slice(0, 20);
       return {
         ...snapshot,
         reviewEvidence: {
           reviewId: review.id,
           status: review.status,
           pending,
+          uncoveredChunkIds,
+          ...(typeof review.pauseReason === 'string' && review.pauseReason
+            ? { pauseReason: review.pauseReason }
+            : {}),
         },
         lastSeq: event.seq,
       };

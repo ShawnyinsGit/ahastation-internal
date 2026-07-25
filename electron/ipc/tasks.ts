@@ -120,6 +120,8 @@ export interface RendererTaskSnapshot {
       byteLength: number;
       lineCount: number;
     }>;
+    uncoveredChunkIds: string[];
+    pauseReason?: string;
   };
   lastSeq: number;
 }
@@ -295,7 +297,23 @@ function latestReviewEvidence(events: readonly RendererTaskEvent[]): RendererTas
         lineCount: typeof chunk.lineCount === 'number' ? chunk.lineCount : 0,
       }))
       .filter((chunk) => chunk.chunkId && /^[a-f0-9]{64}$/i.test(chunk.chunkHash));
-    return { reviewId, status, pending };
+    const covered = new Set([
+      ...(Array.isArray(review.reviews) ? review.reviews : [])
+        .map((entry) => safeText(objectValue(entry).chunkId, 500) ?? ''),
+      ...confirmations.map((entry) => safeText(entry.chunkId, 500) ?? ''),
+    ]);
+    const uncoveredChunkIds = (Array.isArray(review.chunkEvidence) ? review.chunkEvidence : [])
+      .map((chunk) => safeText(objectValue(chunk).id, 500) ?? '')
+      .filter((chunkId) => chunkId && !covered.has(chunkId))
+      .slice(0, 20);
+    const pauseReason = safeText(review.pauseReason, 100);
+    return {
+      reviewId,
+      status,
+      pending,
+      uncoveredChunkIds,
+      ...(pauseReason ? { pauseReason } : {}),
+    };
   }
   return undefined;
 }
@@ -880,6 +898,37 @@ export class TaskIpcService {
     }
   }
 
+  /**
+   * Restart a Coordinator review that stalled out of its turn budget. This never
+   * grants coverage — the Coordinator still has to submit every hash-bound
+   * verdict; it only hands the model another chance before the user takes over.
+   */
+  async resumeReview(payload: unknown): Promise<unknown> {
+    const request = parseRequest(payload);
+    const value = objectValue(payload);
+    const reviewId = safeText(value.reviewId, 200);
+    if (!request || !reviewId || !ACTOR_ID_RE.test(reviewId)) {
+      return { ok: false, error: 'Invalid review resume request' };
+    }
+    const slot = this.ctx.registry.get(request.sessionId);
+    if (!slot) return { ok: false, error: 'Session not found' };
+    try {
+      const review = objectValue(slot.orchestrator.inspectDeliveryReview(reviewId));
+      if (review.taskId !== request.taskId) {
+        return { ok: false, error: 'Review does not belong to this task' };
+      }
+      const resumed = await slot.orchestrator.resumeDeliveryReview(reviewId);
+      return { ok: true, review: redactRendererValue(resumed) };
+    } catch (error) {
+      return {
+        ok: false,
+        error: error instanceof Error
+          ? redactSecrets(error.message)
+          : 'Failed to resume review',
+      };
+    }
+  }
+
   private sendTaskEvent(
     sender: WebContents,
     subscriptionId: string,
@@ -906,4 +955,5 @@ export function registerTasksIpc(ctx: IpcContext): void {
     'tasks:confirm-review-evidence',
     (_event, payload) => service.confirmReviewEvidence(payload),
   );
+  ipcMain.handle('tasks:resume-review', (_event, payload) => service.resumeReview(payload));
 }

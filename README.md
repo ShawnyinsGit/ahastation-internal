@@ -8,6 +8,7 @@
 
 - **会议模式（默认）** — 语音优先的会议界面：员工磁贴（状态/speaking/权限卡）、屏幕共享与快照、会议级 Coordinator 编排多员工并行交付
 - **会议内可见任务协作** — Coordinator 规划/审查/集成；Worker 在隔离 worktree 执行；高风险始终用户确认；最终 Meeting 验收才发布到用户基线
+- **审查必须走完** — 冻结候选交给 Coordinator 后进入受驱动的审查回合：未覆盖完就按回合续推，审查期其它会议工具一律拒绝；停滞则暂停并交回用户，绝不自动判过
 - **稳定 Worker 门禁** — Claude Code / Codex 需通过真实纵切烟测才标为 stable；OpenCode / Kimi 首发保持 experimental
 - **员工独立编辑器窗口** — 每个数字员工一扇：文件树、代码查看（shiki 高亮）与编辑保存、Diff/Todo/活动实时面板、PTY 终端（xterm.js）
 - **权限桥** — 工具调用的审批统一走会议 UI，destructive 操作落 macOS 原生确认框（防 renderer 伪造）；fail-closed 超时
@@ -42,6 +43,10 @@ npm run test:real-workers
 
 覆盖：WorkReport、Steering interrupt/resume、高风险权限桥、规范化决策、
 审查集成与最终 Meeting 发布。OpenCode / Kimi 不因此升为 stable。
+
+烟测**不会替会议提交审查结论**：它从不调用 `submitDeliveryChunkReview` /
+`completeDeliveryReview`，只断言 Coordinator 自己调用了这些 MCP 工具并把覆盖率
+走完。审查中途停住就是失败，不会被脚本补一刀盖过去。
 
 ## E2E 冒烟（OpenCode 后端全链）
 

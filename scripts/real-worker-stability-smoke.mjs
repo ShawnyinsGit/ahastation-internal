@@ -81,31 +81,46 @@ async function waitFor(predicate, message, timeoutMs = 300_000) {
   assert.fail(message);
 }
 
-async function reviewAllAvailable(orchestrator, meetingId, completedReviews) {
+/**
+ * Release evidence must prove the Coordinator model closes the review itself.
+ * This script deliberately never calls submitDeliveryChunkReview or
+ * completeDeliveryReview: a meeting that cannot finish its own review has to
+ * fail the gate rather than have the harness stamp the verdict for it.
+ */
+async function assertReviewsAreNotStalled(orchestrator, meetingId) {
   const journal = await MeetingRepository.replay(meetingId);
-  const requests = journal.filter((event) => event.type === 'coordinator-review-requested');
-  for (const request of requests) {
+  for (const request of journal.filter((event) => event.type === 'coordinator-review-requested')) {
     const reviewId = request.payload?.data?.session?.id;
-    if (!reviewId || completedReviews.has(reviewId)) continue;
-    for (;;) {
-      const chunk = orchestrator.getDeliveryReviewChunk(reviewId);
-      if (!chunk) break;
+    if (!reviewId) continue;
+    const session = orchestrator.inspectDeliveryReview(reviewId);
+    if (session.status === 'paused') {
+      assert.fail(
+        `Coordinator review ${reviewId} stalled (${session.pauseReason}) with `
+        + `${session.coverage.totalChunks - session.coverage.reviewedChunks} chunk(s) uncovered`,
+      );
+    }
+    for (const chunk of session.chunkEvidence ?? []) {
       assert.equal(
         chunk.requiresUserConfirmation,
         false,
         `real smoke produced withheld evidence for ${chunk.path}`,
       );
-      await orchestrator.submitDeliveryChunkReview(reviewId, {
-        chunkId: chunk.id,
-        chunkHash: chunk.hash,
-        verdict: 'passed',
-        findings: [],
-      });
     }
-    const completed = await orchestrator.completeDeliveryReview(reviewId);
-    assert.equal(completed.coverage.complete, true);
-    completedReviews.add(reviewId);
   }
+}
+
+/** Tool names the Coordinator host actually invoked, read off its own turns. */
+function coordinatorToolNames(events) {
+  const names = new Set();
+  for (const entry of events) {
+    if (entry.source !== 'talker' || entry.event?.kind !== 'message') continue;
+    const content = entry.event.message?.message?.content;
+    if (!Array.isArray(content)) continue;
+    for (const block of content) {
+      if (block?.type === 'tool_use' && typeof block.name === 'string') names.add(block.name);
+    }
+  }
+  return names;
 }
 
 async function runBackend(backendId) {
@@ -137,7 +152,6 @@ async function runBackend(backendId) {
     meetingId,
   );
   const rendererEvents = [];
-  const completedReviews = new Set();
   let orchestrator;
   let permissionAsked = false;
   let steerResult = null;
@@ -255,7 +269,7 @@ async function runBackend(backendId) {
     );
     await waitFor(
       async () => {
-        await reviewAllAvailable(orchestrator, meetingId, completedReviews);
+        await assertReviewsAreNotStalled(orchestrator, meetingId);
         const source = await orchestrator.getTaskInspectorSource(taskId);
         if (source?.task.status === 'failed') {
           assert.fail(
@@ -324,6 +338,29 @@ async function runBackend(backendId) {
       1,
     );
 
+    // The review must have been closed by the Coordinator model, not by this
+    // harness. Journal coverage proves it finished; the Coordinator's own
+    // tool_use blocks prove the verdicts came from the meeting.
+    assert.equal(journal.some((event) => (
+      event.type === 'coordinator-review-chunk-submitted'
+      && event.payload?.data?.session?.reviews?.some((review) => review.reviewer === 'coordinator')
+    )), true, `${backendId} review produced no Coordinator chunk verdict`);
+    assert.equal(journal.some((event) => (
+      event.type === 'coordinator-review-completed'
+      && event.payload?.data?.session?.coverage?.complete === true
+    )), true, `${backendId} review never reached complete hash-bound coverage`);
+    const toolNames = [...coordinatorToolNames(rendererEvents)];
+    assert.equal(
+      toolNames.some((name) => name.endsWith('submit_delivery_chunk_review')),
+      true,
+      `${backendId} Coordinator never called submit_delivery_chunk_review itself`,
+    );
+    assert.equal(
+      toolNames.some((name) => name.endsWith('complete_delivery_review')),
+      true,
+      `${backendId} Coordinator never called complete_delivery_review itself`,
+    );
+
     return {
       schemaVersion: 1,
       kind: 'real-backend-smoke',
@@ -337,6 +374,7 @@ async function runBackend(backendId) {
         'resume',
         'permission-bridge',
         'canonical-permission-normalization',
+        'coordinator-driven-review',
         'recovery',
       ],
     };

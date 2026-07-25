@@ -348,6 +348,9 @@ export interface RendererTaskSnapshot {
       byteLength: number;
       lineCount: number;
     }>;
+    /** Chunks the Coordinator still owes a verdict. Non-empty means review is unfinished. */
+    uncoveredChunkIds: string[];
+    pauseReason?: string;
   };
   lastSeq: number;
 }
@@ -414,6 +417,11 @@ export interface TasksApi {
     reviewId: string,
     chunkId: string,
     chunkHash: string,
+  ) => Promise<{ ok: boolean; error?: string; review?: unknown }>;
+  resumeReview: (
+    sessionId: string,
+    taskId: string,
+    reviewId: string,
   ) => Promise<{ ok: boolean; error?: string; review?: unknown }>;
 }
 

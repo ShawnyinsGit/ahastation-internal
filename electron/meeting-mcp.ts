@@ -49,6 +49,14 @@ export interface SaveMemoryResult {
   error?: string;
 }
 
+/** Pending Coordinator review that currently narrows the Coordinator tool surface. */
+export interface ActiveReviewGate {
+  reviewId: string;
+  deliveryId: string;
+  uncoveredChunkIds: string[];
+  remainingChunks: number;
+}
+
 /** Result of asking the orchestrator to steer a worker mid-flight. The Talker
  *  needs to know whether the addendum actually landed so it can re-dispatch
  *  (instead of telling the user "got it" while the message vanished). */
@@ -84,6 +92,7 @@ export interface OrchestratorBridge {
     reviewId: string,
     findings: CoordinatorReviewFinding[],
   ): Promise<unknown>;
+  activeReviewGate(): ActiveReviewGate | null;
   hasWorker(workerId: string): boolean;
   activeWorkerIds(): string[];
   describeWorkers(workerId?: string): string;
@@ -109,6 +118,47 @@ export interface OrchestratorBridge {
   ): Promise<{ id: string; status: string }>;
 }
 
+const REVIEW_MODE_TOOLS: ReadonlySet<string> = new Set<string>([
+  MEETING_TOOLS.INSPECT_DELIVERY_REVIEW,
+  MEETING_TOOLS.GET_DELIVERY_REVIEW_CHUNK,
+  MEETING_TOOLS.SUBMIT_DELIVERY_CHUNK_REVIEW,
+  MEETING_TOOLS.COMPLETE_DELIVERY_REVIEW,
+  MEETING_TOOLS.REQUEST_DELIVERY_REWORK,
+]);
+
+type ToolHandler = (...args: never[]) => Promise<unknown>;
+
+/**
+ * A frozen candidate waiting on the Coordinator must not compete with new
+ * planning, delegation or steering turns. While a review is active every
+ * non-review tool is refused with the pending reviewId and the chunk ids still
+ * owed a verdict, so the model is told exactly how to unblock itself instead of
+ * silently wandering off and stalling the delivery.
+ */
+export function gateDuringCoordinatorReview<T extends { name: string; handler: ToolHandler }>(
+  bridge: OrchestratorBridge,
+  tools: T[],
+): T[] {
+  return tools.map((definition) => {
+    if (REVIEW_MODE_TOOLS.has(definition.name)) return definition;
+    const inner = definition.handler as (...args: unknown[]) => Promise<unknown>;
+    return {
+      ...definition,
+      handler: async (...args: unknown[]) => {
+        const gate = bridge.activeReviewGate();
+        if (!gate) return inner(...args);
+        return {
+          content: [{
+            type: 'text' as const,
+            text: `error: ${definition.name} is unavailable while Coordinator review ${gate.reviewId} is open. ${gate.remainingChunks} chunk(s) still need a hash-bound verdict: ${gate.uncoveredChunkIds.join(', ') || 'none'}. Finish the review with get_delivery_review_chunk / submit_delivery_chunk_review / complete_delivery_review (or request_delivery_rework) first.`,
+          }],
+          isError: true,
+        };
+      },
+    } as unknown as T;
+  });
+}
+
 export function buildTalkerMcp(
   bridge: OrchestratorBridge,
   canCoordinate: () => boolean = () => true,
@@ -118,7 +168,7 @@ export function buildTalkerMcp(
   return createSdkMcpServer({
     name: 'meeting',
     version: '0.2.0',
-    tools: [
+    tools: gateDuringCoordinatorReview(bridge, [
       tool(
         MEETING_TOOLS.ASK_HOST,
         'Ask one expert host for an internal opinion. The expert reply is routed back to the coordinator and is not spoken directly to the user.',
@@ -404,7 +454,7 @@ export function buildTalkerMcp(
           return { content: [{ type: 'text', text: `Document "${title}" saved (${r.filename}). Now reply with your spoken summary: ${spokenSummary}` }] };
         },
       ),
-    ],
+    ]),
   });
 }
 

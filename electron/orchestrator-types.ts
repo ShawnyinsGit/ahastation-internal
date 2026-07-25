@@ -149,7 +149,16 @@ export type OrchestratorOnlyEvent =
   | { kind: 'document-saved'; title: string; filename: string; path: string }
   | { kind: 'session-ready' }
   | { kind: 'session-start-failed'; error: string }
-  | { kind: 'coordinator-failed'; hostId: string; candidateHostId: string | null; error?: string };
+  | { kind: 'coordinator-failed'; hostId: string; candidateHostId: string | null; error?: string }
+  | {
+      kind: 'coordinator-review-stalled';
+      reviewId: string;
+      deliveryId: string;
+      taskId?: string;
+      reason: 'review-turn-budget-exhausted' | 'coordinator-disconnected' | 'user-required';
+      uncoveredChunkIds: string[];
+      remainingChunks: number;
+    };
 
 export type EmittedEvent = SessionEvent | OrchestratorOnlyEvent;
 

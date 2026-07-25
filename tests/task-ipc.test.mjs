@@ -160,6 +160,10 @@ function createFixture() {
       calls.push(['confirm-review-evidence', reviewId, input]);
       return { id: reviewId, taskId: reviewTaskId, status: 'active' };
     },
+    async resumeDeliveryReview(reviewId) {
+      calls.push(['resume-review', reviewId]);
+      return { id: reviewId, taskId: reviewTaskId, status: 'active' };
+    },
   };
   const slot = { id: 'session-a', orchestrator };
   const ctx = {
@@ -289,6 +293,7 @@ test('withheld review evidence is projected safely and confirmation is task-boun
       byteLength: 120,
       lineCount: 0,
     }],
+    uncoveredChunkIds: ['chunk-a'],
   });
   assert.doesNotMatch(JSON.stringify(snapshot.value), /raw|content/i);
 
@@ -316,6 +321,37 @@ test('withheld review evidence is projected safely and confirmation is task-boun
       reviewId: 'review-a',
       chunkId: 'chunk-a',
       chunkHash,
+    }),
+    { ok: false, error: 'Review does not belong to this task' },
+  );
+});
+
+test('resuming a stalled review is task-bound and never grants coverage', async () => {
+  const setup = createFixture();
+
+  const resumed = await setup.service.resumeReview({
+    sessionId: 'session-a',
+    taskId: 'task-a',
+    reviewId: 'review-a',
+  });
+  assert.equal(resumed.ok, true);
+  assert.equal(setup.calls.some((call) => call[0] === 'resume-review' && call[1] === 'review-a'), true);
+
+  assert.deepEqual(
+    await setup.service.resumeReview({
+      sessionId: 'session-a',
+      taskId: 'task-a',
+      reviewId: 'not a review id',
+    }),
+    { ok: false, error: 'Invalid review resume request' },
+  );
+
+  setup.setReviewTaskId('task-other');
+  assert.deepEqual(
+    await setup.service.resumeReview({
+      sessionId: 'session-a',
+      taskId: 'task-a',
+      reviewId: 'review-a',
     }),
     { ok: false, error: 'Review does not belong to this task' },
   );

@@ -1,6 +1,6 @@
 # Orchestrator V2 implementation progress
 
-Updated: 2026-07-24
+Updated: 2026-07-25
 
 ## Status
 
@@ -25,6 +25,28 @@ Claude Code `2.1.150` and Codex `0.144.1` may qualify as stable Workers only wit
 exact-version real vertical smoke evidence. OpenCode and Kimi remain experimental
 by first-release policy.
 
+### Coordinator review is now actually driven
+
+The review briefing used to be fire-and-forget: `onCoordinatorTurnEnded` existed
+but nothing in production ever called it, `resume` was never reachable, and a
+Coordinator that read two chunks and moved on left the delivery — and every task
+depending on it — stalled in `coordinator-reviewing` forever. The loop is now
+closed end to end:
+
+- Coordinator turn boundaries drive the review; a turn that adds no coverage
+  charges the stall budget and re-briefs with the uncovered chunk ids.
+- Covering a chunk resets that budget, so unrelated user turns cannot pause a
+  review that is genuinely progressing.
+- A silent Coordinator is caught by a stall watchdog rather than waiting forever.
+- While a review is active every non-review meeting tool is refused with the
+  pending reviewId and the chunks still owed a verdict.
+- Disconnect pauses resume when the Coordinator returns or a new host takes over;
+  budget-exhausted pauses escalate to the user with a resume action and are never
+  treated as a pass.
+
+Verdicts themselves are unchanged: hash-bound, complete-coverage-gated, and
+withheld evidence still requires explicit user confirmation.
+
 ## Verification log
 
 - Renderer TypeScript: pass
@@ -45,6 +67,15 @@ by first-release policy.
   fail-closed
 - Opaque native permission failures now journal Backend identity on ask-user
   safeInput so release gates do not require a nonexistent auto-allow
+- Coordinator review loop: an unfinished Coordinator turn re-briefs the review
+  instead of stalling the delivery (`tests/coordinator-review-loop.test.mjs`)
+- The real Worker smoke no longer submits verdicts for the meeting. It asserts
+  the Coordinator called `submit_delivery_chunk_review` and
+  `complete_delivery_review` itself and reached complete coverage; a stalled
+  review fails the gate. Prior smoke journals predate this and were recorded
+  with harness-driven review.
+- `tests/collaboration-vertical-slice.test.mjs` is explicitly an injected-review
+  orchestration test, not evidence of model-driven review
 
 ## Formal release checks still open
 
