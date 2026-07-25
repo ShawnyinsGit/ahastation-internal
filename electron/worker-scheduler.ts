@@ -2845,15 +2845,21 @@ export class WorkerScheduler {
       this.recordSuccessfulBudgetAttempt(handle, view.attempt);
       await this.emitDeliveryCandidate(handle, view);
       const report = view.candidate?.report;
+      const reportOnly = view.candidate?.reportOnly === true;
       this.emitCoordinatorBriefing({
         kind: 'delivery-ready',
-        title: `${handle.title} 等待评审`,
+        title: reportOnly ? `${handle.title} 等待确认` : `${handle.title} 等待评审`,
         summary: report?.summary ?? handle.summary,
         files: report?.files.length ?? 0,
         testsPassed: report?.tests.filter((test) => test.status === 'passed').length ?? 0,
         testsFailed: report?.tests.filter((test) => test.status === 'failed').length ?? 0,
         blockers: report?.unresolved.filter((item) => item.blocking).map((item) => item.message) ?? [],
-        recommendedAction: 'review',
+        // Report-only deliveries (e.g. terminal-worker confirm-bar submissions
+        // with files:[]) have no frozen candidate and no Coordinator review
+        // session. Asking the host to "review" sends it into a loop calling
+        // inspect_delivery_review with no reviewId. Route these straight to the
+        // user, who Accepts/Returns in the delivery panel.
+        recommendedAction: reportOnly ? 'request-user-decision' : 'review',
         workerId: handle.id,
         taskId: handle.currentTaskId,
       });

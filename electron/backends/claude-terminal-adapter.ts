@@ -61,11 +61,14 @@ export const TERMINAL_TURN_ENDED_MESSAGE =
 
 /** Marker the terminal worker prints on its final reply when the task is
  *  fully done. The Stop hook scans stdin `last_assistant_message` for this
- *  string and, on a hit, the adapter emits a `delivery` signal
- *  (auto-completion) instead of the turn-ended progress (which only asks the
- *  human to confirm). Must be distinct from TERMINAL_TURN_ENDED_MARKER, which
- *  fires every turn. */
+ *  string and, on a hit, the adapter emits a completion progress (not a
+ *  delivery) so the confirm bar lights up with a "task complete" prompt -
+ *  the human reviews the TUI output and manually submits to the host. Must be
+ *  distinct from TERMINAL_TURN_ENDED_MARKER, which fires every turn. */
 export const TERMINAL_TASK_COMPLETE_MARKER = '[terminal-task-complete]';
+
+export const TERMINAL_TASK_COMPLETE_MESSAGE =
+  `${TERMINAL_TASK_COMPLETE_MARKER} 任务已完成，请查看上方输出并确认提交给 host。`;
 
 /** Instruction appended to a terminal worker's first message telling it to
  *  emit the completion marker. Must live in the user prompt (firstMessage),
@@ -299,26 +302,18 @@ class ClaudeTerminalSession implements BackendSession {
     for (const event of parseTurnEventLines(chunk)) {
       if (event.kind !== 'stop') continue;
       if (event.marker) {
-        // Auto-completion: the worker printed the completion marker on its
-        // final reply. Emit a delivery signal with a synthesized WorkReport;
-        // this converges with the confirm-bar path (submitWorkerReport) in the
-        // scheduler's handleWorkerSignal delivery branch. The TUI is then torn
-        // down by releaseWorkerSession as part of the normal delivery flow.
+        // Completion marker hit: the worker declared the task done. Don't
+        // auto-submit - emit a completion progress so the confirm bar lights
+        // up with a "task complete" prompt. The human reviews the TUI output
+        // and clicks "标记完成" to submit the WorkReport to the host (manual
+        // submit). The TUI stays open until then.
         this.emit({
           kind: 'worker-signal',
-          signal: {
-            kind: 'delivery',
-            report: {
-              status: 'completed',
-              summary: event.summary || '[terminal-worker] 自动完成（marker 检测）',
-              files: [],
-              tests: [],
-              unresolved: [],
-            },
-          },
+          signal: { kind: 'progress', message: TERMINAL_TASK_COMPLETE_MESSAGE },
         });
       } else {
-        // No marker: keep the human-in-the-loop fallback (confirm bar).
+        // No marker: turn ended without a completion declaration; let the
+        // human decide (confirm bar fallback).
         this.emit({
           kind: 'worker-signal',
           signal: { kind: 'progress', message: TERMINAL_TURN_ENDED_MESSAGE },
