@@ -1,0 +1,1143 @@
+/* ==========================================================================
+   AhaStudio 新表面样式（04 文档 IA · 03 令牌）
+   覆盖：AppTopBar / StatusBar / TaskBoardView / BroadcastStrip / 共用元件
+   ========================================================================== */
+
+/* ---------- 顶栏 ---------- */
+.aha-topbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 52px;
+  padding: 0 16px 0 92px; /* 左侧避让 macOS 交通灯（同 .mtg-header） */
+  background: var(--aha-bg-canvas);
+  border-bottom: 1px solid var(--aha-border-subtle);
+  -webkit-app-region: drag;
+  flex-shrink: 0;
+}
+.aha-topbar > * { -webkit-app-region: no-drag; }
+
+.aha-topbar-brand {
+  font-size: var(--aha-fs-h2);
+  font-weight: 600;
+  color: var(--aha-text-primary);
+  letter-spacing: 0.01em;
+}
+
+.aha-topbar-spacer { flex: 1; }
+
+/* 视图切换器（永远可见） */
+.aha-view-switch {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  background: var(--aha-bg-surface);
+  border: 1px solid var(--aha-border-subtle);
+  border-radius: var(--aha-r-pill);
+}
+.aha-view-switch-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: var(--aha-r-pill);
+  background: transparent;
+  color: var(--aha-text-secondary);
+  font-size: var(--aha-fs-body);
+  font-weight: 500;
+  cursor: pointer;
+  transition: background var(--aha-dur-fast) var(--aha-ease-standard),
+    color var(--aha-dur-fast) var(--aha-ease-standard);
+}
+.aha-view-switch-btn:hover { color: var(--aha-text-primary); }
+.aha-view-switch-btn.active {
+  background: var(--aha-bg-raised);
+  color: var(--aha-text-primary);
+  box-shadow: var(--aha-shadow-card);
+}
+.aha-view-switch-badge {
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: var(--aha-r-pill);
+  background: var(--aha-attend);
+  color: #fff;
+  font-size: var(--aha-fs-micro);
+  font-weight: 600;
+  line-height: 16px;
+  text-align: center;
+}
+
+/* 顶栏胶囊（AhaTalk 路径 / 额度） */
+.aha-chip-wrap { position: relative; }
+.aha-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 10px;
+  border: 1px solid var(--aha-border-subtle);
+  border-radius: var(--aha-r-pill);
+  background: var(--aha-bg-surface);
+  color: var(--aha-text-secondary);
+  font-size: var(--aha-fs-micro);
+  font-weight: 500;
+  cursor: pointer;
+  transition: border-color var(--aha-dur-fast) var(--aha-ease-standard);
+}
+.aha-chip:hover { border-color: var(--aha-border-strong); }
+.aha-chip-dot { width: 7px; height: 7px; border-radius: 50%; }
+.aha-chip-dot-run { background: var(--aha-run); }
+.aha-chip-dot-quota { background: var(--aha-quota-ok); }
+.aha-chip-caret { font-size: 9px; color: var(--aha-text-tertiary); }
+
+.aha-dev-tag {
+  padding: 1px 5px;
+  border-radius: var(--aha-r-sm);
+  background: var(--aha-info-soft);
+  color: var(--aha-info);
+  font-size: 10px;
+  font-weight: 500;
+}
+
+/* 弹层 */
+.aha-pop {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 60;
+  min-width: 220px;
+  padding: 8px;
+  background: var(--aha-bg-overlay);
+  -webkit-backdrop-filter: blur(24px);
+  backdrop-filter: blur(24px);
+  border: 1px solid var(--aha-border-subtle);
+  border-radius: var(--aha-r-lg);
+  box-shadow: var(--aha-shadow-overlay);
+  animation: aha-pop-in var(--aha-dur-base) var(--aha-ease-standard);
+}
+.aha-pop-wide { width: 280px; }
+.aha-pop-title {
+  font-size: var(--aha-fs-caption);
+  font-weight: 600;
+  color: var(--aha-text-primary);
+  margin: 4px 8px 6px;
+}
+.aha-pop-desc {
+  margin: 0 8px 8px;
+  font-size: var(--aha-fs-caption);
+  line-height: 1.5;
+  color: var(--aha-text-secondary);
+}
+.aha-pop-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px;
+  border-radius: var(--aha-r-md);
+  font-size: var(--aha-fs-body);
+  color: var(--aha-text-primary);
+}
+.aha-pop-item small { color: var(--aha-text-tertiary); font-size: var(--aha-fs-micro); }
+.aha-pop-item-active { background: var(--aha-bg-surface); }
+.aha-pop-item-disabled { opacity: 0.65; cursor: default; }
+.aha-pop-check { margin-left: auto; color: var(--aha-run); font-weight: 600; }
+.aha-pop-item .aha-dev-tag { margin-left: auto; }
+
+@keyframes aha-pop-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* 图标按钮 */
+.aha-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: 0;
+  border-radius: var(--aha-r-md);
+  background: transparent;
+  color: var(--aha-text-secondary);
+  cursor: pointer;
+  transition: background var(--aha-dur-fast) var(--aha-ease-standard),
+    color var(--aha-dur-fast) var(--aha-ease-standard);
+}
+.aha-icon-btn:hover { background: var(--aha-bg-surface); color: var(--aha-text-primary); }
+.aha-icon-btn-static { cursor: default; opacity: 0.6; }
+
+/* ---------- 状态栏 ---------- */
+.aha-statusbar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  height: 28px;
+  padding: 0 12px;
+  background: var(--aha-bg-surface);
+  border-top: 1px solid var(--aha-border-subtle);
+  font-size: var(--aha-fs-micro);
+  font-weight: 500;
+  color: var(--aha-text-secondary);
+  flex-shrink: 0;
+}
+.aha-statusbar-path {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--aha-text-tertiary);
+}
+.aha-statusbar-spacer { flex: 1; }
+
+.aha-level-pill {
+  padding: 2px 8px;
+  border-radius: var(--aha-r-pill);
+  font-size: var(--aha-fs-micro);
+  font-weight: 600;
+}
+.aha-level-pill-meet { background: var(--aha-accent-soft); color: var(--aha-accent); }
+.aha-level-pill-info { background: var(--aha-info-soft); color: var(--aha-info); }
+.aha-level-pill-attend { background: var(--aha-attend-soft); color: var(--aha-attend); }
+
+/* ---------- 播报条 ---------- */
+.aha-broadcast {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 12px 0;
+  padding: 8px 12px;
+  background: var(--aha-accent-soft);
+  border: 1px solid var(--aha-border-subtle);
+  border-radius: var(--aha-r-lg);
+  font-size: var(--aha-fs-body);
+  color: var(--aha-text-primary);
+  animation: aha-pop-in var(--aha-dur-base) var(--aha-ease-standard);
+}
+.aha-broadcast-icon { font-size: 14px; }
+.aha-broadcast-label {
+  flex-shrink: 0;
+  font-size: var(--aha-fs-micro);
+  font-weight: 600;
+  color: var(--aha-accent);
+}
+.aha-broadcast-text {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.aha-broadcast-stats { flex-shrink: 0; color: var(--aha-text-secondary); font-size: var(--aha-fs-caption); }
+.aha-broadcast-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: var(--aha-r-sm);
+  background: transparent;
+  color: var(--aha-text-secondary);
+  cursor: pointer;
+}
+.aha-broadcast-btn:hover { background: var(--aha-bg-raised); color: var(--aha-text-primary); }
+
+/* ---------- 任务模式看板 ---------- */
+.aha-board {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  background: var(--aha-bg-canvas);
+}
+.aha-board-filters {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--aha-border-subtle);
+  flex-wrap: wrap;
+}
+.aha-filter-chip {
+  display: inline-flex;
+  align-items: center;
+  height: 24px;
+  padding: 0 10px;
+  border: 1px solid var(--aha-border-subtle);
+  border-radius: var(--aha-r-pill);
+  background: var(--aha-bg-surface);
+  color: var(--aha-text-secondary);
+  font-size: var(--aha-fs-micro);
+  font-weight: 500;
+}
+.aha-filter-chip-btn { cursor: pointer; transition: all var(--aha-dur-fast) var(--aha-ease-standard); }
+.aha-filter-chip-btn:hover { border-color: var(--aha-border-strong); color: var(--aha-text-primary); }
+.aha-filter-chip-btn.active {
+  background: var(--aha-accent-soft);
+  border-color: var(--aha-accent);
+  color: var(--aha-accent);
+}
+.aha-board-counts { margin-left: auto; color: var(--aha-text-tertiary); font-size: var(--aha-fs-micro); }
+
+.aha-board-columns {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  flex: 1;
+  min-height: 0;
+  padding: 12px 16px;
+  overflow: hidden;
+}
+.aha-board-col {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--aha-bg-surface);
+  border: 1px solid var(--aha-border-subtle);
+  border-radius: var(--aha-r-lg);
+}
+.aha-board-col-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  font-size: var(--aha-fs-body);
+  font-weight: 600;
+  color: var(--aha-text-primary);
+  border-bottom: 1px solid var(--aha-border-subtle);
+}
+.aha-board-col-dot { width: 8px; height: 8px; border-radius: 50%; }
+.aha-board-col-dot-attend { background: var(--aha-attend); }
+.aha-board-col-dot-run { background: var(--aha-run); }
+.aha-board-col-dot-done { background: var(--aha-text-tertiary); }
+.aha-board-col-count {
+  margin-left: auto;
+  font-size: var(--aha-fs-micro);
+  font-weight: 500;
+  color: var(--aha-text-tertiary);
+}
+.aha-board-col-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.aha-board-group-head {
+  font-size: var(--aha-fs-micro);
+  font-weight: 600;
+  color: var(--aha-text-tertiary);
+  padding: 2px 2px 0;
+}
+.aha-board-empty {
+  padding: 18px 8px;
+  text-align: center;
+  font-size: var(--aha-fs-caption);
+  color: var(--aha-text-tertiary);
+}
+.aha-board-hint {
+  padding: 10px 16px 14px;
+  text-align: center;
+  font-size: var(--aha-fs-body);
+  color: var(--aha-text-secondary);
+}
+
+/* 任务卡片 */
+.aha-task-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--aha-border-subtle);
+  border-radius: var(--aha-r-lg);
+  background: var(--aha-bg-raised);
+  box-shadow: var(--aha-shadow-card);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color var(--aha-dur-fast) var(--aha-ease-standard),
+    transform var(--aha-dur-fast) var(--aha-ease-standard);
+}
+.aha-task-card:hover { border-color: var(--aha-border-strong); transform: translateY(-1px); }
+.aha-task-card-dimmed { opacity: 0.62; }
+.aha-task-card-failed { border-color: var(--aha-danger-soft); }
+.aha-task-card-head { display: flex; align-items: center; gap: 8px; }
+.aha-task-card-title {
+  font-size: var(--aha-fs-body);
+  font-weight: 500;
+  color: var(--aha-text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.aha-task-card-meta {
+  display: flex;
+  gap: 6px;
+  font-size: var(--aha-fs-micro);
+  color: var(--aha-text-tertiary);
+}
+.aha-task-card-spec {
+  padding: 0 5px;
+  border-radius: var(--aha-r-sm);
+  background: var(--aha-bg-surface);
+}
+.aha-task-card-foot {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--aha-fs-micro);
+  color: var(--aha-text-secondary);
+}
+.aha-task-card-tool {
+  margin-left: auto;
+  max-width: 90px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--aha-text-tertiary);
+}
+
+.aha-status-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.aha-status-dot-run { background: var(--aha-run); }
+.aha-status-dot-done { background: var(--aha-run); }
+.aha-status-dot-idle { background: var(--aha-text-tertiary); }
+.aha-status-dot-failed { background: var(--aha-danger); }
+
+/* Attention 卡片（待批准 / 待验收） */
+.aha-attention-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--aha-border-subtle);
+  border-left: 3px solid var(--aha-attend);
+  border-radius: var(--aha-r-lg);
+  background: var(--aha-bg-raised);
+  box-shadow: var(--aha-shadow-card);
+}
+.aha-attention-card-head { display: flex; align-items: center; gap: 8px; }
+.aha-attention-icon { font-size: 14px; }
+.aha-attention-title {
+  font-size: var(--aha-fs-body);
+  font-weight: 500;
+  color: var(--aha-text-primary);
+}
+.aha-attention-desc {
+  margin: 0;
+  font-size: var(--aha-fs-caption);
+  line-height: 1.5;
+  color: var(--aha-text-secondary);
+}
+.aha-attention-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* 风险徽章（03 §4.1） */
+.aha-risk-badge {
+  align-self: flex-start;
+  height: 20px;
+  padding: 0 8px;
+  border-radius: var(--aha-r-sm);
+  font-size: var(--aha-fs-micro);
+  font-weight: 500;
+  line-height: 20px;
+}
+.aha-risk-badge-low { background: var(--aha-run-soft); color: var(--aha-run); }
+.aha-risk-badge-mid { background: var(--aha-attend-soft); color: var(--aha-attend); }
+.aha-risk-badge-high { background: var(--aha-danger-soft); color: var(--aha-danger); }
+.aha-risk-badge-full { background: rgba(138, 146, 156, 0.15); color: var(--aha-text-secondary); }
+
+/* 按钮 */
+.aha-btn {
+  height: 30px;
+  padding: 0 14px;
+  border: 1px solid transparent;
+  border-radius: var(--aha-r-md);
+  font-size: var(--aha-fs-body);
+  font-weight: 500;
+  cursor: pointer;
+  transition: all var(--aha-dur-fast) var(--aha-ease-standard);
+}
+.aha-btn:disabled { opacity: 0.5; cursor: default; }
+.aha-btn-primary { background: var(--aha-accent); color: #fff; }
+.aha-btn-primary:hover:not(:disabled) { filter: brightness(1.06); }
+.aha-btn-primary:active:not(:disabled) { transform: scale(0.98); }
+.aha-btn-approve { background: var(--aha-run); color: #fff; }
+.aha-btn-approve:hover:not(:disabled) { filter: brightness(1.06); }
+.aha-btn-ghost {
+  background: transparent;
+  border-color: var(--aha-border-strong);
+  color: var(--aha-text-secondary);
+}
+.aha-btn-ghost:hover:not(:disabled) { color: var(--aha-text-primary); }
+.aha-btn-ghost-danger {
+  background: transparent;
+  border-color: var(--aha-border-strong);
+  color: var(--aha-danger);
+}
+.aha-btn-ghost-danger:hover:not(:disabled) { background: var(--aha-danger-soft); }
+
+/* Revise 内联输入 */
+.aha-revise-row { display: flex; gap: 6px; width: 100%; }
+.aha-revise-input {
+  flex: 1;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--aha-border-strong);
+  border-radius: var(--aha-r-md);
+  background: var(--aha-bg-canvas);
+  color: var(--aha-text-primary);
+  font-size: var(--aha-fs-body);
+  outline: none;
+}
+.aha-revise-input:focus { border-color: var(--aha-accent); }
+
+/* Host 首席磁贴（04 §9.3：固定首位且视觉上略大） */
+.tiles-gallery-tile-wrap-coordinator .tile,
+.tiles-gallery-tile-wrap-coordinator .worker-card {
+  outline: 2px solid var(--aha-accent);
+  outline-offset: 1px;
+}
+
+/* 自动批准弹层在底部工具栏中向上展开 */
+.mtg-scope-picker-up {
+  top: auto;
+  bottom: calc(100% + 6px);
+}
+
+/* ---------- 统一批准卡片（04 BR-A / 03 §4.2） ---------- */
+.aha-approval {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px;
+  border: 1px solid var(--aha-border-subtle);
+  border-left: 3px solid var(--aha-attend);
+  border-radius: var(--aha-r-lg);
+  background: var(--aha-bg-raised);
+  box-shadow: var(--aha-shadow-card);
+}
+.aha-approval-high,
+.aha-approval-blocked { border-left-color: var(--aha-danger); }
+.aha-approval-low { border-left-color: var(--aha-run); }
+
+.aha-approval-head { display: flex; align-items: center; gap: 8px; }
+.aha-approval-owner { font-size: var(--aha-fs-body); font-weight: 500; color: var(--aha-text-primary); }
+.aha-approval-crumb {
+  font-size: var(--aha-fs-caption);
+  color: var(--aha-text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.aha-approval-head .aha-risk-badge { margin-left: auto; flex-shrink: 0; }
+
+.aha-approval-action { font-size: var(--aha-fs-body); color: var(--aha-text-primary); }
+.aha-approval-action-label { color: var(--aha-text-secondary); }
+.aha-approval-action-text { font-weight: 500; }
+
+.aha-mono {
+  font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace;
+  font-size: var(--aha-fs-mono);
+  padding: 1px 6px;
+  border-radius: var(--aha-r-sm);
+  background: var(--aha-bg-surface);
+  word-break: break-all;
+}
+
+.aha-approval-impact {
+  margin: 0;
+  font-size: var(--aha-fs-caption);
+  line-height: 1.5;
+  color: var(--aha-text-secondary);
+}
+.aha-approval-error { margin: 0; font-size: var(--aha-fs-caption); color: var(--aha-danger); }
+.aha-approval-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+.aha-btn-detail {
+  background: transparent;
+  border: 1.5px solid var(--aha-danger);
+  color: var(--aha-danger);
+}
+.aha-btn-detail:hover:not(:disabled) { background: var(--aha-danger-soft); }
+.aha-btn-danger-solid { background: var(--aha-danger); color: #fff; }
+.aha-btn-danger-solid:hover:not(:disabled) { filter: brightness(1.06); }
+.aha-btn-danger-solid:disabled {
+  background: var(--aha-bg-surface);
+  color: var(--aha-text-tertiary);
+}
+
+/* 按住批准（03 §3.3 中风险双通道） */
+.aha-hold-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  padding: 0 14px;
+  border: 1.5px solid var(--aha-attend);
+  border-radius: var(--aha-r-md);
+  background: transparent;
+  color: var(--aha-attend);
+  font-size: var(--aha-fs-body);
+  font-weight: 500;
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+  transition: background 150ms var(--aha-ease-standard),
+    transform var(--aha-dur-fast) var(--aha-ease-standard);
+}
+.aha-hold-btn:disabled { opacity: 0.5; cursor: default; }
+.aha-hold-ring {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  transition: background 150ms var(--aha-ease-standard);
+}
+.aha-hold-btn-done {
+  border-color: var(--aha-run);
+  background: var(--aha-run);
+  color: #fff;
+  animation: aha-hold-pop var(--aha-dur-base) var(--aha-ease-emphasis);
+}
+@keyframes aha-hold-pop {
+  0% { transform: scale(1); }
+  50% { transform: scale(1.06); }
+  100% { transform: scale(1); }
+}
+
+/* 已拒绝 · 5s 撤销（03 改进建议 6.10 倒计时细环） */
+.aha-approval-denied {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  border-left-color: var(--aha-text-tertiary);
+  opacity: 0.9;
+}
+.aha-approval-denied-label { font-size: var(--aha-fs-body); color: var(--aha-text-secondary); }
+.aha-undo-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--aha-border-strong);
+  border-radius: var(--aha-r-md);
+  background: transparent;
+  color: var(--aha-text-primary);
+  font-size: var(--aha-fs-caption);
+  cursor: pointer;
+}
+.aha-undo-btn:hover { background: var(--aha-bg-surface); }
+.aha-undo-ring { width: 12px; height: 12px; border-radius: 50%; }
+
+/* ---------- P5 高风险详情模态 ---------- */
+.aha-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 300;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(16, 17, 19, 0.36);
+  -webkit-backdrop-filter: blur(4px);
+  backdrop-filter: blur(4px);
+  animation: aha-pop-in var(--aha-dur-base) var(--aha-ease-standard);
+}
+.aha-modal {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 480px;
+  max-width: calc(100vw - 48px);
+  max-height: calc(100vh - 96px);
+  overflow-y: auto;
+  padding: 20px;
+  background: var(--aha-bg-raised);
+  border: 1px solid var(--aha-border-subtle);
+  border-radius: var(--aha-r-xl);
+  box-shadow: var(--aha-shadow-modal);
+}
+.aha-modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.aha-modal-title { margin: 0; font-size: var(--aha-fs-h1); font-weight: 600; color: var(--aha-text-primary); }
+.aha-modal-sub { margin: 0; font-size: var(--aha-fs-caption); line-height: 1.5; color: var(--aha-text-secondary); }
+
+.aha-detail-box {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px;
+  background: var(--aha-bg-surface);
+  border: 1px solid var(--aha-border-subtle);
+  border-radius: var(--aha-r-lg);
+}
+.aha-kv { display: flex; gap: 10px; font-size: var(--aha-fs-body); color: var(--aha-text-primary); }
+.aha-kv strong {
+  flex-shrink: 0;
+  width: 44px;
+  font-weight: 500;
+  color: var(--aha-text-secondary);
+}
+
+.aha-impact-list {
+  padding: 12px;
+  border: 1px solid var(--aha-danger-soft);
+  border-radius: var(--aha-r-lg);
+  background: var(--aha-danger-soft);
+}
+.aha-impact-title { font-size: var(--aha-fs-caption); font-weight: 600; color: var(--aha-danger); margin-bottom: 6px; }
+.aha-impact-list ul { margin: 0; padding-left: 18px; }
+.aha-impact-list li {
+  font-size: var(--aha-fs-caption);
+  line-height: 1.6;
+  color: var(--aha-text-primary);
+  word-break: break-all;
+}
+
+.aha-raw-input summary {
+  font-size: var(--aha-fs-caption);
+  color: var(--aha-text-tertiary);
+  cursor: pointer;
+}
+.aha-raw-input pre {
+  margin: 8px 0 0;
+  padding: 10px;
+  max-height: 160px;
+  overflow: auto;
+  background: var(--aha-bg-surface);
+  border-radius: var(--aha-r-md);
+  font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace;
+  font-size: 11px;
+  color: var(--aha-text-secondary);
+}
+
+.aha-check-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--aha-fs-body);
+  color: var(--aha-text-primary);
+  cursor: pointer;
+}
+.aha-modal-error { margin: 0; font-size: var(--aha-fs-caption); color: var(--aha-danger); }
+.aha-modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+/* ---------- P3 agent 详情面板（右侧滑出） ---------- */
+.mtg-main { position: relative; }
+
+.aha-agent-panel {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 80;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  width: 320px;
+  padding: 16px;
+  background: var(--aha-bg-overlay);
+  -webkit-backdrop-filter: blur(24px);
+  backdrop-filter: blur(24px);
+  border-left: 1px solid var(--aha-border-subtle);
+  box-shadow: var(--aha-shadow-overlay);
+  overflow-y: auto;
+  animation: aha-slide-in var(--aha-dur-base) var(--aha-ease-standard);
+}
+@keyframes aha-slide-in {
+  from { opacity: 0; transform: translateX(12px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+.aha-agent-panel-head { display: flex; align-items: center; gap: 10px; }
+.aha-agent-panel-id { flex: 1; min-width: 0; }
+.aha-agent-panel-name {
+  font-size: var(--aha-fs-h2);
+  font-weight: 600;
+  color: var(--aha-text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.aha-agent-panel-sub { font-size: var(--aha-fs-caption); color: var(--aha-text-secondary); }
+
+.aha-agent-panel-section { display: flex; flex-direction: column; gap: 6px; }
+.aha-agent-panel-label {
+  font-size: var(--aha-fs-micro);
+  font-weight: 600;
+  color: var(--aha-text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.aha-agent-panel-task {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--aha-fs-body);
+  color: var(--aha-text-primary);
+}
+.aha-agent-panel-status { margin-left: auto; font-size: var(--aha-fs-micro); color: var(--aha-text-secondary); }
+.aha-agent-panel-tool { font-size: var(--aha-fs-micro); color: var(--aha-text-tertiary); }
+
+.aha-agent-panel-activity,
+.aha-agent-panel-files {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.aha-agent-panel-activity li {
+  font-size: var(--aha-fs-caption);
+  color: var(--aha-text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.aha-agent-panel-files li { display: flex; align-items: center; gap: 8px; }
+.aha-agent-panel-file-action { font-size: var(--aha-fs-micro); }
+.aha-file-created { color: var(--aha-run); }
+.aha-file-modified { color: var(--aha-attend); }
+.aha-file-deleted { color: var(--aha-danger); }
+
+.aha-agent-panel-actions {
+  margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.aha-agent-panel-actions .aha-btn { justify-content: center; display: inline-flex; align-items: center; gap: 6px; }
+.aha-agent-panel-main-btn { height: 34px; }
+
+/* ---------- P4 任务详情覆盖层 ---------- */
+.aha-task-detail-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 78;
+  background: var(--aha-bg-canvas);
+  animation: aha-pop-in var(--aha-dur-base) var(--aha-ease-standard);
+  overflow-y: auto;
+}
+
+/* ---------- P8 首次启动引导 ---------- */
+.aha-onboarding {
+  position: fixed;
+  inset: 0;
+  z-index: 400;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--aha-bg-canvas);
+  animation: aha-pop-in var(--aha-dur-slow) var(--aha-ease-standard);
+}
+.aha-ob-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  width: 440px;
+  max-width: calc(100vw - 48px);
+  text-align: center;
+}
+.aha-ob-logo {
+  width: 56px;
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--aha-r-xl);
+  background: var(--aha-accent-soft);
+  color: var(--aha-accent);
+  font-size: 26px;
+}
+.aha-ob-logo-done { background: var(--aha-run-soft); color: var(--aha-run); }
+.aha-ob-title { margin: 0; font-size: var(--aha-fs-display); font-weight: 600; color: var(--aha-text-primary); }
+.aha-ob-text { margin: 0; font-size: var(--aha-fs-body); line-height: 1.6; color: var(--aha-text-secondary); }
+.aha-ob-note { margin: 0; font-size: var(--aha-fs-caption); color: var(--aha-text-tertiary); }
+.aha-ob-primary { height: 36px; padding: 0 28px; margin-top: 6px; }
+
+.aha-ob-scan-ring {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  border: 3px solid var(--aha-border-subtle);
+  border-top-color: var(--aha-accent);
+  animation: aha-ob-spin 0.9s linear infinite;
+}
+@keyframes aha-ob-spin { to { transform: rotate(360deg); } }
+.aha-ob-scan-lines {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: var(--aha-fs-caption);
+  color: var(--aha-text-secondary);
+}
+
+.aha-ob-stats { display: flex; gap: 24px; }
+.aha-ob-stat { display: flex; flex-direction: column; gap: 2px; }
+.aha-ob-stat strong { font-size: 28px; font-weight: 600; color: var(--aha-text-primary); }
+.aha-ob-stat span { font-size: var(--aha-fs-caption); color: var(--aha-text-secondary); }
+
+/* ---------- P6 探索页 ---------- */
+.aha-explore {
+  position: fixed;
+  inset: 0;
+  z-index: 350;
+  background: var(--aha-bg-canvas);
+  overflow-y: auto;
+  padding: 24px;
+  animation: aha-pop-in var(--aha-dur-base) var(--aha-ease-standard);
+}
+.aha-explore-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  max-width: 760px;
+  margin: 0 auto 20px;
+}
+.aha-explore-title { margin: 0; font-size: var(--aha-fs-display); font-weight: 600; color: var(--aha-text-primary); }
+.aha-explore-section { max-width: 760px; margin: 0 auto 24px; }
+.aha-explore-label {
+  font-size: var(--aha-fs-micro);
+  font-weight: 600;
+  color: var(--aha-text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 10px;
+}
+.aha-explore-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.aha-explore-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px;
+  border: 1px solid var(--aha-border-subtle);
+  border-radius: var(--aha-r-lg);
+  background: var(--aha-bg-raised);
+  box-shadow: var(--aha-shadow-card);
+}
+.aha-explore-card-feature { border-left: 3px solid var(--aha-accent); }
+.aha-explore-card-icon { font-size: 22px; }
+.aha-explore-card-name { font-size: var(--aha-fs-h2); font-weight: 600; color: var(--aha-text-primary); }
+.aha-explore-card-desc { margin: 0; font-size: var(--aha-fs-caption); line-height: 1.6; color: var(--aha-text-secondary); }
+.aha-explore-card .aha-dev-tag { align-self: flex-start; }
+.aha-explore-live {
+  align-self: flex-start;
+  padding: 1px 6px;
+  border-radius: var(--aha-r-sm);
+  background: var(--aha-run-soft);
+  color: var(--aha-run);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+/* ---------- P7 设置占位区块 ---------- */
+.aha-settings-upcoming {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  border: 1px dashed var(--aha-border-strong);
+  border-radius: var(--aha-r-lg);
+}
+.aha-settings-upcoming-head {
+  font-size: var(--aha-fs-micro);
+  font-weight: 600;
+  color: var(--aha-text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.aha-settings-upcoming-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: flex-start;
+}
+.aha-settings-upcoming-name { font-size: var(--aha-fs-body); font-weight: 600; color: var(--aha-text-primary); }
+.aha-settings-upcoming-desc { margin: 0; font-size: var(--aha-fs-caption); line-height: 1.5; color: var(--aha-text-secondary); }
+
+/* ---------- AhaBar 窗口（M5 / 04 §9.4） ---------- */
+html.ahabar-view,
+html.ahabar-view body {
+  background: transparent;
+  overflow: hidden;
+}
+html.ahabar-view #root { background: transparent; }
+
+.ahabar-root {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  font-family: inherit;
+  transition: opacity var(--aha-dur-slow) var(--aha-ease-standard);
+}
+.ahabar-ghost { opacity: 0.35; }
+.ahabar-ghost * { transition: none !important; animation: none !important; }
+
+.ahabar { position: relative; display: flex; flex-direction: column; align-items: center; }
+
+/* compact 药丸：无循环动画，唯一的"活"是状态变化时的一次性过渡 */
+.ahabar-compact {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 32px;
+  min-height: 30px;
+  padding: 0 14px;
+  border-radius: var(--aha-r-pill);
+  background: var(--aha-bg-overlay);
+  -webkit-backdrop-filter: blur(24px);
+  backdrop-filter: blur(24px);
+  border: 1px solid var(--aha-border-subtle);
+  box-shadow: var(--aha-shadow-card);
+  font-size: var(--aha-fs-micro);
+  font-weight: 500;
+  color: var(--aha-text-primary);
+  -webkit-app-region: drag;
+  cursor: default;
+}
+.ahabar-seg { display: inline-flex; align-items: center; gap: 4px; }
+.ahabar-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.ahabar-dot-run { background: var(--aha-run); }
+.ahabar-dot-attend { background: var(--aha-attend); }
+
+/* hover 展开：200ms 进入延迟，400ms 收回（纯 CSS delay）；pinned 常开 */
+.ahabar-hovercard {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%) translateY(4px);
+  width: 384px;
+  max-height: 300px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border-radius: var(--aha-r-xl);
+  background: var(--aha-bg-overlay);
+  -webkit-backdrop-filter: blur(24px);
+  backdrop-filter: blur(24px);
+  border: 1px solid var(--aha-border-subtle);
+  box-shadow: var(--aha-shadow-overlay);
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity var(--aha-dur-base) var(--aha-ease-standard) 400ms,
+    transform var(--aha-dur-base) var(--aha-ease-standard) 400ms,
+    visibility 0s linear 600ms;
+}
+.ahabar:hover .ahabar-hovercard,
+.ahabar-pinned .ahabar-hovercard {
+  opacity: 1;
+  visibility: visible;
+  transform: translateX(-50%) translateY(0);
+  transition: opacity var(--aha-dur-base) var(--aha-ease-emphasis) 200ms,
+    transform var(--aha-dur-base) var(--aha-ease-emphasis) 200ms,
+    visibility 0s;
+}
+
+.ahabar-hover-path {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: var(--aha-fs-micro);
+  font-weight: 500;
+  color: var(--aha-text-tertiary);
+}
+.ahabar-pin {
+  display: inline-flex;
+  align-items: center;
+  border: 0;
+  background: transparent;
+  color: var(--aha-text-tertiary);
+  cursor: pointer;
+  padding: 3px;
+  border-radius: var(--aha-r-sm);
+}
+.ahabar-pin:hover, .ahabar-pin.active { color: var(--aha-accent); background: var(--aha-accent-soft); }
+.ahabar-hover-calm {
+  padding: 14px 8px;
+  text-align: center;
+  font-size: var(--aha-fs-body);
+  color: var(--aha-text-secondary);
+}
+.ahabar-more {
+  border: 0;
+  background: transparent;
+  text-align: left;
+  font-size: var(--aha-fs-caption);
+  color: var(--aha-accent);
+  cursor: pointer;
+  padding: 4px 2px;
+}
+.ahabar-summary {
+  font-size: var(--aha-fs-micro);
+  color: var(--aha-text-tertiary);
+  border-top: 1px solid var(--aha-border-subtle);
+  padding-top: 8px;
+}
+
+/* 虚拟键盘（Key1-4，键帽质感 + 按压下沉） */
+.ahabar-vkb {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 14px;
+  border-radius: var(--aha-r-xl);
+  background: var(--aha-bg-overlay);
+  -webkit-backdrop-filter: blur(24px);
+  backdrop-filter: blur(24px);
+  border: 1px solid var(--aha-border-subtle);
+  box-shadow: var(--aha-shadow-overlay);
+  animation: aha-pop-in var(--aha-dur-base) var(--aha-ease-emphasis);
+}
+.ahabar-vkb-row { display: flex; gap: 10px; justify-content: center; }
+.ahabar-key {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 52px;
+  height: 40px;
+  border: 1px solid var(--aha-border-strong);
+  border-bottom-width: 3px;
+  border-radius: var(--aha-r-md);
+  background: var(--aha-bg-raised);
+  color: var(--aha-text-primary);
+  cursor: pointer;
+  transition: transform var(--aha-dur-fast) var(--aha-ease-standard),
+    border-bottom-width var(--aha-dur-fast) var(--aha-ease-standard);
+}
+.ahabar-key:active { transform: translateY(2px); border-bottom-width: 1px; }
+.ahabar-key-approve { color: var(--aha-run); border-color: var(--aha-run); }
+.ahabar-key-deny { color: var(--aha-danger); border-color: var(--aha-danger); }
+.ahabar-key-detail { color: var(--aha-danger); border-color: var(--aha-danger); font-weight: 700; }
+.ahabar-key-hold { display: flex; flex-direction: column; align-items: center; gap: 1px; }
+.ahabar-key-hold .aha-hold-btn { width: 52px; height: 32px; padding: 0; justify-content: center; }
+.ahabar-key-hold-hint { font-size: 9px; color: var(--aha-text-tertiary); }
+.ahabar-vkb-context {
+  text-align: center;
+  font-size: var(--aha-fs-micro);
+  color: var(--aha-text-tertiary);
+}
+.ahabar-vkb-takeover {
+  font-size: var(--aha-fs-caption);
+  color: var(--aha-run);
+  text-align: center;
+  padding: 4px 8px;
+}

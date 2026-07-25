@@ -41,6 +41,8 @@ interface BottomToolbarProps {
   onLeave: () => void;
   /** Toggle the floating companion window (Phase 8). */
   onToggleCompanion: () => void;
+  /** 会议控制组（多 Agent / 自动批准档位），渲染在桌面版第三组开头。 */
+  controlsSlot?: ReactNode;
   /** Handheld mode (§3.3): fixed 5 keys + 更多 menu + permission badge. */
   handheld?: boolean;
   /** Pending permission requests — badge count in handheld mode. */
@@ -99,6 +101,8 @@ export function BottomToolbar({
   onToggleChat,
   onLeave,
   onToggleCompanion,
+  /** 会议控制组（多 Agent / 自动批准档位），渲染在桌面版第三组开头。 */
+  controlsSlot,
   handheld = false,
   permissionCount = 0,
   onOpenPermission,
@@ -278,6 +282,7 @@ export function BottomToolbar({
       </div>
 
       <div className="toolbar-group">
+        {controlsSlot}
         <ToolbarButton
           icon={<MessageSquare size={ICON_SIZE} />}
           label="Chat"

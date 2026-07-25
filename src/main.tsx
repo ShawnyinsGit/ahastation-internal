@@ -12,7 +12,7 @@ import { parseEditorCapabilities } from './types';
 import { meetingStore } from './lib/meeting-store';
 import './styles.css';
 import './aha-tokens.css';
-import './aha-approval.css';
+import './aha-ui.css';
 
 const params = new URLSearchParams(window.location.search);
 const viewParam = params.get('view');
