@@ -5,7 +5,7 @@
 // interface below names exactly which capabilities each tool needs, so the
 // MCP shape can evolve without dragging the orchestrator class into the diff.
 
-import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk';
+import { createSdkMcpServer, tool } from './claude-cli/inproc-mcp.js';
 import { z } from 'zod';
 import {
   MEETING_TOOLS,
@@ -102,8 +102,8 @@ export interface OrchestratorBridge {
     | { ok: false; error: string }
   >;
   steerWorker(workerId: string, addendum: string): Promise<SteerResult>;
-  sendTaskMessage(taskId: string, message: string): Promise<{ id: string; status: string }>;
-  queueTaskFollowUp(taskId: string, message: string): Promise<{ id: string; status: string }>;
+  sendTaskMessage(taskId: string, message: string, executorBackendId?: string): Promise<{ id: string; status: string }>;
+  queueTaskFollowUp(taskId: string, message: string, executorBackendId?: string): Promise<{ id: string; status: string }>;
   interruptWorker(workerId: string, reason?: string): Promise<{ ok: true } | { ok: false; error: string }>;
   forwardTaskMessage(fromTaskId: string, toTaskId: string, messageId: string): Promise<{ id: string; status: string }>;
   inspectDeliveryReview(reviewId: string): unknown;
@@ -121,6 +121,7 @@ export interface OrchestratorBridge {
   requestDeliveryRework(
     reviewId: string,
     findings: CoordinatorReviewFinding[],
+    executorBackendId?: string,
   ): Promise<unknown>;
   activeReviewGate(): ActiveReviewGate | null;
   hasWorker(workerId: string): boolean;
@@ -356,10 +357,10 @@ export function buildTalkerMcp(
         MEETING_TOOLS.SEND_TASK_MESSAGE,
         'Durably queue a Coordinator instruction for one task. Success means queued, not acknowledged.',
         taskMessageArgsSchema,
-        async ({ taskId, message }) => {
+        async ({ taskId, message, executorBackendId }) => {
           if (!canCoordinate()) return denied();
           try {
-            const queued = await bridge.sendTaskMessage(taskId, message);
+            const queued = await bridge.sendTaskMessage(taskId, message, executorBackendId);
             return { content: [{ type: 'text', text: `queued ${queued.id} for ${taskId}; acknowledgement pending` }] };
           } catch (error) {
             return {
@@ -375,10 +376,10 @@ export function buildTalkerMcp(
         MEETING_TOOLS.FOLLOW_UP_TASK,
         'Durably queue a FIFO follow-up. It waits for the current Worker turn boundary and does not interrupt tools.',
         taskMessageArgsSchema,
-        async ({ taskId, message }) => {
+        async ({ taskId, message, executorBackendId }) => {
           if (!canCoordinate()) return denied();
           try {
-            const queued = await bridge.queueTaskFollowUp(taskId, message);
+            const queued = await bridge.queueTaskFollowUp(taskId, message, executorBackendId);
             return { content: [{ type: 'text', text: `follow-up ${queued.id} queued for ${taskId}` }] };
           } catch (error) {
             return {
@@ -484,9 +485,9 @@ export function buildTalkerMcp(
         MEETING_TOOLS.REQUEST_DELIVERY_REWORK,
         'Request another Worker attempt with bounded blocking findings. This never edits files from the Coordinator.',
         requestDeliveryReworkArgsSchema,
-        async ({ reviewId, findings }) => {
+        async ({ reviewId, findings, executorBackendId }) => {
           if (!canCoordinate()) return denied();
-          const session = await bridge.requestDeliveryRework(reviewId, findings);
+          const session = await bridge.requestDeliveryRework(reviewId, findings, executorBackendId);
           return { content: [{ type: 'text', text: JSON.stringify(session) }] };
         },
       ),

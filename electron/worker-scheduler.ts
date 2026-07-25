@@ -87,6 +87,7 @@ import {
 } from './backends/task-profile.js';
 import type { DeliveryHarness, DeliveryView } from './delivery-harness.js';
 import { reopenFrozenDeliveryCandidateForRework } from './delivery-candidate.js';
+import { TERMINAL_WORKER_COMPLETION_INSTRUCTION } from './backends/claude-terminal-adapter.js';
 import {
   parseWorkerAdapterSignal,
   reworkRequestSchema,
@@ -128,8 +129,14 @@ import {
   type TaskRecoveryAction,
 } from './task-recovery.js';
 
+type ClaudeSessionOpts = ConstructorParameters<typeof ClaudeSession>[0];
+
 export type SessionFactory = (
-  opts: ConstructorParameters<typeof ClaudeSession>[0],
+  opts: Omit<ClaudeSessionOpts, 'sessionOptions'> & {
+    /** SDK Options plus backend-specific extras (e.g. `workerId`, which
+     *  terminal-mode adapters use to key their pty for renderer attach). */
+    sessionOptions?: ClaudeSessionOpts['sessionOptions'] & Record<string, unknown>;
+  },
 ) => BackendSession;
 
 export interface WorkerSchedulerOpts {
@@ -277,6 +284,10 @@ const COMPUTER_USE_WORKER_PROMPT = `
 - 如果操作需要辅助功能权限（Accessibility），工具会返回错误提示
 - 不要在 screenshot 中暴露或朗读用户的敏感信息`;
 
+/** Terminal-mode workers run a human-supervised interactive TUI; several
+ *  automatic escalations (tier-3 stall restart) are disabled for them. */
+const TERMINAL_WORKER_BACKEND_ID = 'claude-code-terminal';
+
 const WORK_REPORT_RECOVERY_MESSAGE = [
   '[AhaStation protocol correction]',
   'Your previous turn ended without a valid mandatory WorkReport.',
@@ -315,11 +326,13 @@ const STALL_SWEEP_MS = 15_000;
 // idle threshold. Those get a much longer leash before the watchdog treats
 // silence as a hang.
 const TOOL_INFLIGHT_STALL_THRESHOLD_MS = 300_000;
-// Parked slot-holders (verifying / reviewing / coordinator-reviewing /
+// Parked statuses (verifying / reviewing / coordinator-reviewing /
 // awaiting-acceptance / integration-queued / integrating / integration-conflict)
-// hold a concurrency slot but emit no SDK activity, so the running-worker sweep
-// is blind to them. Without coverage a swallowed throw or a forgotten
-// acceptance silently consumes a slot forever. See sweepParked.
+// no longer count against the concurrency cap (countRunning excludes them) —
+// the task is suspended in the delivery pipeline while its slot is reused.
+// They still emit no SDK activity, so the running-worker sweep is blind to
+// them. Without coverage a swallowed throw or a forgotten acceptance leaves a
+// task suspended forever. See sweepParked.
 const PARKED_SLOT_STATUSES: ReadonlySet<WorkerStatusKind> = new Set([
   'verifying',
   'reviewing',
@@ -985,6 +998,7 @@ export class WorkerScheduler {
           authorityRequest: structuredClone(handle.authorityRequest!),
           dependencyGate: handle.dependencyGate,
           budget: structuredClone(handle.budget),
+          priority: handle.priority,
           acceptanceCriteria: handle.acceptanceCriteria
             ? structuredClone(handle.acceptanceCriteria)
             : undefined,
@@ -1084,6 +1098,9 @@ export class WorkerScheduler {
       if (owners && !owners.has(handle.id)) continue;
       // The user answered (or the host resolved) - cancel the fail-closed timer.
       this.clearPermissionTimeout(handle.id, id);
+      // Only a registered owner is known to have been suspended on this card;
+      // the broadcast fallback must not drive the counter negative.
+      if (owners?.has(handle.id)) this.settlePendingAsk(handle);
       const asked = handle.pendingAuthorityAsks?.get(id);
       if (asked) {
         handle.pendingAuthorityAsks!.delete(id);
@@ -1327,6 +1344,7 @@ export class WorkerScheduler {
         authorityRequest: task.authorityRequest,
         dependencyGate: task.dependencyGate,
         budget: task.budget,
+        priority: task.priority,
         approvalDecisionId: approval?.decisionId,
         approvalRecordedAt: approval?.approvedAt,
         approvedPlanVersion: this.planVersion + 1,
@@ -1365,6 +1383,7 @@ export class WorkerScheduler {
         authorityRequest: handle.authorityRequest ? structuredClone(handle.authorityRequest) : undefined,
         dependencyGate: handle.dependencyGate,
         budget: structuredClone(handle.budget),
+        priority: handle.priority,
         acceptanceCriteria: handle.acceptanceCriteria
           ? structuredClone(handle.acceptanceCriteria)
           : undefined,
@@ -1520,6 +1539,7 @@ export class WorkerScheduler {
           authorityRequest: operation.task.authorityRequest,
           dependencyGate: operation.task.dependencyGate,
           budget: operation.task.budget,
+          priority: operation.task.priority,
           acceptanceCriteria: operation.task.acceptanceCriteria,
         });
       } else if (operation.kind === 'cancel-pending-task') {
@@ -1555,7 +1575,11 @@ export class WorkerScheduler {
     return { ok: true, planVersion: this.planVersion };
   }
 
-  async queueFollowUp(taskId: string, text: string): Promise<TaskMessage> {
+  async queueFollowUp(
+    taskId: string,
+    text: string,
+    executorBackendId?: string,
+  ): Promise<TaskMessage> {
     const handle = this.workers.get(taskId);
     if (!handle) throw new Error(this.unknownTaskError(taskId));
     if (handle.status === 'budget-paused') {
@@ -1571,14 +1595,18 @@ export class WorkerScheduler {
       kind: 'follow-up',
       payload: { text: normalized },
     });
-    if (freshAttempt) this.beginFollowUpAttempt(handle);
+    if (freshAttempt) this.beginFollowUpAttempt(handle, executorBackendId);
     // A follow-up never interrupts a turn. Pending/running messages are
     // delivered one-at-a-time from a provider result boundary.
     if (handle.status === 'pending') this.spawnReadyWorkers();
     return message;
   }
 
-  async sendTaskMessage(taskId: string, text: string): Promise<TaskMessage> {
+  async sendTaskMessage(
+    taskId: string,
+    text: string,
+    executorBackendId?: string,
+  ): Promise<TaskMessage> {
     const handle = this.workers.get(taskId);
     if (!handle) throw new Error(this.unknownTaskError(taskId));
     if (handle.status === 'budget-paused') {
@@ -1594,9 +1622,24 @@ export class WorkerScheduler {
       kind: 'instruction',
       payload: { text: normalized },
     });
-    if (freshAttempt) this.beginFollowUpAttempt(handle);
+    if (freshAttempt) this.beginFollowUpAttempt(handle, executorBackendId);
     if (handle.status === 'pending') this.spawnReadyWorkers();
     return message;
+  }
+
+  /** Record a one-shot backend override consumed at the next fresh attempt
+   *  boundary (rework/retry). Provider sessions cannot resume across backends,
+   *  so consuming it also drops the session snapshot. */
+  setNextAttemptBackend(
+    taskId: string,
+    executorBackendId: string,
+  ): { ok: true } | { ok: false; error: string } {
+    const handle = this.workers.get(taskId);
+    if (!handle) return { ok: false, error: this.unknownTaskError(taskId) };
+    const backendId = executorBackendId.trim();
+    if (!backendId) return { ok: false, error: 'executorBackendId must not be empty' };
+    handle.nextAttemptBackendId = backendId;
+    return { ok: true };
   }
 
   /** #4a: follow-up/instruction channels must not silently fork a fresh
@@ -1659,6 +1702,7 @@ export class WorkerScheduler {
     handle.live.lastUpdateTs = Date.now();
     handle.stallNotified = false;
     handle.stallNudged = false;
+    handle.stallNotifiedTs = undefined;
     return { ok: true, queued: false };
   }
 
@@ -1837,6 +1881,24 @@ export class WorkerScheduler {
     void this.handleWorkerSignal(handle, { kind: 'delivery', report });
   }
 
+  /** User-driven failure for terminal-mode workers: the TUI has no report
+   *  channel, so the renderer confirm bar marks the attempt failed here and
+   *  the normal failed-signal path (dispose + cascade) takes over. */
+  failWorkerFromUser(workerId: string, message: string): { ok: true } | { ok: false; error: string } {
+    const handle = this.workers.get(workerId);
+    if (!handle) return { ok: false, error: `未找到 Worker ${workerId}` };
+    if (handle.status !== 'running') {
+      return { ok: false, error: `Worker 当前状态为 ${handle.status}，无法标记失败` };
+    }
+    void this.handleWorkerSignal(handle, {
+      kind: 'failed',
+      code: 'user-marked-failed',
+      message,
+      retryable: false,
+    });
+    return { ok: true };
+  }
+
   submitWorkerDelivery(workerId: string, files: string[], sourceAttempt?: number): void {
     const handle = this.workers.get(workerId);
     if (!handle) {
@@ -1906,7 +1968,23 @@ export class WorkerScheduler {
     for (const handle of this.workers.values()) {
       if (handle.status === 'running' && handle.session) {
         anyActive = true;
-        if (handle.stallNotified) continue;
+        // Terminal workers run an interactive TUI supervised by the human at
+        // the stage terminal - a quiet TUI is normal (Claude is reading /
+        // writing), so the whole stall chain (nudge -> stalled -> auto-restart)
+        // does not apply. The nudge in particular must not fire: it pastes a
+        // prompt into the TUI that Claude treats as new user input.
+        if (handle.backendId === TERMINAL_WORKER_BACKEND_ID) continue;
+        if (handle.stallNotified) {
+          // Tier-3: the tier-2 escalation already fired for this idle stretch.
+          // If the worker stays silent one more STALL_THRESHOLD_MS past that
+          // mark, restart the attempt automatically (once per attempt).
+          // Terminal-mode workers are exempt: their pace is supervised by the
+          // human at the stage terminal, so a quiet TUI is never auto-failed.
+          if (handle.backendId !== TERMINAL_WORKER_BACKEND_ID) {
+            this.maybeAutoRestartStalledWorker(handle, now);
+          }
+          continue;
+        }
         const idleMs = now - handle.live.lastUpdateTs;
         const toolInFlight = Boolean(handle.live.currentTool);
         if (idleMs < (toolInFlight ? TOOL_INFLIGHT_STALL_THRESHOLD_MS : STALL_THRESHOLD_MS)) continue;
@@ -1928,6 +2006,7 @@ export class WorkerScheduler {
         // Second stall (nudge didn't help), or a tool call silent past its
         // long leash: escalate to the user.
         handle.stallNotified = true;
+        handle.stallNotifiedTs = now;
         this.opts.emit({
           source: 'talker',
           event: {
@@ -1950,10 +2029,11 @@ export class WorkerScheduler {
           taskId: handle.currentTaskId,
         });
       } else if (PARKED_SLOT_STATUSES.has(handle.status)) {
-        // Parked slot-holders (verifying / awaiting-acceptance / integrating /
-        // ...) hold a concurrency slot but emit no SDK activity, so the running
-        // sweep above never touches them. Surface long-stuck parkers and
-        // fail-close the should-be-transient ones.
+        // Parked workers (verifying / awaiting-acceptance / integrating / ...)
+        // don't count against the concurrency cap, but they emit no SDK
+        // activity either, so the running sweep above never touches them.
+        // Surface long-suspended parkers and fail-close the should-be-transient
+        // ones.
         anyActive = true;
         this.sweepParked(handle, now);
       }
@@ -1962,7 +2042,7 @@ export class WorkerScheduler {
   }
 
   /** Alert (and for transient parks, fail-closed) a worker parked in a
-   *  slot-holding delivery status for too long. Externally-waiting states
+   *  suspended delivery status for too long. Externally-waiting states
    *  (awaiting-acceptance / integration-conflict / coordinator-reviewing) only
    *  get a briefing - they legitimately wait on a human. Transient states
    *  (verifying / integrating) that never resolve are fail-closed. */
@@ -2004,12 +2084,76 @@ export class WorkerScheduler {
     this.emitCoordinatorBriefing({
       kind: 'stalled',
       title: `${handle.title} 停留在 ${handle.status}`,
-      summary: `Worker 已在 ${handle.status} 状态等待 ${Math.round(parkedMs / 1000)} 秒，占用一个并发槽位。`,
+      summary: `Worker 已在 ${handle.status} 状态等待 ${Math.round(parkedMs / 1000)} 秒，任务被挂起（不占并发槽）。`,
       blockers: [handle.status],
       recommendedAction: action,
       workerId: handle.id,
       taskId: handle.currentTaskId,
     });
+  }
+
+  /** Tier-3 stall self-heal: after the tier-2 `worker-stalled` escalation, if
+   *  the worker is still silent a further STALL_THRESHOLD_MS later, restart
+   *  the attempt automatically instead of waiting on the user forever.
+   *  Guarded to once per attempt; a tool in flight keeps its long leash (the
+   *  running sweep already applied TOOL_INFLIGHT_STALL_THRESHOLD_MS, but a
+   *  tool that is still reported in flight is never force-restarted here —
+   *  killing the session mid-side-effect is the user's call). */
+  private maybeAutoRestartStalledWorker(handle: WorkerHandle, now: number): void {
+    if (handle.stallAutoRestarted) return;
+    if (handle.live.currentTool) return;
+    const notifiedTs = handle.stallNotifiedTs;
+    if (!notifiedTs || now - notifiedTs < STALL_THRESHOLD_MS) return;
+    // Latch before the async journal write so overlapping sweep ticks cannot
+    // double-restart. On failure the latch stays set: this attempt falls back
+    // to the tier-2 user-decision path rather than retry-looping.
+    handle.stallAutoRestarted = true;
+    void this.autoRestartStalledWorker(handle).catch((err) => {
+      console.error(`[scheduler] stall auto-restart failed for ${handle.id}:`, err);
+    });
+  }
+
+  /** Execute the tier-3 restart: durably record the restart instruction in
+   *  the task mailbox (journal-first), then release the live session (snapshot
+   *  saved for resume) and re-queue the same attempt as pending. Not routed
+   *  through interruptTask — that would terminalize the attempt; here the
+   *  attempt, grant and journal chain all continue unchanged. */
+  private async autoRestartStalledWorker(handle: WorkerHandle): Promise<void> {
+    const restartText = [
+      '系统提示：上一个会话因长时间无进展被自动重启。',
+      '请基于已有进度继续完成任务；如果之前卡在某个操作上，换一个方案绕过去，不要重复同样的等待。',
+    ].join('');
+    // Journal-first: the restart reason must be durable before any in-memory
+    // state changes. The queued instruction is delivered as the resumed
+    // session's first message (same attempt, kind 'instruction').
+    await this.requireTaskMailbox().enqueue({
+      taskId: handle.id,
+      attempt: handle.attempt,
+      sender: 'coordinator',
+      kind: 'instruction',
+      payload: { text: restartText },
+    });
+    await this.opts.flushEvents?.();
+    // Re-validate after the awaits: the worker may have progressed, been
+    // terminalized, or the scheduler may have closed while flushing.
+    if (this.opts.isClosed()) return;
+    if (handle.status !== 'running' || !handle.session || !handle.stallNotified) return;
+    this.emitCoordinatorBriefing({
+      kind: 'stalled',
+      title: `${handle.title} 已自动重启`,
+      summary: 'Worker 在上报后仍长时间无进展，已自动结束当前会话并重新排队（attempt 不变，会话上下文保留）。',
+      blockers: ['no-progress'],
+      recommendedAction: 'continue',
+      workerId: handle.id,
+      taskId: handle.currentTaskId,
+    });
+    this.releaseWorkerSession(handle);
+    handle.status = 'pending';
+    handle.stallNotified = false;
+    handle.stallNudged = false;
+    handle.stallNotifiedTs = undefined;
+    this.emitPlanUpdate();
+    this.spawnReadyWorkers();
   }
 
   // ---------------------------------------------------------------------------
@@ -2032,6 +2176,7 @@ export class WorkerScheduler {
         handle.live.lastUpdateTs = Date.now();
         handle.stallNotified = false;
         handle.stallNudged = false;
+        handle.stallNotifiedTs = undefined;
         // SDK message shapes are opaque; we walk known fields defensively.
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const msg: any = e.message;
@@ -2310,6 +2455,12 @@ export class WorkerScheduler {
     const askOwners = this.askOwnersByRequestId.get(event.id) ?? new Set<string>();
     askOwners.add(handle.id);
     this.askOwnersByRequestId.set(event.id, askOwners);
+    // While the card is unanswered the worker's canUseTool promise hangs and
+    // it does no work - yield its concurrency slot so a waiting task can run.
+    // The session stays alive; after the resolve the running count may briefly
+    // exceed the cap (soft overrun, bounded by the fail-closed timeout below).
+    handle.pendingAskCount = (handle.pendingAskCount ?? 0) + 1;
+    this.spawnReadyWorkers();
     // Fail-closed backstop: an unanswered ask-user card would otherwise hang
     // the SDK's canUseTool forever (the stall watchdog alerts but cannot
     // resolve it). Mirror PermissionBroker's timeout. OpenCode is excluded -
@@ -2332,6 +2483,7 @@ export class WorkerScheduler {
         if (this.opts.isClosed()) return;
         const target = this.workers.get(handle.id);
         if (!target || !target.session) return;
+        this.settlePendingAsk(target);
         if (
           target.status === 'failed'
           || target.status === 'accepted'
@@ -2379,6 +2531,14 @@ export class WorkerScheduler {
     if (owners.size === 0) this.askOwnersByRequestId.delete(requestId);
   }
 
+  /** One ask-user card settled (resolve or timeout): release its hold on the
+   *  handle's slot yield. Clamped at zero - clear paths may already have
+   *  reset the counter. */
+  private settlePendingAsk(handle: WorkerHandle): void {
+    const current = handle.pendingAskCount ?? 0;
+    if (current > 0) handle.pendingAskCount = current - 1;
+  }
+
   /** Drop every fail-closed timer owned by a handle - used on dispose and on
    *  rework attempt boundaries (beginFollowUpAttempt ends the session without
    *  going through disposeWorker, so a stale timer would otherwise fire on the
@@ -2394,6 +2554,10 @@ export class WorkerScheduler {
       owners.delete(handleId);
       if (owners.size === 0) this.askOwnersByRequestId.delete(requestId);
     }
+    // Every outstanding card is void with the session; the handle must not
+    // keep yielding its slot on a counter nothing will ever decrement.
+    const handle = this.workers.get(handleId);
+    if (handle) handle.pendingAskCount = 0;
   }
 
   private failAuthorityExhaustion(handle: WorkerHandle, reason: string): void {
@@ -2491,6 +2655,7 @@ export class WorkerScheduler {
     handle.live.lastUpdateTs = Date.now();
     handle.stallNotified = false;
     handle.stallNudged = false;
+    handle.stallNotifiedTs = undefined;
     if (signal.kind === 'progress') {
       handle.live.lastAssistantText = signal.message;
       handle.live.busy = true;
@@ -3129,6 +3294,11 @@ export class WorkerScheduler {
     // the next side-effecting Backend attempt begins.
     await this.opts.flushEvents?.();
     handle.backendSession = undefined;
+    // Consume a pending backend override at this attempt boundary — the
+    // Coordinator may have routed the rework to a different executor.
+    const backendOverride = handle.nextAttemptBackendId;
+    handle.nextAttemptBackendId = undefined;
+    if (backendOverride) this.applyBackendOverride(handle, backendOverride);
     const previousSession = handle.session;
     handle.session = null;
     handle.attempt = nextAttempt;
@@ -3136,6 +3306,8 @@ export class WorkerScheduler {
     previousSession?.end();
     handle.summary = '';
     handle.report = null;
+    handle.stallAutoRestarted = false;
+    handle.stallNotifiedTs = undefined;
     handle.transportEnded = false;
     handle.suppressNextReportlessCompletion = false;
     handle.emittedCandidateId = undefined;
@@ -3193,7 +3365,7 @@ export class WorkerScheduler {
     throw new Error(`task message ${message.id} has no text payload`);
   }
 
-  private beginFollowUpAttempt(handle: WorkerHandle): void {
+  private beginFollowUpAttempt(handle: WorkerHandle, executorBackendId?: string): void {
     handle.backendSession = handle.session?.snapshot?.() ?? handle.backendSession;
     if (handle.session) {
       const session = handle.session;
@@ -3210,9 +3382,16 @@ export class WorkerScheduler {
     handle.pendingAskFingerprints = undefined;
     handle.addendumCapNotified = false;
     handle.attempt += 1;
+    // An explicit override wins over a recorded one-shot; either way the
+    // pending override is consumed at this attempt boundary.
+    const backendOverride = executorBackendId ?? handle.nextAttemptBackendId;
+    handle.nextAttemptBackendId = undefined;
+    if (backendOverride) this.applyBackendOverride(handle, backendOverride);
     handle.status = 'pending';
     handle.summary = '';
     handle.report = null;
+    handle.stallAutoRestarted = false;
+    handle.stallNotifiedTs = undefined;
     handle.transportEnded = false;
     handle.suppressNextReportlessCompletion = false;
     handle.deliveryId = null;
@@ -3231,6 +3410,22 @@ export class WorkerScheduler {
       busy: false,
     };
     this.emitPlanUpdate();
+  }
+
+  /** Rebind a handle to a different executor backend for its next attempt.
+   *  Provider sessions cannot resume across backends, so the snapshot and the
+   *  compiled runtime/profile are dropped — the new attempt starts fresh. */
+  private applyBackendOverride(handle: WorkerHandle, executorBackendId: string): void {
+    const backendId = executorBackendId.trim();
+    if (!backendId || backendId === handle.backendId) return;
+    handle.executorBackendId = backendId;
+    handle.backendId = backendId;
+    if (handle.executionProfile) {
+      handle.executionProfile = { ...handle.executionProfile, backendId };
+    }
+    handle.backendSession = undefined;
+    handle.backendRuntime = undefined;
+    handle.effectiveProfile = undefined;
   }
 
   private async acknowledgeMailboxDelivery(handle: WorkerHandle): Promise<void> {
@@ -3338,6 +3533,11 @@ export class WorkerScheduler {
     const mailbox = this.opts.taskMailbox;
     const session = handle.session;
     if (!mailbox || !session || handle.status !== 'running') return false;
+    // Terminal workers auto-complete via the Stop-hook marker path and never
+    // emit ended(completed)/failed(missing-work-report) themselves; a recovery
+    // prompt here would be pasted into the TUI and a rework would kill the
+    // pty. Skip both - the confirm bar remains the human fallback.
+    if (handle.backendId === TERMINAL_WORKER_BACKEND_ID) return false;
     if (this.hasWorkReportRecovery(handle)) return false;
 
     const message = await mailbox.enqueue({
@@ -3382,6 +3582,7 @@ export class WorkerScheduler {
   private async beginReportRecoveryRework(handle: WorkerHandle): Promise<boolean> {
     if (handle.reportRecoveryReworked) return false;
     if (handle.status !== 'running') return false;
+    if (handle.backendId === TERMINAL_WORKER_BACKEND_ID) return false;
     const mailbox = this.opts.taskMailbox;
     if (!mailbox) return false;
     handle.reportRecoveryReworked = true;
@@ -3450,6 +3651,7 @@ export class WorkerScheduler {
     authorityRequest?: PlanMeetingTask['authorityRequest'];
     dependencyGate?: 'reviewed' | 'accepted';
     budget?: TaskBudget;
+    priority?: number;
     approvalDecisionId?: string;
     approvalRecordedAt?: number;
     approvedPlanVersion?: number;
@@ -3470,6 +3672,7 @@ export class WorkerScheduler {
       dependencyGate: spec.dependencyGate ?? 'accepted',
       budget: structuredClone(spec.budget ?? DEFAULT_TASK_BUDGET),
       budgetAttempts: [],
+      priority: spec.priority ?? 0,
       budgetPauseReason: undefined,
       authorityGrant: undefined,
       approvalDecisionId: spec.approvalDecisionId,
@@ -3513,6 +3716,8 @@ export class WorkerScheduler {
       deliveryId: null,
       stallNotified: false,
       stallNudged: false,
+      stallAutoRestarted: false,
+      pendingAskCount: 0,
       authorityDenyStreak: 0,
       lastAuthorityDenyFingerprint: undefined,
     };
@@ -3666,6 +3871,8 @@ export class WorkerScheduler {
     handle.eventSeq = 0;
     handle.stallNotified = false;
     handle.stallNudged = false;
+    handle.stallNotifiedTs = undefined;
+    handle.stallAutoRestarted = false;
     if (handle.flushTimer) {
       clearTimeout(handle.flushTimer);
       handle.flushTimer = null;
@@ -3681,6 +3888,11 @@ export class WorkerScheduler {
       // Parked delivery statuses must not consume concurrency even if a
       // session pointer leaked; releaseWorkerSession is the primary free path.
       if (PARKED_SLOT_STATUSES.has(handle.status)) continue;
+      // A running worker suspended on an unanswered ask-user card does no work
+      // (its canUseTool promise hangs), so it yields its slot. On resolution
+      // the count may briefly exceed the cap - a deliberate soft overrun,
+      // never preempted, and bounded by the permission fail-closed timeout.
+      if (handle.status === 'running' && (handle.pendingAskCount ?? 0) > 0) continue;
       if (['accepted', 'failed', 'interrupted', 'done', 'budget-paused'].includes(handle.status)) {
         continue;
       }
@@ -3912,7 +4124,16 @@ export class WorkerScheduler {
     }
     if (ready.length > 1) {
       const weights = this.computeBlockedDescendants();
-      ready.sort((a, b) => (weights.get(b.id) ?? 0) - (weights.get(a.id) ?? 0));
+      // Rework/retry attempts (attempt > 1) get a large priority boost so a
+      // task bounced back to pending is never starved by a stream of fresh
+      // same-weight tasks — it already consumed budget and blocks acceptance.
+      // Plan-declared priority (-10..10) sits between: it outranks DAG fanout
+      // but never a rework attempt.
+      const dispatchWeight = (handle: WorkerHandle): number =>
+        (weights.get(handle.id) ?? 0)
+        + (handle.priority ?? 0) * 100
+        + (handle.attempt > 1 ? 1000 : 0);
+      ready.sort((a, b) => dispatchWeight(b) - dispatchWeight(a));
     }
     for (const handle of ready) {
       if (this.countRunning() >= this.maxConcurrentWorkers) break;
@@ -3983,7 +4204,7 @@ export class WorkerScheduler {
         this.emitCoordinatorBriefing({
           kind: 'capacity',
           title: 'Worker 容量已满',
-          summary: `${waiting} 个任务正在等待执行名额；当前任务不会被抢占。`,
+          summary: `${waiting} 个任务正在等待执行名额；当前任务不会被抢占。等待审批或已挂起的任务不占名额；审批通过后短暂超额属于预期行为。`,
           recommendedAction: 'continue',
           capacity: { running, limit: this.maxConcurrentWorkers, waiting },
         });
@@ -4164,6 +4385,9 @@ export class WorkerScheduler {
         sessionOptions: {
           systemPrompt: { type: 'preset', preset: 'claude_code', append: promptAppend },
           mcpServers,
+          // Terminal-mode adapters key their pty on the worker id so the
+          // renderer stage terminal can attach; SDK adapters ignore it.
+          workerId: handle.id,
           ...(handle.backendSession?.sessionId
             ? { resumeSessionId: handle.backendSession.sessionId }
             : {}),
@@ -4186,6 +4410,7 @@ export class WorkerScheduler {
       handle.live.lastUpdateTs = Date.now();
       handle.stallNotified = false;
       handle.stallNudged = false;
+      handle.stallNotifiedTs = undefined;
       this.startStallWatch();
       const session = handle.session;
       await session.start();
@@ -4206,9 +4431,12 @@ export class WorkerScheduler {
       const mailboxLine = initialMailboxMessage
         ? `\n\n(follow-up attempt ${handle.attempt}) ${this.messageText(initialMailboxMessage)}`
         : '';
+      const terminalSuffix = handle.backendId === TERMINAL_WORKER_BACKEND_ID
+        ? TERMINAL_WORKER_COMPLETION_INSTRUCTION
+        : '';
       try {
         session.sendUserText(
-          `${handle.contextPackage ? firstMessage : handle.prompt + peerLine}${mailboxLine}`,
+          `${handle.contextPackage ? firstMessage : handle.prompt + peerLine}${mailboxLine}${terminalSuffix}`,
         );
         if (initialMailboxMessage && this.opts.taskMailbox) {
           await this.opts.taskMailbox.markDelivered(handle.id, initialMailboxMessage.id);

@@ -1,14 +1,20 @@
-import { query, type Query, type SDKMessage, type SDKUserMessage, type CanUseTool, type PermissionResult, type Options } from '@anthropic-ai/claude-agent-sdk';
+import {
+  query as defaultQuery,
+  type ClaudeCliQuery,
+  type ClaudeCliQueryFactory,
+} from './claude-cli/driver.js';
+import type {
+  CanUseTool,
+  PermissionResult,
+  SDKMessage,
+  SDKUserMessage,
+  SessionOptions,
+} from './claude-cli/types.js';
 import { mergedSubprocessEnv } from './settings-loader.js';
 import { errorMessage, redactSecrets } from './format-error.js';
 import { classifyToolRisk, type AutoApproveScope } from './auto-approve-policy.js';
 import { randomUUID } from 'node:crypto';
 import type { WorkerAdapterSignal } from './worker-protocol.js';
-import { existsSync } from 'node:fs';
-import { createRequire } from 'node:module';
-import { dirname, join } from 'node:path';
-
-const require_ = createRequire(import.meta.url);
 
 function isClaudeAuthError(message: string): boolean {
   return /authentication[_\s-]?failed|unauthorized|\b401\b|please (?:log|sign) in|auth(?:entication)? required/i.test(message);
@@ -24,48 +30,6 @@ async function withTimeout<T>(promise: Promise<T>, ms: number, message: string):
   } finally {
     if (timer) clearTimeout(timer);
   }
-}
-
-function unpackify(p: string): string {
-  return p.replace(/[\\/]app\.asar[\\/]/, (_, sep) => `${sep}app.asar.unpacked${sep}`);
-}
-
-function resolveClaudeBinary(): string | undefined {
-  const platform = process.platform;
-  const arch = process.arch === 'x64' ? `${platform}-x64` : `${platform}-arm64`;
-  const subpkg = `@anthropic-ai/claude-agent-sdk-${arch}/claude`;
-  const packageName = `@anthropic-ai/claude-agent-sdk-${arch}`;
-  const executableName = platform === 'win32' ? 'claude.exe' : 'claude';
-
-  try {
-    const packageJson = require_.resolve(`${packageName}/package.json`);
-    const p = unpackify(join(dirname(packageJson), executableName));
-    if (existsSync(p)) return p;
-  } catch { /* fall through */ }
-
-  // 1. Try resolving from the SDK package's own location (handles nested install).
-  try {
-    const sdkPkg = require_.resolve('@anthropic-ai/claude-agent-sdk/package.json');
-    const sdkRequire = createRequire(sdkPkg);
-    const p = unpackify(sdkRequire.resolve(subpkg));
-    if (existsSync(p)) return p;
-  } catch { /* fall through */ }
-
-  // 2. Try direct resolve from our own context (hoisted install case).
-  try {
-    const p = unpackify(require_.resolve(subpkg));
-    if (existsSync(p)) return p;
-  } catch { /* fall through */ }
-
-  // 3. Walk known unpacked-resource paths as a last resort.
-  const guesses = [
-    process.resourcesPath && `${process.resourcesPath}/app.asar.unpacked/node_modules/@anthropic-ai/claude-agent-sdk/node_modules/${subpkg}`,
-    process.resourcesPath && `${process.resourcesPath}/app.asar.unpacked/node_modules/${subpkg}`,
-  ].filter((x): x is string => !!x);
-  for (const g of guesses) {
-    if (existsSync(g)) return g;
-  }
-  return undefined;
 }
 
 type PermissionPending = {
@@ -102,7 +66,7 @@ export type ConfirmDestructive = (
 ) => Promise<boolean>;
 
 export class ClaudeSession {
-  private q: Query | null = null;
+  private q: ClaudeCliQuery | null = null;
   // Three FIFO buckets, drained strictly high → normal → low so worker
   // progress can never starve a user utterance. See InputPriority for why.
   private highQueue: SDKUserMessage[] = [];
@@ -113,7 +77,7 @@ export class ClaudeSession {
   private pendingPerms = new Map<string, PermissionPending>();
   private emit: (e: SessionEvent) => void;
   private cwd: string;
-  private sessionOptions: Partial<Options>;
+  private sessionOptions: SessionOptions;
   private envOverride: NodeJS.ProcessEnv | undefined;
   // Trust-mode scope. Controls which tools are silently approved:
   //   'off'  → all tools go through the permission flow (default)
@@ -128,13 +92,13 @@ export class ClaudeSession {
   // attached to the failing assistant message and shown in the renderer.
   private stderrRing: string[] = [];
   private authRequiredEmitted = false;
-  private queryFactory: typeof query;
+  private queryFactory: ClaudeCliQueryFactory;
   private sessionId: string | null = null;
 
   constructor(opts: {
     emit: (e: SessionEvent) => void;
     cwd: string;
-    sessionOptions?: Partial<Options>;
+    sessionOptions?: SessionOptions;
     autoApproveScope?: AutoApproveScope;
     /** Process env to feed into the worker subprocess. Overrides
      *  mergedSubprocessEnv() — used to redirect HOME at the merged
@@ -146,8 +110,8 @@ export class ClaudeSession {
      *  destructive tools under auto-approve fall back to the renderer
      *  permission-request path. */
     confirmDestructive?: ConfirmDestructive;
-    /** Test/runtime seam for the official SDK query constructor. */
-    queryFactory?: typeof query;
+    /** Test/runtime seam for the CLI query constructor. */
+    queryFactory?: ClaudeCliQueryFactory;
   }) {
     this.emit = opts.emit;
     this.cwd = opts.cwd;
@@ -155,7 +119,7 @@ export class ClaudeSession {
     this.autoApproveScope = opts.autoApproveScope ?? 'off';
     this.envOverride = opts.envOverride;
     this.confirmDestructive = opts.confirmDestructive;
-    this.queryFactory = opts.queryFactory ?? query;
+    this.queryFactory = opts.queryFactory ?? defaultQuery;
   }
 
   /** Toggle auto-approve scope live. Affects subsequent canUseTool calls only. */
@@ -208,14 +172,10 @@ export class ClaudeSession {
       });
     };
 
-    const binPath = resolveClaudeBinary();
-    if (!binPath) {
-      const error = new Error('Claude CLI binary not found inside the app bundle. Check app.asar.unpacked.');
-      this.emit({ kind: 'error', error: error.message });
-      this.emit({ kind: 'ended' });
-      throw error;
-    }
     try {
+      // The driver resolves the user's local claude CLI itself and throws
+      // synchronously when it is missing — the catch below reports that the
+      // same way the old bundled-binary check did.
       this.q = this.queryFactory({
         prompt: this.createInputIterable(),
         options: {
@@ -223,24 +183,23 @@ export class ClaudeSession {
           canUseTool,
           permissionMode: 'default',
           env: this.envOverride ?? mergedSubprocessEnv(),
-          includePartialMessages: false,
           stderr: (data: string) => {
             // Redact at the source so the ring, the derived errorDetail, and
             // this log line can never carry the API key / auth headers (the
-            // gateway or a debug-logging SDK may echo them on failure).
+            // gateway or a debug-logging CLI may echo them on failure).
             const safe = redactSecrets(data);
             this.stderrRing.push(safe);
             if (this.stderrRing.length > 40) this.stderrRing.shift();
             console.error('[claude-cli:stderr]', safe);
           },
-          pathToClaudeCodeExecutable: binPath,
           // Load user/project/local settings so the worker picks up the
           // developer's installed subagents (~/.claude/agents/*.md), hooks
-          // (~/.claude/settings.json → hooks), and MCP servers.
+          // (~/.claude/settings.json → hooks), and MCP servers — and, above
+          // all, the user's own ~/.claude login state.
           settingSources: ['user', 'project', 'local'],
           // Skills are NOT auto-enabled by settingSources — omitting `skills`
-          // means "CLI defaults apply", which in embedded SDK mode is off.
-          // 'all' opts every discovered skill in (both user-level and
+          // means "CLI defaults apply", which in embedded stream-json mode is
+          // off. 'all' opts every discovered skill in (both user-level and
           // plugin-qualified). Talker overrides this with `skills: []` since
           // it has no real tools.
           skills: 'all',
@@ -250,7 +209,7 @@ export class ClaudeSession {
     } catch (err: unknown) {
       const detail = errorMessage(err);
       if (isClaudeAuthError(detail)) this.emitAuthRequired();
-      else this.emit({ kind: 'error', error: `query() init failed: ${detail} (bin=${binPath})` });
+      else this.emit({ kind: 'error', error: `claude CLI init failed: ${detail}` });
       this.emit({ kind: 'ended' });
       throw err;
     }
@@ -310,7 +269,7 @@ export class ClaudeSession {
 
     try {
       const initialization = await withTimeout(
-        this.q.initializationResult(), 15_000, 'Claude SDK readiness handshake timed out',
+        this.q.initializationResult(), 15_000, 'Claude CLI readiness handshake timed out',
       );
       const account = initialization.account;
       if (
@@ -400,16 +359,17 @@ export class ClaudeSession {
       r?.({ value: undefined as any, done: true });
     }
 
-    // Tell the SDK to stop streaming. interrupt() is async but we don't await —
-    // the for-await loop will exit on its own and the finally clears `emit`.
+    // Tell the CLI to stop streaming, then kill the process — end() is a
+    // teardown path and the child must not linger with stdin held open.
     if (this.q) {
       this.q.interrupt().catch(() => { /* ignore */ });
+      try { this.q.close(); } catch { /* ignore */ }
     }
   }
 
   snapshot(): { protocol: string; sessionId: string } | null {
     return this.sessionId
-      ? { protocol: 'claude-agent-sdk', sessionId: this.sessionId }
+      ? { protocol: 'claude-cli', sessionId: this.sessionId }
       : null;
   }
 

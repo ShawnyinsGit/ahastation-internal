@@ -8,7 +8,7 @@
 // Returns a handle so the orchestrator can abort the recap if the user
 // presses interrupt after `end()` was called.
 
-import { query } from '@anthropic-ai/claude-agent-sdk';
+import { query } from './claude-cli/driver.js';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { appendEntry } from './memory.js';
@@ -116,7 +116,6 @@ async function runRecap(
       skills: [],
       settingSources: [],
       permissionMode: 'default',
-      includePartialMessages: false,
       env,
     },
   });

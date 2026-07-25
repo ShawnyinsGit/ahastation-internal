@@ -3,7 +3,9 @@ import test from 'node:test';
 
 import {
   assessWorkerRuntime,
+  assessConfiguredWorkerRuntime,
   extractRuntimeVersion,
+  resolveWorkerExpectedVersion,
 } from '../dist-electron/backends/worker-runtime-contract.js';
 
 test('runtime versions are extracted from common CLI output', () => {
@@ -44,4 +46,38 @@ test('Worker runtime becomes available only at the tested version with authentic
     assert.equal(result.state, 'available', backendId);
     assert.equal(result.expectedVersion, version, backendId);
   }
+});
+
+test('system Claude Code CLI accepts the probed version instead of the bundled pin', () => {
+  assert.equal(
+    resolveWorkerExpectedVersion('claude-code', '2.1.215', { claudeCodeCliSource: 'system' }),
+    '2.1.215',
+  );
+  assert.equal(
+    resolveWorkerExpectedVersion('claude-code', '2.1.215', { claudeCodeCliSource: 'bundled' }),
+    '2.1.150',
+  );
+  const result = assessWorkerRuntime({
+    backendId: 'claude-code',
+    installed: true,
+    implementationEnabled: true,
+    authenticated: true,
+    version: '2.1.215',
+    expectedVersionOverride: '2.1.215',
+  });
+  assert.equal(result.state, 'available');
+  assert.equal(result.expectedVersion, '2.1.215');
+});
+
+test('assessConfiguredWorkerRuntime accepts system Claude versions at dispatch time', () => {
+  const result = assessConfiguredWorkerRuntime({
+    backendId: 'claude-code',
+    installed: true,
+    implementationEnabled: true,
+    authenticated: true,
+    version: '2.1.215',
+    claudeCodeCliSource: 'system',
+  });
+  assert.equal(result.state, 'available');
+  assert.equal(result.expectedVersion, '2.1.215');
 });

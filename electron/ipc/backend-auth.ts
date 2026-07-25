@@ -14,17 +14,25 @@ import {
   removeBackendAuth,
   setDefaultBackend,
   getSettings,
+  updateSettings,
   listCustomBackends,
   addCustomBackend,
   updateCustomBackend,
   removeCustomBackend,
 } from '../store.js';
 import {
-  assessWorkerRuntime,
+  assessConfiguredWorkerRuntime,
   probeWorkerRuntimeVersion,
   FIRST_RELEASE_STABLE_WORKERS,
 } from '../backends/worker-runtime-contract.js';
+import {
+  getClaudeCodeCliSource,
+  resolveClaudeBundledBinary,
+  resolveClaudeCliBinary,
+  type ClaudeCodeCliSource,
+} from '../claude-cli/resolve.js';
 import { getBackendRegistry, registerCustomBackends } from '../backends/registry.js';
+import { resolveDefaultWorkerBackendId } from '../worker-backend-default.js';
 import { augmentedPath } from '../backends/subprocess-backend.js';
 import { isolatedSubprocessEnv } from '../backends/backend-environment.js';
 import type { BackendAuthEntry } from '../store.js';
@@ -87,6 +95,13 @@ export function registerBackendAuthIpc(): void {
     const registry = getBackendRegistry();
     const authEntries = listBackendAuth();
     const defaultBackend = getSettings().defaultBackend ?? 'claude-code';
+    const claudeCodeCliSource = getClaudeCodeCliSource();
+    const defaultWorkerBackendId = getSettings().defaultWorkerBackendId ?? null;
+    const effectiveDefaultWorkerBackendId = resolveDefaultWorkerBackendId(defaultBackend);
+    const bundledClaudePath = resolveClaudeBundledBinary();
+    const systemClaudePath = resolveClaudeCliBinary();
+    const bundledClaudeVersion = probeWorkerRuntimeVersion('claude-code', bundledClaudePath);
+    const systemClaudeVersion = probeWorkerRuntimeVersion('claude-code', systemClaudePath);
 
     const result = await Promise.all(registry.listWithStatus().map(async ({ backend, available, binaryPath }) => {
       const auth = authEntries.find((e) => e.backendId === backend.id);
@@ -95,7 +110,7 @@ export function registerBackendAuthIpc(): void {
         try { loggedIn = (await backend.checkAuthStatus()).loggedIn; } catch { loggedIn = false; }
       }
       const version = probeWorkerRuntimeVersion(backend.id, binaryPath);
-      const runtime = assessWorkerRuntime({
+      const runtime = assessConfiguredWorkerRuntime({
         backendId: backend.id,
         installed: available,
         implementationEnabled: backend.capabilities.executeTasks,
@@ -103,6 +118,7 @@ export function registerBackendAuthIpc(): void {
           backend.id === 'opencode' && (auth?.authMode ?? 'none') === 'none'
         ),
         version,
+        ...(backend.id === 'claude-code' ? { claudeCodeCliSource } : {}),
       });
       return {
         id: backend.id,
@@ -129,6 +145,15 @@ export function registerBackendAuthIpc(): void {
         workerRuntimeReason: runtime.reason,
         version: runtime.version,
         expectedVersion: runtime.expectedVersion,
+        claudeCodeCliSource: backend.id === 'claude-code' ? claudeCodeCliSource : null,
+        defaultWorkerBackendId: backend.id === 'claude-code' ? defaultWorkerBackendId : null,
+        effectiveDefaultWorkerBackendId: backend.id === 'claude-code'
+          ? effectiveDefaultWorkerBackendId
+          : null,
+        bundledClaudeVersion: backend.id === 'claude-code' ? bundledClaudeVersion : null,
+        systemClaudeVersion: backend.id === 'claude-code' ? systemClaudeVersion : null,
+        bundledClaudeAvailable: backend.id === 'claude-code' ? bundledClaudePath !== null : null,
+        systemClaudeAvailable: backend.id === 'claude-code' ? systemClaudePath !== null : null,
         customAvatar: auth?.customAvatar ?? null,
         workerReleaseTier: backend.capabilities.executeTasks
           ? (FIRST_RELEASE_STABLE_WORKERS.has(backend.id) ? 'stable' : 'experimental')
@@ -293,6 +318,42 @@ export function registerBackendAuthIpc(): void {
     }
     try {
       await setBackendAuth(backendId, { customAvatar: dataUrl ?? undefined });
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  /** Choose bundled vs system Claude Code CLI for worker execution. */
+  ipcMain.handle('backend-auth:set-claude-cli-source', async (_e, source: unknown) => {
+    if (source !== 'bundled' && source !== 'system') {
+      return { ok: false, error: 'source must be "bundled" or "system"' };
+    }
+    if (source === 'bundled' && !resolveClaudeBundledBinary()) {
+      return { ok: false, error: 'bundled Claude Code CLI is not available on this platform' };
+    }
+    if (source === 'system' && !resolveClaudeCliBinary()) {
+      return { ok: false, error: 'no Claude Code CLI found on PATH' };
+    }
+    try {
+      await updateSettings({ claudeCodeCliSource: source as ClaudeCodeCliSource });
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  /** Default executor backend for worker tasks (claude-code vs claude-code-terminal). */
+  ipcMain.handle('backend-auth:set-default-worker-backend', async (_e, backendId: unknown) => {
+    if (backendId !== 'claude-code' && backendId !== 'claude-code-terminal') {
+      return { ok: false, error: 'backendId must be "claude-code" or "claude-code-terminal"' };
+    }
+    const backend = getBackendRegistry().get(backendId);
+    if (!backend?.capabilities.executeTasks) {
+      return { ok: false, error: `backend '${backendId}' cannot execute worker tasks` };
+    }
+    try {
+      await updateSettings({ defaultWorkerBackendId: backendId });
       return { ok: true };
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) };

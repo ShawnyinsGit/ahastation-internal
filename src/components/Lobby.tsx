@@ -235,6 +235,24 @@ export function Lobby({ lastError }: LobbyProps) {
     }
   }, [reloadBackends]);
 
+  const setClaudeCliSource = useCallback(async (source: 'bundled' | 'system') => {
+    const res = await window.vibeMeet.backendAuth.setClaudeCliSource(source);
+    if (!res.ok) {
+      toast.error(res.error ?? '切换 Claude CLI 来源失败');
+      return;
+    }
+    await reloadBackends();
+  }, [reloadBackends]);
+
+  const setDefaultWorkerBackend = useCallback(async (backendId: 'claude-code' | 'claude-code-terminal') => {
+    const res = await window.vibeMeet.backendAuth.setDefaultWorkerBackend(backendId);
+    if (!res.ok) {
+      toast.error(res.error ?? '切换 Worker 执行模式失败');
+      return;
+    }
+    await reloadBackends();
+  }, [reloadBackends]);
+
   const installBackend = useCallback(async (backendId: string) => {
     if (installing) return;
     setInstalling(backendId);
@@ -328,6 +346,48 @@ export function Lobby({ lastError }: LobbyProps) {
                   ))}
                 </select>
               </div>
+
+              {currentBackend?.id === 'claude-code' && currentBackend.available && (
+                <div className="join-auth-block">
+                  <div className="join-auth-block-title">Claude Code CLI 来源</div>
+                  <select
+                    className="join-auth-input join-auth-input-full lobby-backend-select"
+                    value={currentBackend.claudeCodeCliSource ?? 'system'}
+                    onChange={(e) => { void setClaudeCliSource(e.target.value as 'bundled' | 'system'); }}
+                  >
+                    <option value="system" disabled={currentBackend.systemClaudeAvailable === false}>
+                      系统 PATH {currentBackend.systemClaudeVersion ? `(v${currentBackend.systemClaudeVersion})` : currentBackend.systemClaudeAvailable ? '(已安装)' : '(未找到)'}
+                    </option>
+                    <option value="bundled" disabled={currentBackend.bundledClaudeAvailable === false}>
+                      内置版本 {currentBackend.bundledClaudeVersion ? `(v${currentBackend.bundledClaudeVersion})` : currentBackend.bundledClaudeAvailable ? '(已安装)' : '(不可用)'}
+                    </option>
+                  </select>
+                  <div className="join-auth-hint">
+                    {currentBackend.workerRuntimeState === 'version-incompatible'
+                      ? currentBackend.workerRuntimeReason
+                      : '系统 PATH 使用你本机安装的 Claude Code；内置版本为应用自带的已验证版本。'}
+                  </div>
+                </div>
+              )}
+
+              {currentBackend?.id === 'claude-code' && currentBackend.available && (
+                <div className="join-auth-block">
+                  <div className="join-auth-block-title">Worker 执行模式</div>
+                  <select
+                    className="join-auth-input join-auth-input-full lobby-backend-select"
+                    value={currentBackend.defaultWorkerBackendId ?? 'claude-code-terminal'}
+                    onChange={(e) => {
+                      void setDefaultWorkerBackend(e.target.value as 'claude-code' | 'claude-code-terminal');
+                    }}
+                  >
+                    <option value="claude-code-terminal">终端 TUI（RealTerminal）</option>
+                    <option value="claude-code">无头 Worker</option>
+                  </select>
+                  <div className="join-auth-hint">
+                    {'终端模式在 Stage → Terminal 标签中显示可交互的 Claude TUI；无头模式在后台执行，仅回放命令日志。'}
+                  </div>
+                </div>
+              )}
 
               {/* Auth fields for selected backend */}
               {currentBackend?.available ? (
@@ -458,7 +518,10 @@ export function Lobby({ lastError }: LobbyProps) {
                         <div className="join-auth-error">{loginError || 'Login failed.'}</div>
                       )}
                       <div className="join-auth-hint">
-                        Opens a browser window for OAuth. Requires {currentBackend.displayName} CLI {currentBackend.id === 'claude-code' ? 'bundled with this app' : 'installed'}.
+                        Opens a browser window for OAuth. Requires {currentBackend.displayName} CLI
+                        {currentBackend.id === 'claude-code'
+                          ? (currentBackend.claudeCodeCliSource === 'bundled' ? ' bundled with this app' : ' on your PATH')
+                          : ' installed'}.
                       </div>
                     </div>
                   )}
@@ -564,6 +627,20 @@ export function Lobby({ lastError }: LobbyProps) {
                           {backend.version ?? '版本未知'}
                           {backend.expectedVersion ? ` / 验证版本 ${backend.expectedVersion}` : ''}
                         </small>
+                        {backend.id === 'claude-code' && backend.workerRuntimeState === 'version-incompatible' && (
+                          <select
+                            className="lobby-backend-select"
+                            value={backend.claudeCodeCliSource ?? 'system'}
+                            onChange={(e) => { void setClaudeCliSource(e.target.value as 'bundled' | 'system'); }}
+                          >
+                            <option value="system" disabled={backend.systemClaudeAvailable === false}>
+                              系统 PATH {backend.systemClaudeVersion ? `(v${backend.systemClaudeVersion})` : '(已安装)'}
+                            </option>
+                            <option value="bundled" disabled={backend.bundledClaudeAvailable === false}>
+                              内置 {backend.bundledClaudeVersion ? `(v${backend.bundledClaudeVersion})` : '(已安装)'}
+                            </option>
+                          </select>
+                        )}
                         {backend.workerRuntimeState !== 'available' && (
                           <button
                             type="button"

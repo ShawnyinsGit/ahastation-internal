@@ -657,6 +657,59 @@ export interface WorkerEventV2 {
   payload: WorkerAdapterSignal;
 }
 
+/** Mirrors electron/delivery-diff.ts — kept in sync by hand. */
+export type DeliveryDiffFileStatus =
+  | 'added'
+  | 'modified'
+  | 'deleted'
+  | 'renamed'
+  | 'mode-changed';
+
+export type DeliveryDiffEvidenceKind =
+  | 'text'
+  | 'binary'
+  | 'oversized'
+  | 'secret-withheld'
+  | 'symlink'
+  | 'submodule'
+  | 'mode-only';
+
+export interface DeliveryDiffChunk {
+  id: string;
+  index: number;
+  path: string;
+  kind: DeliveryDiffEvidenceKind;
+  hash: string;
+  lineCount: number;
+  byteLength: number;
+  content?: string;
+  requiresUserConfirmation: boolean;
+}
+
+export interface DeliveryDiffFile {
+  path: string;
+  previousPath?: string;
+  status: DeliveryDiffFileStatus;
+  additions: number | null;
+  deletions: number | null;
+  oldMode: string | null;
+  newMode: string | null;
+  kind: DeliveryDiffEvidenceKind;
+  chunkIds: string[];
+  requiresUserConfirmation: boolean;
+}
+
+export interface DeliveryDiffManifest {
+  schemaVersion: 1;
+  baseRevision: string;
+  candidateRevision: string;
+  diffHash: string;
+  files: DeliveryDiffFile[];
+  chunks: DeliveryDiffChunk[];
+  totalAdditions: number;
+  totalDeletions: number;
+}
+
 export interface DeliveryView {
   id: string;
   meetingId: string;
@@ -712,10 +765,32 @@ export interface DeliveryView {
     report: WorkReport;
     verification: { passed: boolean; checks: unknown[]; error?: string };
     review: { passed: boolean; findings: unknown[] };
+    /** Frozen candidate with the hash-bound diff manifest — present once Coordinator review passes. */
+    frozen?: {
+      schemaVersion: 1;
+      id: string;
+      deliveryId: string;
+      taskId?: string;
+      attempt: number;
+      workspace: string;
+      baseRevision: string;
+      commit: string;
+      tree: string;
+      reportHash: string;
+      verificationHash: string;
+      diffHash: string;
+      reportedPaths: string[];
+      createdAt: number;
+      manifest: DeliveryDiffManifest;
+    };
     /** True explore / verbal findings — no code paths to freeze. */
     reportOnly?: boolean;
     /** Freeze failed with file changes — Accept must not stage Meeting acceptance. */
     freezeDeferred?: boolean;
+    reviewSession?: {
+      id: string;
+      reviewHash: string;
+    };
   };
   integration?: Record<string, unknown>;
   error?: string;
@@ -915,6 +990,20 @@ export interface BackendInfo {
   workerRuntimeReason: string;
   version: string | null;
   expectedVersion: string | null;
+  /** Active Claude Code CLI source when id is claude-code. */
+  claudeCodeCliSource?: 'bundled' | 'system' | null;
+  /** Persisted default worker executor when Host is claude-code. */
+  defaultWorkerBackendId?: 'claude-code' | 'claude-code-terminal' | null;
+  /** Resolved worker executor default (claude-code entry only). */
+  effectiveDefaultWorkerBackendId?: string | null;
+  /** Bundled Claude Code version (claude-code only). */
+  bundledClaudeVersion?: string | null;
+  /** System PATH Claude Code version (claude-code only). */
+  systemClaudeVersion?: string | null;
+  /** Whether the bundled Claude binary exists (claude-code only). */
+  bundledClaudeAvailable?: boolean | null;
+  /** Whether a system Claude binary exists on PATH (claude-code only). */
+  systemClaudeAvailable?: boolean | null;
   /** Custom avatar image as base64 data URL. */
   customAvatar: string | null;
   /** Release tier for the Worker contract. 'experimental' backends must be
@@ -941,6 +1030,8 @@ export interface BackendAuthApi {
   setMode: (backendId: string, mode: 'apikey' | 'oauth' | 'none') => Promise<{ ok: boolean; error?: string }>;
   setAvatar: (backendId: string, dataUrl: string | null) => Promise<{ ok: boolean; error?: string }>;
   setDefault: (backendId: string) => Promise<{ ok: boolean; error?: string }>;
+  setClaudeCliSource: (source: 'bundled' | 'system') => Promise<{ ok: boolean; error?: string }>;
+  setDefaultWorkerBackend: (backendId: 'claude-code' | 'claude-code-terminal') => Promise<{ ok: boolean; error?: string }>;
   checkStatus: (backendId: string) => Promise<{ ok: boolean; loggedIn: boolean; error?: string }>;
   loginOAuth: (backendId: string) => Promise<{ ok: boolean; error?: string }>;
   install: (backendId: string) => Promise<{ ok: boolean; error?: string }>;
@@ -1308,6 +1399,22 @@ export interface VibeMeetApi {
     input: (data: string) => Promise<{ ok: boolean; error?: string; dropped?: boolean }>;
     resize: (rows: number, cols: number) => Promise<{ ok: boolean; error?: string }>;
     close: () => Promise<{ ok: boolean; error?: string }>;
+  };
+  /** Terminal-mode worker PTY bridge (main window). Attach mirrors the
+   *  pty ring buffer + live output; input takes over the TUI keyboard. */
+  workerPty: {
+    attach: (workerId: string) => Promise<{ ok: boolean; error?: string; replay?: string }>;
+    input: (workerId: string, data: string) => Promise<{ ok: boolean; error?: string; dropped?: boolean }>;
+    resize: (workerId: string, rows: number, cols: number) => Promise<{ ok: boolean; error?: string }>;
+    detach: (workerId: string) => Promise<{ ok: boolean; error?: string }>;
+    confirmTask: (
+      sessionId: string | null,
+      workerId: string,
+      outcome: 'done' | 'failed',
+      summary: string,
+    ) => Promise<{ ok: boolean; error?: string }>;
+    onData: (cb: (e: { workerId: string; data: string }) => void) => () => void;
+    onExit: (cb: (e: { workerId: string; exitCode: number | null }) => void) => () => void;
   };
   /** Editor-window live panel state. Only exposed by the narrow editor
    *  preload (preload-editor.cjs) — absent from the main window's bridge. */

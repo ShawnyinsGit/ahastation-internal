@@ -26,6 +26,8 @@ import { FileViewer } from './FileViewer';
 import { BrowserStage } from './BrowserStage';
 import { StageTabBar } from './StageTabBar';
 import { TerminalPanel } from './TerminalPanel';
+import { RealTerminal } from './RealTerminal';
+import { WorkerWorkbench } from './WorkerWorkbench';
 import { ActivityTabContent } from './ActivityTabContent';
 import { DeliveryViewer } from './DeliveryViewer';
 import { TaskInspector } from './TaskInspector';
@@ -148,6 +150,16 @@ export const ScreenStage = memo(function ScreenStage({
     }
   }, [activeWindowId, onSelectWindow]);
 
+  /** Open the docked Task Inspector from the Worker Workbench without switching
+   *  the stage window away from the terminal - the TUI stays visible while the
+   *  dock expands below for deep review (diff / verification / permissions). */
+  const handleOpenInspectorFromWorkbench = useCallback((id: string) => {
+    setSelectedTaskId(id);
+    setInspectorOpenSeq((seq) => seq + 1);
+    setInspectorHeight(76);
+    setInspectorFullscreen(false);
+  }, []);
+
   const handleSelectParticipant = useCallback((id: string) => {
     setSelectedParticipantId(id);
     // Worker tiles double as the in-meeting task picker now that TaskRail is
@@ -190,6 +202,25 @@ export const ScreenStage = memo(function ScreenStage({
       onSelectWindow(ACTIVITY_TAB_ID);
     }
   }, [focusSeq, focusTaskId, activeWindowId, onSelectWindow]);
+
+  // Auto-open a stage terminal window when a terminal-mode worker spawns, so
+  // the human can supervise the TUI without manually clicking each worker
+  // card. Dedup by workerId so re-renders never reopen a window the user
+  // closed; only running workers qualify (a worker that already failed before
+  // we noticed it is left alone). backendId arrives with the first worker
+  // event (the adapter's "终端 Claude 已启动" progress), which is what makes
+  // the terminal-mode check reliable.
+  const autoOpenedTerminals = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    for (const w of workers) {
+      if (w.role !== 'worker') continue;
+      if (w.status !== 'running') continue;
+      if (w.backendId !== 'claude-code-terminal') continue;
+      if (autoOpenedTerminals.current.has(w.id)) continue;
+      autoOpenedTerminals.current.add(w.id);
+      void onCreateWindow('terminal', { workerId: w.id, title: w.title });
+    }
+  }, [workers, onCreateWindow]);
 
   const handleInspectorPointerDown = useCallback((event: React.PointerEvent<HTMLButtonElement>) => {
     dragState.current = { pointerId: event.pointerId, startY: event.clientY };
@@ -257,6 +288,23 @@ export const ScreenStage = memo(function ScreenStage({
     merged.sort((a, b) => a.startedAt - b.startedAt);
     return merged;
   }, [activeWindow, workers]);
+
+  // Terminal-mode workers get a live interactive pty instead of the replay.
+  const terminalPtyWorker = useMemo(() => {
+    if (activeWindow?.type !== 'terminal' || !activeWindow.workerId) return undefined;
+    const target = workers.find(
+      (w) => w.id === activeWindow.workerId || w.hostId === activeWindow.workerId,
+    );
+    return target?.backendId === 'claude-code-terminal' ? target : undefined;
+  }, [activeWindow, workers]);
+
+  // When the terminal worker's own delivery arrives, show it in the workbench
+  // sidebar instead of letting the global DeliveryViewer cover the stage - the
+  // TUI stays visible so the human can keep supervising.
+  const terminalOwnsDelivery = Boolean(
+    terminalPtyWorker && delivery?.workerId === terminalPtyWorker.id,
+  );
+  const stageDeliveryCovered = Boolean(delivery) && !terminalOwnsDelivery;
 
   const stageClass = share.active
     ? 'stage-sharing'
@@ -326,10 +374,10 @@ export const ScreenStage = memo(function ScreenStage({
                 onAccept={onAcceptFinalMeetingDelivery}
                 onRequestRework={onRequestFinalMeetingRework}
               />
-            ) : delivery ? (
+            ) : stageDeliveryCovered ? (
               <div className="stage-delivery-content">
                 <DeliveryViewer
-                  delivery={delivery}
+                  delivery={delivery!}
                   sessionId={sessionId}
                   aiSpeaking={aiSpeaking}
                   onAccept={onAcceptDelivery}
@@ -353,7 +401,7 @@ export const ScreenStage = memo(function ScreenStage({
               />
             )}
 
-            {!delivery && !finalMeetingDelivery && activeWindow?.type === 'browser' && browserViewportRef && onBrowserOpenTab && onBrowserCloseTab && onBrowserSetActive && onBrowserNavigate && onBrowserBack && onBrowserForward && onBrowserReload && (
+            {!stageDeliveryCovered && !finalMeetingDelivery && activeWindow?.type === 'browser' && browserViewportRef && onBrowserOpenTab && onBrowserCloseTab && onBrowserSetActive && onBrowserNavigate && onBrowserBack && onBrowserForward && onBrowserReload && (
               <div className="stage-browser-content">
                 <BrowserStage
                   tabs={browserTabs}
@@ -370,13 +418,23 @@ export const ScreenStage = memo(function ScreenStage({
               </div>
             )}
 
-            {!delivery && !finalMeetingDelivery && activeWindow?.type === 'terminal' && (
+            {!stageDeliveryCovered && !finalMeetingDelivery && activeWindow?.type === 'terminal' && (
               <div className="stage-terminal-content">
-                <TerminalPanel commands={terminalCommands} />
+                {terminalPtyWorker ? (
+                  <WorkerWorkbench
+                    workerId={terminalPtyWorker.id}
+                    sessionId={sessionId!}
+                    onOpenInspector={handleOpenInspectorFromWorkbench}
+                    onAcceptDelivery={onAcceptDelivery}
+                    onReviseDelivery={onReviseDelivery}
+                  />
+                ) : (
+                  <TerminalPanel commands={terminalCommands} />
+                )}
               </div>
             )}
 
-            {!delivery && !finalMeetingDelivery && activeWindow?.type === 'file' && activeWindow.filePath && (
+            {!stageDeliveryCovered && !finalMeetingDelivery && activeWindow?.type === 'file' && activeWindow.filePath && (
               <div className="stage-file-content">
                 <FileViewer
                   relativePath={activeWindow.filePath}

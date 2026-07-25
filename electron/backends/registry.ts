@@ -6,6 +6,7 @@
 
 import type { CliBackend, BackendAuthConfig } from './cli-backend.js';
 import { ClaudeCodeBackend } from './claude-code-adapter.js';
+import { ClaudeTerminalBackend } from './claude-terminal-adapter.js';
 import { CodexBackend } from './codex-adapter.js';
 import { KimiBackend } from './kimi-adapter.js';
 import { QoderBackend } from './qoder-adapter.js';
@@ -159,6 +160,7 @@ export function getBackendRegistry(confirmDestructive?: ConfirmDestructive): Bac
     instance = new BackendRegistry();
     // Register all known backends. Order determines default selection.
     instance.register(new ClaudeCodeBackend({ confirmDestructive }));
+    instance.register(new ClaudeTerminalBackend());
     instance.register(new CodexBackend());
     instance.register(new KimiBackend());
     instance.register(new QoderBackend());

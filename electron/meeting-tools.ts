@@ -50,6 +50,8 @@ const planMeetingTaskBaseShape = {
     .describe('Whether the Coordinator expects this task may need a user decision before completion.'),
   budget: taskBudgetSchema.optional()
     .describe('User-visible aggregate attempt, token, duration and stagnation limits.'),
+  priority: z.number().optional()
+    .describe('Dispatch priority, -10..10 (default 0). Higher runs earlier when slots are contended; out-of-range values are clamped.'),
 };
 
 /** Human-readable plan document shown before the ops/task DAG. */
@@ -130,6 +132,7 @@ export type PlanMeetingTaskInput = z.infer<typeof planMeetingTaskInputSchema>;
 
 export const planMeetingTaskSchema = z.object({
   ...planMeetingTaskBaseShape,
+  priority: z.number().int().min(-10).max(10).default(0),
   budget: taskBudgetSchema,
   dependencyGate: z.enum(['reviewed', 'accepted']).default('accepted'),
   executionProfile: taskExecutionProfileSchema,
@@ -309,9 +312,12 @@ export function normalizePlanMeetingTask(
   ) {
     throw new Error('executorBackendId must match executionProfile.backendId');
   }
-  const backendId = legacy.executorBackendId
-    ?? legacy.executionProfile?.backendId
-    ?? defaultBackendId.trim();
+  // Workers are forced to the TUI backend. Ignore any executorBackendId the
+  // host may have set in plan_meeting; defaultBackendId comes from
+  // resolveDefaultWorkerBackendId which forces 'claude-code-terminal' (or
+  // falls back to the host backend if terminal is unavailable, so validation
+  // surfaces a clear error instead of silently running headless).
+  const backendId = defaultBackendId.trim();
   if (!backendId) throw new Error('plan task requires a default execution Backend');
 
   const declaredWritePaths = legacy.authorityRequest?.writePaths
@@ -367,6 +373,9 @@ export function normalizePlanMeetingTask(
     prompt: legacy.prompt,
   });
   const dependencyGate = legacy.dependencyGate ?? inferredGate;
+  // Clamp instead of reject: an out-of-range priority from the Talker should
+  // degrade gracefully, never invalidate the whole plan.
+  const priority = Math.max(-10, Math.min(10, Math.round(legacy.priority ?? 0)));
   const gateNotes = [...(defaults.notes ?? [])];
   if (legacy.dependencyGate === undefined && dependencyGate === 'reviewed') {
     gateNotes.push('dependency gate reviewed (analysis / read-only)');
@@ -376,14 +385,16 @@ export function normalizePlanMeetingTask(
     deps: legacy.deps ?? [],
     executorBackendId: backendId,
     writePaths: authorityRequest.writePaths,
-    executionProfile: legacy.executionProfile ?? {
-      schemaVersion: 1,
-      backendId,
-      workMode: 'balanced',
-      contextMode,
-      timeoutMs: 1_800_000,
-      maxTokenBudget: 200_000,
-    },
+    executionProfile: legacy.executionProfile
+      ? { ...legacy.executionProfile, backendId }
+      : {
+          schemaVersion: 1,
+          backendId,
+          workMode: 'balanced',
+          contextMode,
+          timeoutMs: 1_800_000,
+          maxTokenBudget: 200_000,
+        },
     contextSelection: legacy.contextSelection ?? {
       mode: contextMode,
       messageIds: [],
@@ -395,6 +406,7 @@ export function normalizePlanMeetingTask(
     authorityRequest,
     budget: legacy.budget ?? DEFAULT_TASK_BUDGET,
     dependencyGate,
+    priority,
   });
   const wasLegacy = legacy.executionProfile === undefined
     || legacy.contextSelection === undefined
@@ -462,6 +474,8 @@ export const delegateToArgsSchema = {
 export const taskMessageArgsSchema = {
   taskId: z.string().trim().min(1).max(64),
   message: z.string().trim().min(1).max(100_000),
+  executorBackendId: z.string().trim().min(1).max(64).optional()
+    .describe('Optional backend override; only applies when the message starts a fresh attempt (task no longer running).'),
 };
 
 export const interruptTaskArgsSchema = {
@@ -506,6 +520,8 @@ export const completeDeliveryReviewArgsSchema = {
 export const requestDeliveryReworkArgsSchema = {
   reviewId: z.string().trim().min(1).max(500),
   findings: z.array(coordinatorReviewFindingSchema).min(1).max(100),
+  executorBackendId: z.string().trim().min(1).max(64).optional()
+    .describe('Optional backend override for the rework attempt. The provider session cannot be resumed across backends, so the new attempt starts fresh.'),
 };
 
 export const askHostArgsSchema = {

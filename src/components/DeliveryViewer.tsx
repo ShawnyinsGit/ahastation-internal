@@ -7,6 +7,7 @@ import {
   hostAcceptanceReason,
 } from '../lib/delivery-acceptance';
 import { FileContent, ViewState, basename } from './FileViewer';
+import { DeliveryDiffView } from './DeliveryDiffView';
 import { useAutoScroll } from '../hooks/useAutoScroll';
 
 interface DeliveryViewerProps {
@@ -53,7 +54,7 @@ export function DeliveryViewer({
   const [feedbackOpen, setFeedbackOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'summary' | 'files' | 'tests' | 'verification' | 'history'>('summary');
+  const [activeTab, setActiveTab] = useState<'summary' | 'diff' | 'files' | 'tests' | 'verification' | 'history'>('summary');
   const loadTokenRef = useRef(0);
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
@@ -166,8 +167,11 @@ export function DeliveryViewer({
   };
   const canReturn = delivery.status === 'awaiting-delivery-acceptance'
     || delivery.status === 'reworking';
+  const candidate = delivery.view?.candidate;
+  const diffManifest = candidate?.frozen?.manifest;
   const tabs = [
     ['summary', '摘要'],
+    ['diff', diffManifest ? `Diff ${diffManifest.files.length}` : 'Diff'],
     ['files', `文件 ${report?.files.length ?? files.length}`],
     ['tests', `测试 ${report?.tests.length ?? 0}`],
     ['verification', '校验'],
@@ -244,6 +248,31 @@ export function DeliveryViewer({
               </div>
             )}
           </section>
+        )}
+
+        {activeTab === 'diff' && (
+          diffManifest ? (
+            <DeliveryDiffView manifest={diffManifest} />
+          ) : (
+            <section className="delivery-evidence-panel">
+              <h3>代码差异</h3>
+              {delivery.status === 'coordinator-reviewing' ? (
+                <p className="delivery-live-state" aria-live="polite">
+                  Coordinator 正在审查冻结候选，通过后这里会展示逐文件差异。
+                </p>
+              ) : candidate?.reportOnly ? (
+                <p className="delivery-empty-copy">这是纯调研/口头结论类交付，没有代码改动可对比。</p>
+              ) : candidate?.freezeDeferred ? (
+                <p className="delivery-empty-copy">
+                  冻结失败（无法生成差异证据），请在「文件」页查看快照，或返回让 worker 重试。
+                </p>
+              ) : (
+                <p className="delivery-empty-copy">
+                  差异清单会在候选冻结并通过 Coordinator 审查后出现；当前阶段可先在「文件」页查看快照。
+                </p>
+              )}
+            </section>
+          )
         )}
 
         {activeTab === 'files' && (

@@ -344,6 +344,7 @@ async function registerAllIpc(ctx: IpcContext): Promise<void> {
     { registerIdeFilesIpc },
     { registerIdeRegistryIpc },
     { registerIdePtyIpc },
+    { registerWorkerPtyIpc },
     { registerDeviceDiagnosticsIpc },
     { registerMeetingDeliveryIpc },
     { registerCompanionIpc },
@@ -371,6 +372,7 @@ async function registerAllIpc(ctx: IpcContext): Promise<void> {
     import('./ipc/ide-files.js'),
     import('./ipc/ide-registry.js'),
     import('./ipc/ide-pty.js'),
+    import('./ipc/worker-pty.js'),
     import('./ipc/device-diagnostics.js'),
     import('./ipc/meeting-delivery.js'),
     import('./companion/companion-feed.js'),
@@ -399,6 +401,7 @@ async function registerAllIpc(ctx: IpcContext): Promise<void> {
   registerIdeFilesIpc();
   registerIdeRegistryIpc(ctx);
   registerIdePtyIpc(ctx);
+  registerWorkerPtyIpc(ctx);
   registerDeviceDiagnosticsIpc();
   registerMeetingDeliveryIpc(ctx);
   registerCompanionIpc(ctx);

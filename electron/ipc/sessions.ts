@@ -151,18 +151,14 @@ export function registerSessionsIpc(ctx: IpcContext): void {
       if (probe.auth === 'required') {
         return { ok: false, error: `backend '${selectedBackendId}' authentication is required` };
       }
-      // Wait for the launch-time shadow-home build the first time. After
-      // launch+1 s this resolves immediately; on a manifest-cached relaunch
-      // it's effectively instant.
-      const shadow = await ctx.awaitClaudeShadowHome();
-      const mergedEnv = mergedSubprocessEnv();
-      const workerEnv = shadow
-        ? { ...mergedEnv, HOME: shadow, USERPROFILE: shadow }
-        : undefined;
+      // Workers run with the user's real HOME so the local claude CLI sees
+      // its OAuth login state (~/.claude). The shadow tree still exists for
+      // bundled skills, but is no longer injected as the subprocess HOME.
+      const workerEnv = mergedSubprocessEnv();
       // The talker normally runs Haiku for latency; when the user points at a
       // custom gateway/model via ANTHROPIC_MODEL we honor it so the talker
       // doesn't request a model the gateway can't serve.
-      const talkerModel = mergedEnv.ANTHROPIC_MODEL || undefined;
+      const talkerModel = workerEnv.ANTHROPIC_MODEL || undefined;
 
       // Pre-bind sessionId into the emit closure so every event this
       // orchestrator emits is automatically routed to the right renderer slot.

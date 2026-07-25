@@ -5,7 +5,7 @@
 // Screenshot data is injected into the worker's input queue (same pattern as
 // computer-use) since PNG data is too large for MCP tool results.
 
-import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk';
+import { createSdkMcpServer, tool } from './claude-cli/inproc-mcp.js';
 import { z } from 'zod';
 import { BrowserTabManager } from './browser-tab-manager.js';
 
