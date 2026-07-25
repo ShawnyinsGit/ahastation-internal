@@ -118,14 +118,14 @@ export function registerSettingsIpc(): void {
   // window streams enrollment progress back on 'voicelock:enroll-state'.
   ipcMain.handle('voicelock:enroll-start', async () => {
     for (const wc of webContents.getAllWebContents()) {
-      wc.send('voicelock:enroll-cmd', { cmd: 'start' });
+      wc.send('voicelock:enroll-cmd', 'start');
     }
     return { ok: true };
   });
 
   ipcMain.handle('voicelock:enroll-cancel', async () => {
     for (const wc of webContents.getAllWebContents()) {
-      wc.send('voicelock:enroll-cmd', { cmd: 'cancel' });
+      wc.send('voicelock:enroll-cmd', 'cancel');
     }
     return { ok: true };
   });
