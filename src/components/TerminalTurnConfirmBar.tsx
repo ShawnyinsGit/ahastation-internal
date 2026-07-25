@@ -6,6 +6,10 @@ import type { WorkerState } from '../lib/meeting-store';
  *  「标记完成 / 继续指挥 / 标记失败」。完成时 host 合成最小 WorkReport 走
  *  现有 delivery 流水线。 */
 export const TERMINAL_TURN_ENDED_MARKER = '[terminal-turn-ended]';
+/** Mirror of electron/backends/claude-terminal-adapter.ts - the worker prints
+ *  this when it declares the task fully done; the confirm bar then shows a
+ *  "task complete" prompt instead of the generic turn-ended one. */
+export const TERMINAL_TASK_COMPLETE_MARKER = '[terminal-task-complete]';
 
 export function TerminalTurnConfirmBar({
   sessionId,
@@ -20,9 +24,11 @@ export function TerminalTurnConfirmBar({
   // 「继续指挥」只收起当前这一条；下一次 Stop 信号（eventSeq 前进）重新亮出。
   const [dismissedSeq, setDismissedSeq] = useState<number | null>(null);
 
-  const turnEnded = worker.status === 'running'
-    && (worker.lastText ?? '').startsWith(TERMINAL_TURN_ENDED_MARKER);
-  if (!turnEnded || dismissedSeq === (worker.eventSeq ?? 0)) return null;
+  const lastText = worker.lastText ?? '';
+  const taskComplete = lastText.startsWith(TERMINAL_TASK_COMPLETE_MARKER);
+  const turnEnded = lastText.startsWith(TERMINAL_TURN_ENDED_MARKER);
+  const showBar = worker.status === 'running' && (taskComplete || turnEnded);
+  if (!showBar || dismissedSeq === (worker.eventSeq ?? 0)) return null;
 
   const confirm = async (outcome: 'done' | 'failed') => {
     const text = summary.trim() || (outcome === 'done' ? '用户在终端中确认任务完成。' : '用户在终端中标记任务失败。');
@@ -41,8 +47,8 @@ export function TerminalTurnConfirmBar({
   return (
     <div className="terminal-turn-confirm" role="status">
       <div className="terminal-turn-confirm-title">
-        <strong>本轮已结束</strong>
-        <small>Claude 在终端中完成了一轮对话，请确认任务去向。</small>
+        <strong>{taskComplete ? '任务已完成' : '本轮已结束'}</strong>
+        <small>{taskComplete ? 'Claude 已标记任务完成，请查看上方输出并确认提交给 host。' : 'Claude 在终端中完成了一轮对话，请确认任务去向。'}</small>
       </div>
       <input
         type="text"
