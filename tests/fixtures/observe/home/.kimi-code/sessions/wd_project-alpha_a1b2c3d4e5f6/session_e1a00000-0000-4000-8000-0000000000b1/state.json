@@ -1,0 +1,16 @@
+{
+  "createdAt": "2026-07-24T09:00:00.000Z",
+  "updatedAt": "2026-07-24T10:30:00.000Z",
+  "title": "Fix the onboarding crash on launch",
+  "isCustomTitle": false,
+  "agents": {
+    "main": {
+      "homedir": "/Users/test/.kimi-code/sessions/wd_project-alpha_a1b2c3d4e5f6/session_e1a00000-0000-4000-8000-0000000000b1/agents/main",
+      "type": "main",
+      "parentAgentId": null
+    }
+  },
+  "custom": {},
+  "workDir": "/Users/test/work/project-alpha",
+  "lastPrompt": "please fix the onboarding crash"
+}

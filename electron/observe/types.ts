@@ -1,11 +1,11 @@
 // types.ts — shared contracts for the read-only observation layer.
 //
 // The observation layer discovers externally-launched AI CLI sessions
-// (S0: Claude Code + Codex CLI) from process scans and client state files.
-// Everything here is inferred from read-only evidence; nothing is written
-// back to the clients' directories (TD-7).
+// (Claude Code + Codex CLI + Kimi Code CLI) from process scans and client
+// state files. Everything here is inferred from read-only evidence; nothing
+// is written back to the clients' directories (TD-7).
 
-export type ClientKind = 'claude-code' | 'codex';
+export type ClientKind = 'claude-code' | 'codex' | 'kimi';
 
 /** One row of the shared `ps` snapshot for a process that matched a client
  * binary name. `command` is the full args column (untruncated). */
@@ -47,7 +47,19 @@ export interface CodexTailSignals {
   turnCount: number;
 }
 
-export type TailSignals = ClaudeTailSignals | CodexTailSignals;
+export type TailSignals = ClaudeTailSignals | CodexTailSignals | KimiTailSignals;
+
+/** Kimi-specific signals extracted from the kimi-code.log tail window. */
+export interface KimiTailSignals {
+  kind: 'kimi';
+  /** Last `llm request` log line is newer than the last `llm response` —
+   * a generation is in flight. */
+  inFlightRequest: boolean;
+  /** Max ISO timestamp seen in the scanned log tail (0 when none). */
+  lastEventAtMs: number;
+  /** `llm response` lines seen in the scanned tail (rough turn count). */
+  messagesSeen: number;
+}
 
 /** Evidence gathered from one client state file (transcript / rollout). */
 export interface ObservedFileSignal {
@@ -57,9 +69,10 @@ export interface ObservedFileSignal {
   filePath: string;
   mtimeMs: number;
   sizeBytes: number;
-  /** Client-specific title (Codex: session_index / global-state thread title). */
+  /** Client-specific title (Codex: session_index / global-state thread
+   * title; Kimi: state.json title or lastPrompt). */
   title?: string;
-  /** Provenance of `title` when set by the parser (Codex only). */
+  /** Provenance of `title` when set by the parser (Codex / Kimi). */
   titleSource?: ObservedTitleSource;
   model?: string;
   tailSignals: TailSignals;

@@ -10,17 +10,22 @@
 //           active child CPU>5% ‖ pending function_call         → Executing
 //           generating                                          → Thinking
 //           otherwise                                           → Waiting
+//   Kimi:   dead pid                                            → drop (null)
+//           descendant CPU > 5%                                 → Executing
+//           trailing llm request without llm response           → Thinking
+//           otherwise                                           → Waiting
 //
 // Disappearance asymmetry: a Claude session whose associated pid died
-// vanishes (null). A Codex session without a live owner stays visible as
-// Done inside the completion window; outside the window it degrades to
-// Idle (kept as file-only evidence) rather than vanishing, so the layer
-// still reports recently active sessions on machines where nothing is
-// currently running.
+// vanishes (null); Kimi follows the same rule. A Codex session without a
+// live owner stays visible as Done inside the completion window; outside
+// the window it degrades to Idle (kept as file-only evidence) rather than
+// vanishing, so the layer still reports recently active sessions on
+// machines where nothing is currently running.
 
 import type {
   ClaudeTailSignals,
   CodexTailSignals,
+  KimiTailSignals,
   ObservedActivity,
   ObservedState,
 } from './types.js';
@@ -84,6 +89,30 @@ export function inferCodexState(input: CodexStateInput): InferredState {
     return { state: 'active', activity: 'executing' };
   }
   if (input.tail.generating) {
+    return { state: 'active', activity: 'thinking' };
+  }
+  return { state: 'waiting', activity: 'waiting' };
+}
+
+export interface KimiStateInput {
+  tail: KimiTailSignals;
+  descendantCpuMax: number;
+  pidState: PidState;
+}
+
+/** null = drop the session (like Claude, Kimi has no completion window).
+ * Executing signals (hot child process) win over the in-flight request,
+ * mirroring the Claude ordering. */
+export function inferKimiState(input: KimiStateInput): InferredState | null {
+  if (input.pidState === 'dead') return null;
+  if (input.pidState === 'none') {
+    // File-only evidence: the log tail is stale history, not live activity.
+    return { state: 'unknown', activity: 'unknown' };
+  }
+  if (input.descendantCpuMax > CPU_EXECUTING_THRESHOLD) {
+    return { state: 'active', activity: 'executing' };
+  }
+  if (input.tail.inFlightRequest) {
     return { state: 'active', activity: 'thinking' };
   }
   return { state: 'waiting', activity: 'waiting' };
