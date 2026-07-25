@@ -16,7 +16,14 @@ import type {
 import type { Association } from './mapping.js';
 import { associationKey } from './mapping.js';
 import { maxDescendantCpu, type ProcessSnapshot } from './process/darwin.js';
-import { inferClaudeState, inferCodexState, inferKimiState, type PidState } from './state-machine.js';
+import {
+  inferClaudeState,
+  inferCodexDesktopState,
+  inferCodexState,
+  inferKimiState,
+  type InferredState,
+  type PidState,
+} from './state-machine.js';
 import { sanitizeTitle, sha1 } from './util.js';
 
 export interface CorrelateInput {
@@ -29,6 +36,9 @@ export interface CorrelateInput {
   selfSessionIds: Set<string>;
   /** Rollout paths held open by mcp-server processes (ghost suppression). */
   suppressedPaths: Set<string>;
+  /** Live Codex Desktop host (`codex app-server`) pid, self-exclusion already
+   * applied. Shared by every codex-desktop thread row; undefined = no host. */
+  codexDesktopHostPid?: number;
 }
 
 const NOISE_PATH_PREFIXES = ['/var/folders/', '/private/var/folders/', '/tmp/', '/private/tmp/'];
@@ -76,6 +86,11 @@ function pickTitle(signal: ObservedFileSignal, projectName: string): TitlePick {
 function messageCount(signal: ObservedFileSignal): number {
   if (signal.tailSignals.kind === 'claude') return signal.tailSignals.messagesSeen;
   if (signal.tailSignals.kind === 'kimi') return signal.tailSignals.messagesSeen;
+  if (signal.tailSignals.kind === 'codex-desktop') {
+    // Desktop threads have no message content on disk; exempt from the
+    // short-session noise fold — process/host liveness decides visibility.
+    return 2;
+  }
   return signal.tailSignals.turnCount + (signal.tailSignals.generating ? 1 : 0);
 }
 
@@ -86,37 +101,62 @@ function correlateOne(input: CorrelateInput, signal: ObservedFileSignal): Observ
     if (input.selfSessionIds.has(signal.nativeSessionId)) return null;
 
     const realCwd = input.realpathOf(signal.cwd);
-    const association = input.associations.get(
-      associationKey(signal.clientKind, signal.nativeSessionId),
-    );
+    let inferred: InferredState | null;
+    let sessionPid: number | undefined;
     let pidState: PidState = 'none';
-    let descendantCpuMax = 0;
-    if (association) {
-      const alive = input.snapshot.byPid.has(association.pid);
-      pidState = alive ? 'live' : 'dead';
-      if (alive) {
-        descendantCpuMax = maxDescendantCpu(input.snapshot, association.pid);
-        evidence.push(`pid:${association.pid} via ${association.via}`);
-        if (descendantCpuMax > 0) evidence.push(`descendant-cpu:${descendantCpuMax.toFixed(1)}%`);
-      } else {
-        evidence.push(`pid:${association.pid} dead`);
-      }
-    } else {
-      evidence.push('no live process');
-    }
+    let lastActiveAt = signal.mtimeMs;
 
-    const inferred =
-      signal.tailSignals.kind === 'claude'
-        ? inferClaudeState({ tail: signal.tailSignals, descendantCpuMax, pidState })
-        : signal.tailSignals.kind === 'kimi'
-          ? inferKimiState({ tail: signal.tailSignals, descendantCpuMax, pidState })
-          : inferCodexState({
-              tail: signal.tailSignals,
-              descendantCpuMax,
-              pidState,
-              mtimeMs: signal.mtimeMs,
-              now: input.now,
-            });
+    if (signal.tailSignals.kind === 'codex-desktop') {
+      // Codex Desktop thread: no rollout tail and no PID association —
+      // state comes from chat-process liveness plus the shared
+      // app-server host detected by the service.
+      const tail = signal.tailSignals;
+      const liveChatPids = tail.chatPids.filter((chatPid) => input.snapshot.byPid.has(chatPid));
+      for (const chatPid of liveChatPids) evidence.push(`chat-process pid ${chatPid} alive`);
+      const hostPid = input.codexDesktopHostPid;
+      evidence.push(hostPid !== undefined
+        ? `desktop-host:app-server pid ${hostPid}`
+        : 'desktop-host:app-server not running');
+      if (tail.unread) evidence.push('badge:unread');
+      if (tail.heartbeat) evidence.push('badge:heartbeat-perms');
+      inferred = inferCodexDesktopState({ liveChatPids, hostAlive: hostPid !== undefined });
+      // A live chat process owns the row; otherwise the host pid marks a
+      // host-backed idle ("window open, nothing running").
+      sessionPid = liveChatPids[0] ?? hostPid;
+      lastActiveAt = Math.max(signal.mtimeMs, tail.lastChatUpdateAtMs);
+    } else {
+      const association = input.associations.get(
+        associationKey(signal.clientKind, signal.nativeSessionId),
+      );
+      let descendantCpuMax = 0;
+      if (association) {
+        const alive = input.snapshot.byPid.has(association.pid);
+        pidState = alive ? 'live' : 'dead';
+        if (alive) {
+          descendantCpuMax = maxDescendantCpu(input.snapshot, association.pid);
+          evidence.push(`pid:${association.pid} via ${association.via}`);
+          if (descendantCpuMax > 0) evidence.push(`descendant-cpu:${descendantCpuMax.toFixed(1)}%`);
+        } else {
+          evidence.push(`pid:${association.pid} dead`);
+        }
+      } else {
+        evidence.push('no live process');
+      }
+
+      inferred =
+        signal.tailSignals.kind === 'claude'
+          ? inferClaudeState({ tail: signal.tailSignals, descendantCpuMax, pidState })
+          : signal.tailSignals.kind === 'kimi'
+            ? inferKimiState({ tail: signal.tailSignals, descendantCpuMax, pidState })
+            : inferCodexState({
+                tail: signal.tailSignals,
+                descendantCpuMax,
+                pidState,
+                mtimeMs: signal.mtimeMs,
+                now: input.now,
+              });
+      sessionPid = association?.pid;
+    }
     if (!inferred) return null; // Claude/Kimi: dead pid → session disappears
     evidence.push(`state:${inferred.state}/${inferred.activity} (inferred)`);
 
@@ -126,7 +166,13 @@ function correlateOne(input: CorrelateInput, signal: ObservedFileSignal): Observ
       NOISE_PATH_PREFIXES.some((prefix) => realCwd.startsWith(prefix)) ||
       // Fresh live sessions legitimately have <2 messages — only fold short
       // sessions when nothing is running (stale evidence).
-      (messageCount(signal) < 2 && pidState !== 'live');
+      (messageCount(signal) < 2 && pidState !== 'live') ||
+      // Untitled desktop threads with nothing running are low-information
+      // rows (project+time fallback titles) — fold them into the noise
+      // group; a live chat process or a curated title keeps them visible.
+      (signal.tailSignals.kind === 'codex-desktop'
+        && !signal.title
+        && inferred.state !== 'active');
 
     return {
       id: sha1(`${signal.clientKind}:${signal.nativeSessionId}:${realCwd}`),
@@ -140,8 +186,8 @@ function correlateOne(input: CorrelateInput, signal: ObservedFileSignal): Observ
       activity: inferred.activity,
       inferred: true,
       model: signal.model,
-      lastActiveAt: signal.mtimeMs,
-      pid: association?.pid,
+      lastActiveAt,
+      pid: sessionPid,
       titleSource: source,
       isNoise,
       evidence,

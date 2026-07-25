@@ -2,8 +2,22 @@
   "electron-persisted-atom-state": {
     "thread-descriptions-v1": {
       "d0de0000-0000-7000-8000-0000000000a2": "全局标题应胜过索引",
-      "d0de0000-0000-7000-8000-0000000000a3": "调研蓝牙切换模块"
+      "d0de0000-0000-7000-8000-0000000000a3": "调研蓝牙切换模块",
+      "e5de0000-0000-7000-8000-0000000000d1": "Review the desktop onboarding flow",
+      "e5de0000-0000-7000-8000-0000000000d2": "整理发布前检查清单"
+    },
+    "unread-thread-ids-by-host-v1": {
+      "local": ["e5de0000-0000-7000-8000-0000000000d2"]
+    },
+    "heartbeat-thread-permissions-by-id": {
+      "e5de0000-0000-7000-8000-0000000000d1": {
+        "activePermissionProfile": null,
+        "approvalPolicy": "never",
+        "approvalsReviewer": "user",
+        "sandboxPolicy": { "type": "dangerFullAccess" }
+      }
     },
     "prompt-history": []
-  }
+  },
+  "active-workspace-roots": ["/Users/test/work/project-delta"]
 }

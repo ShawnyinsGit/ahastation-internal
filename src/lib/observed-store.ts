@@ -11,6 +11,7 @@ export type ObservedClientKind = 'claude-code' | 'codex' | 'kimi';
 export type ObservedState = 'active' | 'waiting' | 'idle' | 'done' | 'unknown';
 export type ObservedActivity = 'thinking' | 'executing' | 'waiting' | 'unknown';
 export type ObservedTitleSource =
+  | 'global-state'
   | 'session-index'
   | 'first-prompt'
   | 'summary'

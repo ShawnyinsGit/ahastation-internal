@@ -3,6 +3,10 @@
 // Fast tick (2s): shared ps snapshot + state inference + full-snapshot
 // publish. Slow tick (10s): title sources (Codex session_index, Claude PID
 // files). When no session is active the loop backs off to the slow cadence.
+// Codex Desktop (ChatGPT.app code mode) threads are scanned alongside the
+// three CLI observers: their state is pure process/host liveness, so their
+// signals cache on the two state files' markers while liveness is
+// re-evaluated from the fresh ps snapshot every tick.
 // State files carry mtime+size change markers so unchanged transcripts are
 // never re-parsed (codedash change-marker polling; no fs.watch).
 //
@@ -17,6 +21,7 @@ import { correlate } from './correlate.js';
 import {
   associate,
   associationKey,
+  detectCodexDesktopHostPids,
   detectMcpServerPids,
   loadClaudePidFiles,
   mcpHeldRolloutPaths,
@@ -34,6 +39,10 @@ import {
   parseClaudeTranscript,
   type StateFileRef,
 } from './statefiles/claude-projects.js';
+import {
+  listCodexDesktopThreads,
+  parseCodexDesktopThread,
+} from './statefiles/codex-desktop.js';
 import {
   listCodexRollouts,
   loadCodexTitles,
@@ -78,6 +87,43 @@ interface FileMarker {
 const DEFAULT_FAST_MS = 2_000;
 const DEFAULT_SLOW_MS = 10_000;
 
+/** mtime+size change marker for one file; 'absent' for missing/symlinked
+ * (fail-closed — the symlink case is never read). */
+function fileMarker(stat: Awaited<ReturnType<typeof lstatSafe>>): string {
+  return stat && stat.isFile() && !stat.isSymbolicLink()
+    ? `${stat.mtimeMs}:${stat.size}`
+    : 'absent';
+}
+
+/** Merge CLI rollout signals with Codex Desktop thread signals, keeping one
+ * row per thread id. The same id can exist in both worlds — the desktop app
+ * resumes CLI sessions — and two rows would duplicate a board card (and its
+ * React key). The fresher side wins: a live desktop turn must not hide
+ * behind a stale CLI rollout, and a live `codex resume` must not hide
+ * behind an old desktop thread. Desktop-side recency uses chat-process
+ * updates only: the global-state mtime is app-wide, not per-thread. */
+export function mergeCodexDesktopSignals(
+  codexSignals: ObservedFileSignal[],
+  desktopSignals: ObservedFileSignal[],
+): ObservedFileSignal[] {
+  const cliById = new Map(codexSignals.map((signal) => [signal.nativeSessionId, signal]));
+  const desktopWins = new Set<string>();
+  for (const signal of desktopSignals) {
+    if (signal.tailSignals.kind !== 'codex-desktop') continue;
+    const cli = cliById.get(signal.nativeSessionId);
+    if (cli && signal.tailSignals.lastChatUpdateAtMs > cli.mtimeMs) {
+      desktopWins.add(signal.nativeSessionId);
+    }
+  }
+  return [
+    ...codexSignals.filter((signal) => !desktopWins.has(signal.nativeSessionId)),
+    ...desktopSignals.filter((signal) => {
+      if (signal.tailSignals.kind !== 'codex-desktop') return true;
+      return !cliById.has(signal.nativeSessionId) || desktopWins.has(signal.nativeSessionId);
+    }),
+  ];
+}
+
 export class ObserveService {
   private readonly homeDir: string;
   private readonly publish: (snapshot: ObservedSnapshot) => void;
@@ -97,6 +143,8 @@ export class ObserveService {
   private titleSources = new Map<string, 'global-state' | 'session-index'>();
   private indexMarker: string | null = null;
   private pidFileMap = new Map<number, ClaudePidFileEntry>();
+  private desktopMarker: string | null = null;
+  private desktopSignalsCache: ObservedFileSignal[] = [];
 
   private running = false;
   private ticking = false;
@@ -180,7 +228,18 @@ export class ObserveService {
       const claudeSignals = await this.scanObserver('claude-code');
       const codexSignals = await this.scanObserver('codex');
       const kimiSignals = await this.scanObserver('kimi');
-      const signals = [...claudeSignals, ...codexSignals, ...kimiSignals];
+      const desktopSignals = await this.scanCodexDesktop();
+      const signals = [
+        ...claudeSignals,
+        ...mergeCodexDesktopSignals(codexSignals, desktopSignals),
+        ...kimiSignals,
+      ];
+
+      // Codex Desktop host (`codex app-server`): excluded from CLI
+      // candidates by the app-server token exclusion; the app's own adapter
+      // children are dropped by the self-exclusion pid tree.
+      const codexDesktopHostPid = detectCodexDesktopHostPids(snapshot)
+        .find((pid) => !selfExclusion.pids.has(pid));
 
       // Client processes (exclusion list already drops mcp-server & co).
       const claudePids = findClientPids(snapshot, ['claude']);
@@ -228,6 +287,7 @@ export class ObserveService {
         now,
         selfSessionIds: selfExclusion.sessionIds,
         suppressedPaths,
+        codexDesktopHostPid,
       });
       this.publish({ sessions: this.lastSessions, scannedAt: this.now() });
     } finally {
@@ -245,11 +305,7 @@ export class ObserveService {
       const indexPath = join(this.homeDir, '.codex', 'session_index.jsonl');
       const globalPath = join(this.homeDir, '.codex', '.codex-global-state.json');
       const [indexStat, globalStat] = await Promise.all([lstatSafe(indexPath), lstatSafe(globalPath)]);
-      const markerOf = (stat: Awaited<ReturnType<typeof lstatSafe>>) =>
-        stat && stat.isFile() && !stat.isSymbolicLink()
-          ? `${stat.mtimeMs}:${stat.size}`
-          : 'absent';
-      const marker = `${markerOf(indexStat)}|${markerOf(globalStat)}`;
+      const marker = `${fileMarker(indexStat)}|${fileMarker(globalStat)}`;
       if (this.indexMarker !== marker) {
         const { titles, sources } = await loadCodexTitles(this.homeDir);
         this.indexTitles = titles;
@@ -265,6 +321,31 @@ export class ObserveService {
       this.pidFileMap = await loadClaudePidFiles(this.homeDir);
     } catch {
       this.pidFileMap = new Map();
+    }
+  }
+
+  /** Codex Desktop threads (ChatGPT.app code mode): global-state
+   * descriptions joined with chat-spawned processes. Cached on the two
+   * source files' mtime+size markers — process liveness is evaluated
+   * per-tick downstream in correlate, so a cached signal never goes stale. */
+  private async scanCodexDesktop(): Promise<ObservedFileSignal[]> {
+    try {
+      const globalPath = join(this.homeDir, '.codex', '.codex-global-state.json');
+      const procsPath = join(this.homeDir, '.codex', 'process_manager', 'chat_processes.json');
+      const [globalStat, procsStat] = await Promise.all([lstatSafe(globalPath), lstatSafe(procsPath)]);
+      const marker = `${fileMarker(globalStat)}|${fileMarker(procsStat)}`;
+      if (marker === this.desktopMarker) return this.desktopSignalsCache;
+      const threads = await listCodexDesktopThreads(this.homeDir);
+      const signals: ObservedFileSignal[] = [];
+      for (const thread of threads) {
+        const signal = parseCodexDesktopThread(thread);
+        if (signal) signals.push(signal);
+      }
+      this.desktopMarker = marker;
+      this.desktopSignalsCache = signals;
+      return signals;
+    } catch {
+      return []; // per-observer isolation
     }
   }
 

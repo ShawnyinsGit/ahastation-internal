@@ -57,9 +57,10 @@ const summary = {
     state: session.state,
     activity: session.activity,
     model: session.model ?? null,
-    hasPid: session.pid !== undefined,
+    pid: session.pid ?? null,
     isNoise: session.isNoise,
     lastActiveAt: new Date(session.lastActiveAt).toISOString(),
+    evidence: session.evidence,
   })),
 };
 

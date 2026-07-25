@@ -1,0 +1,54 @@
+[
+  {
+    "id": "e5de0000-0000-7000-8000-0000000000d1:019f83ab-5287-7b73-bd06-7296da2b435f:exec-9613c490-bff1-4c06-a8c4-e173adcec319",
+    "chatTitle": null,
+    "command": "/opt/homebrew/bin/node --test tests/onnx-session-init.test.mjs",
+    "conversationId": "e5de0000-0000-7000-8000-0000000000d1",
+    "cwd": "/Users/test/work/project-alpha",
+    "itemId": "item-1",
+    "osPid": 97611,
+    "processId": "proc-1",
+    "startedAtMs": 1753300000000,
+    "turnId": "turn-1",
+    "updatedAtMs": 1753300060000
+  },
+  {
+    "id": "e5de0000-0000-7000-8000-0000000000d1:019f83ab-5287-7b73-bd06-7296da2b435f:exec-19ba79a2-a2b6-4337-9c65-621272304d73",
+    "chatTitle": null,
+    "command": "git status --short",
+    "conversationId": "e5de0000-0000-7000-8000-0000000000d1",
+    "cwd": "/Users/test/work/project-alpha",
+    "itemId": "item-2",
+    "osPid": 55555,
+    "processId": "proc-2",
+    "startedAtMs": 1753299900000,
+    "turnId": "turn-1",
+    "updatedAtMs": 1753300000000
+  },
+  {
+    "id": "e5de0000-0000-7000-8000-0000000000d2:019f8387-2062-78a0-b0a5-74ded015684e:exec-59c21e4b-70fa-4c6b-9573-2a298ea24f96",
+    "chatTitle": null,
+    "command": "/opt/homebrew/bin/node node_modules/typescript/bin/tsc --noEmit -p tsconfig.electron.json",
+    "conversationId": "e5de0000-0000-7000-8000-0000000000d2",
+    "cwd": "/Users/test/work/project-beta",
+    "itemId": "item-3",
+    "osPid": 55556,
+    "processId": "proc-3",
+    "startedAtMs": 1753200000000,
+    "turnId": "turn-2",
+    "updatedAtMs": 1753200050000
+  },
+  {
+    "id": "e5de0000-0000-7000-8000-0000000000d3:019f6b3e-82a4-70c2-bcf0-a4cc1df79500:exec-d6c6debd-14da-448e-b21a-6a8aa03d3478",
+    "chatTitle": "Sketch the release checklist",
+    "command": "node --input-type=module -e \"import {spawn} from 'node:child_process'\"",
+    "conversationId": "e5de0000-0000-7000-8000-0000000000d3",
+    "cwd": "/Users/test/work/project-gamma",
+    "itemId": "item-4",
+    "osPid": null,
+    "processId": "proc-4",
+    "startedAtMs": 1753100000000,
+    "turnId": "turn-3",
+    "updatedAtMs": 1753100050000
+  }
+]

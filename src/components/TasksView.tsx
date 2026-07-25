@@ -98,16 +98,18 @@ const OBSERVED_CLIENT_LABEL: Record<ObservedClientKind, string> = {
 const RECENTLY_DONE_WINDOW_MS = 30 * 60_000;
 
 /** Board column for an observed session, or null when it shouldn't render.
- *  `unknown` (file-only, no process) never shows; `idle` is also hidden — the
- *  service uses it for stale file-only Codex evidence (no live process), which
- *  is history-surface material (S1), not an in-flight task. `done` only while
- *  recent. */
+ *  `unknown` (file-only, no process) never shows. `idle` shows only when the
+ *  row is backed by a live process (session.pid set) — the Codex Desktop
+ *  host-backed idle ("window open, nothing running"); stale file-only CLI
+ *  idle stays hidden (history surface, S1). `done` only while recent. */
 function columnForObserved(session: ObservedSession, now: number): TaskColumnId | null {
   switch (session.state) {
     case 'waiting':
       return 'attention';
     case 'active':
       return 'active';
+    case 'idle':
+      return session.pid !== undefined ? 'active' : null;
     case 'done':
       return now - session.lastActiveAt <= RECENTLY_DONE_WINDOW_MS ? 'settled' : null;
     default:
