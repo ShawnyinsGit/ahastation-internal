@@ -70,6 +70,28 @@ const api = {
   getVoiceConfig: () => ipcRenderer.invoke('settings:get-voice-config'),
   setVoiceLockEnabled: (on) => ipcRenderer.invoke('settings:set-voice-lock-enabled', on),
   setVoicePrint: (vp) => ipcRenderer.invoke('settings:set-voice-print', vp),
+  // Voice-lock enrollment bridge. The enrollment UI lives in the settings
+  // window but the mic/VAD pipeline only exists in the main window's App, so
+  // commands travel settings -> main -> App, and progress streams back the
+  // same way.
+  voiceLockEnrollStart: () => ipcRenderer.invoke('voicelock:enroll-start'),
+  voiceLockEnrollCancel: () => ipcRenderer.invoke('voicelock:enroll-cancel'),
+  onVoiceLockEnrollCmd: (cb) => {
+    const listener = (_event, cmd) => cb(cmd);
+    ipcRenderer.on('voicelock:enroll-cmd', listener);
+    return () => ipcRenderer.removeListener('voicelock:enroll-cmd', listener);
+  },
+  sendVoiceLockEnrollState: (state) => ipcRenderer.send('voicelock:enroll-state', state),
+  onVoiceLockEnrollState: (cb) => {
+    const listener = (_event, state) => cb(state);
+    ipcRenderer.on('voicelock:enroll-state', listener);
+    return () => ipcRenderer.removeListener('voicelock:enroll-state', listener);
+  },
+  onVoiceConfigChanged: (cb) => {
+    const listener = () => cb();
+    ipcRenderer.on('voiceconfig:changed', listener);
+    return () => ipcRenderer.removeListener('voiceconfig:changed', listener);
+  },
   getVoicePref: () => ipcRenderer.invoke('settings:get-voice-pref'),
   setVoicePref: (patch) => ipcRenderer.invoke('settings:set-voice-pref', patch),
   onVoicePrefChanged: (cb) => {
