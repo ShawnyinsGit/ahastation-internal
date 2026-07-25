@@ -3224,6 +3224,32 @@ html.popout-view #root {
 }
 .asr-cloud-input:focus { border-color: var(--accent); }
 
+.asr-cloud-save {
+  width: 100%;
+  padding: 8px 10px;
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  color: var(--text-on-accent, #fff);
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: var(--radius-sm);
+  font-family: inherit;
+  cursor: pointer;
+  transition: opacity var(--transition), border-color var(--transition);
+}
+.asr-cloud-save:hover:not(:disabled) { opacity: 0.88; }
+.asr-cloud-save:disabled { opacity: 0.55; cursor: not-allowed; }
+.asr-cloud-save.is-saved {
+  background: transparent;
+  border-color: var(--success, #3fb950);
+  color: var(--success, #3fb950);
+}
+.asr-cloud-save.is-error {
+  background: transparent;
+  border-color: var(--danger, #f85149);
+  color: var(--danger, #f85149);
+}
+
 .voice-select-guide {
   margin-top: 8px;
   width: 100%;
