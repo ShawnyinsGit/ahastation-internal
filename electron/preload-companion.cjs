@@ -23,6 +23,7 @@ contextBridge.exposeInMainWorld('vibeMeet', {
     resolvePermission: (id, decision) =>
       ipcRenderer.invoke('ahabar:resolve-permission', { id, decision }),
     focusMain: () => ipcRenderer.invoke('ahabar:focus-main'),
+    copyResume: (id) => ipcRenderer.invoke('ahabar:copy-resume', { id }),
     setExpanded: (expanded) => ipcRenderer.invoke('ahabar:set-expanded', { expanded }),
     setGhost: (ghost) => ipcRenderer.invoke('ahabar:set-ghost', { ghost }),
   },

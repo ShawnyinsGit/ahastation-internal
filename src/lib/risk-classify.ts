@@ -27,6 +27,8 @@ const MEETING_TOOL_NAMES_SET = new Set<string>([
   'request_delivery_rework', 'ask_coordinator', 'task_done',
   'submit_work_report', 'submit_delivery', 'request_user_decision',
   'ask_host', 'reply_to_coordinator',
+  // 观察层只读查询（两个动作工具由 OBSERVED_SESSION_ACTION_TOOLS 先行拦截）
+  'observed_sessions_list',
 ]);
 
 export type RiskLevel = 'low' | 'mid' | 'high' | 'blocked';
@@ -89,6 +91,31 @@ function filePathOf(input: Record<string, unknown>): string {
   return typeof p === 'string' ? p : String(p);
 }
 
+/** Host 语音指令路由工具：聚焦/向观察到的外部窗口输入。目标描述由 Host
+ *  解析后填进 targetDescription（如「向 ahakeyconfig 的 Kimi 窗口发送输入」），
+ *  卡片直接展示这句话。 */
+const OBSERVED_SESSION_ACTION_TOOLS: Record<string, { action: string; impact: string; impactList: string[] }> = {
+  mcp__meeting__observed_session_send_text: {
+    action: '向观察到的窗口发送输入',
+    impact: '文字将直接敲进该终端并回车一次，可能派发任务或批准权限提示',
+    impactList: [
+      '输入目标：该会话终端的 tty',
+      '文本经控制字符过滤、最多 500 字，末尾恰好一个回车',
+    ],
+  },
+  mcp__meeting__observed_session_focus: {
+    action: '聚焦观察到的窗口',
+    impact: '将把 owning 终端窗口带到前台（无 tty 的桌面线程则打开对应应用）',
+    impactList: ['仅切换前台窗口，不输入任何内容'],
+  },
+};
+
+function observedSessionTarget(input: Record<string, unknown>): string {
+  const described = input.targetDescription;
+  if (typeof described === 'string' && described.trim()) return described;
+  return typeof input.id === 'string' ? input.id : '';
+}
+
 export function assessRisk(toolName: string, input: Record<string, unknown>): RiskAssessment {
   if (READ_ONLY_TOOLS.has(toolName)) {
     const target = filePathOf(input) || String(input.pattern ?? input.query ?? input.url ?? '');
@@ -139,6 +166,20 @@ export function assessRisk(toolName: string, input: Record<string, unknown>): Ri
       target: cmd,
       impact: '将在项目目录执行 shell 命令，可能改动文件与环境',
       impactList,
+    };
+  }
+
+  // Host 观察层动作工具：外部副作用（别的应用的窗口/终端），按高风险走
+  // 详情二次确认，目标描述即 Host 解析出的那句话。必须先于通用会议工具分类，
+  // 否则会被 MEETING_TOOL_NAMES_SET 误判为"内置低风险"。
+  const observedAction = OBSERVED_SESSION_ACTION_TOOLS[toolName];
+  if (observedAction) {
+    return {
+      level: 'high',
+      action: observedAction.action,
+      target: observedSessionTarget(input),
+      impact: observedAction.impact,
+      impactList: observedAction.impactList,
     };
   }
 

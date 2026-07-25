@@ -8,7 +8,7 @@ import {
   mapUiDecisionToOpencode,
   PermissionBroker,
 } from '../dist-electron/permission-broker.js';
-import { isInProcSafeTool } from '../dist-electron/auto-approve-policy.js';
+import { classifyToolRisk, isInProcSafeTool } from '../dist-electron/auto-approve-policy.js';
 import { compileTaskAuthority } from '../dist-electron/task-authority.js';
 import { mkdtempSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -312,6 +312,19 @@ test('in-proc meeting tools and Task are whitelisted, other MCP tools are not', 
   assert.equal(isInProcSafeTool('mcp__computer-use__type'), false);
   assert.equal(isInProcSafeTool('mcp__github__create_issue'), false);
   assert.equal(isInProcSafeTool('Bash'), false);
+});
+
+test('observed-session action tools are carved out of every safe list', () => {
+  // They ARE meeting-MCP hosted, but they reach into other apps' windows —
+  // never whitelisted, never auto-approved; classify destructive so every
+  // scope (off/read/all) surfaces an approval first.
+  assert.equal(isInProcSafeTool('mcp__meeting__observed_session_focus'), false);
+  assert.equal(isInProcSafeTool('mcp__meeting__observed_session_send_text'), false);
+  assert.equal(classifyToolRisk('mcp__meeting__observed_session_focus'), 'destructive');
+  assert.equal(classifyToolRisk('mcp__meeting__observed_session_send_text'), 'destructive');
+  // The read-only list tool stays safe (prefix rule untouched).
+  assert.equal(isInProcSafeTool('mcp__meeting__observed_sessions_list'), true);
+  assert.equal(classifyToolRisk('mcp__meeting__observed_sessions_list'), 'safe');
 });
 
 function externalNormalized(root) {

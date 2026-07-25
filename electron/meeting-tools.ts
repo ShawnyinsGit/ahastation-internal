@@ -529,6 +529,23 @@ export const askHostArgsSchema = {
   question: z.string().min(1).max(20_000),
 };
 
+/** Observed-session tools: `id` comes from observed_sessions_list (exact or
+ *  unique ≥4-char prefix); `targetDescription` is the one-sentence window
+ *  summary shown on the user's approval card, e.g. 「向 ahakeyconfig 的
+ *  Kimi 窗口发送输入」. */
+export const observedSessionActionArgsSchema = {
+  id: z.string().trim().min(1).max(64)
+    .describe('Session id from observed_sessions_list (exact, or a unique prefix of at least 4 chars).'),
+  targetDescription: z.string().trim().min(1).max(200)
+    .describe('One-sentence target description shown on the approval card, e.g. 「向 ahakeyconfig 的 Kimi 窗口发送输入」.'),
+};
+
+export const observedSessionSendTextArgsSchema = {
+  ...observedSessionActionArgsSchema,
+  text: z.string().min(1).max(1_000)
+    .describe('Text to type into the terminal; exactly one Return is appended. To approve a waiting permission prompt, send "y" or "1".'),
+};
+
 export const taskDoneArgsSchema = {
   summary: z.string().min(1).describe('One-line summary of what changed; surfaced to Talker context.'),
 };

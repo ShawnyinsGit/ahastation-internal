@@ -436,6 +436,8 @@ const observeService = new ObserveService({
   homeDir: homedir(),
   publish: (snapshot) => {
     lastObservedSnapshot = snapshot;
+    // AhaBar tap: the same snapshot stream feeds the bar's 观察中 section.
+    getCompanionFeed()?.onObservedSnapshot(snapshot);
     for (const win of BrowserWindow.getAllWindows()) {
       if (win.isDestroyed()) continue;
       win.webContents.send('observe:event', snapshot);
@@ -465,6 +467,7 @@ const ipcCtx: IpcContext = {
   awaitClaudeShadowHome,
   nativeConfirmDestructive,
   browserTabManager,
+  getObservedSnapshot: () => lastObservedSnapshot,
 };
 
 // Resolved lazily inside whenReady(); cached here so before-quit can access it.

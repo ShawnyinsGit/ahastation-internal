@@ -101,10 +101,37 @@ test('inline meeting tool names stay in sync with electron/meeting-tool-names.ts
   );
   const names = [...source.matchAll(/^\s+[A-Z_]+: '([a-z_]+)',$/gm)].map((m) => m[1]);
   assert.ok(names.length >= 20, 'expected the full meeting tool vocabulary');
+  // observed_session_focus / observed_session_send_text are intentionally
+  // high-risk (side effects on OTHER apps' windows) — covered by the
+  // dedicated test below, not by the recognized-low/mid assertion.
+  const EXCLUDED_ACTION_TOOLS = new Set(['observed_session_focus', 'observed_session_send_text']);
   for (const name of names) {
+    if (EXCLUDED_ACTION_TOOLS.has(name)) continue;
     const r = assessRisk(`mcp__meeting__${name}`, {});
     assert.ok(r.level === 'low' || r.level === 'mid', `${name} should be recognized`);
   }
+});
+
+test('observed-session action tools show the resolved target description', async () => {
+  const { assessRisk } = await loadRiskModule();
+  const send = assessRisk('mcp__meeting__observed_session_send_text', {
+    id: 'aaaaaaaa',
+    text: 'y',
+    targetDescription: '向 ahakeyconfig 的 Kimi 窗口发送输入',
+  });
+  assert.equal(send.level, 'high');
+  assert.equal(send.action, '向观察到的窗口发送输入');
+  assert.equal(send.target, '向 ahakeyconfig 的 Kimi 窗口发送输入');
+  const focus = assessRisk('mcp__meeting__observed_session_focus', {
+    id: 'bbbbbbbb',
+    targetDescription: '聚焦 ahastation 的 Claude 窗口',
+  });
+  assert.equal(focus.level, 'high');
+  assert.equal(focus.action, '聚焦观察到的窗口');
+  assert.equal(focus.target, '聚焦 ahastation 的 Claude 窗口');
+  // Missing description degrades to the raw id, never a blank card.
+  const fallback = assessRisk('mcp__meeting__observed_session_send_text', { id: 'abc123', text: 'y' });
+  assert.equal(fallback.target, 'abc123');
 });
 
 test('risk labels and badge classes cover every level', async () => {

@@ -17,6 +17,8 @@ export interface ObservedProcessSignal {
   cpuPct: number;
   rssKb: number;
   cwd?: string;
+  /** Controlling terminal ('s003') when the process has one. */
+  tty?: string;
 }
 
 /** Claude-specific signals extracted from the transcript tail window. */
@@ -65,11 +67,36 @@ export interface CodexDesktopTailSignals {
   heartbeat: boolean;
 }
 
+/** CLI↔desktop collision: the same thread id exists as a CLI rollout AND a
+ * Codex Desktop thread (the desktop app resumes CLI sessions). Both sides are
+ * kept whole — liveness is only known per-tick in correlate, so the merge
+ * (observe-service) cannot decide which side's signals should drive state.
+ * correlate picks: desktop rules when a chat/host pid is live, CLI rules when
+ * only the CLI pid is live, the CLI-side stale outcome when nothing is live. */
+export interface CodexMergedTailSignals {
+  kind: 'codex-merged';
+  /** Desktop side: pure liveness inputs plus the desktop display fields. */
+  desktop: CodexDesktopTailSignals & {
+    title?: string;
+    titleSource?: ObservedTitleSource;
+    filePath: string;
+    mtimeMs: number;
+  };
+  /** CLI side: the full rollout tail plus the CLI display fields. */
+  cli: CodexTailSignals & {
+    title?: string;
+    titleSource?: ObservedTitleSource;
+    filePath: string;
+    mtimeMs: number;
+  };
+}
+
 export type TailSignals =
   | ClaudeTailSignals
   | CodexTailSignals
   | KimiTailSignals
-  | CodexDesktopTailSignals;
+  | CodexDesktopTailSignals
+  | CodexMergedTailSignals;
 
 /** Kimi-specific signals extracted from the kimi-code.log tail window. */
 export interface KimiTailSignals {
@@ -129,6 +156,10 @@ export interface ObservedSession {
   model?: string;
   lastActiveAt: number;
   pid?: number;
+  /** Controlling terminal of `pid` (e.g. 's003') when the owning process has
+   *  one — absent for desktop/app-server-owned rows and '??' processes. Host
+   *  session actions require it for direct terminal input. */
+  tty?: string;
   titleSource: ObservedTitleSource;
   isNoise: boolean;
   /** Human-readable provenance notes (which signals produced this row). */

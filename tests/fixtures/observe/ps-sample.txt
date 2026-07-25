@@ -1,23 +1,23 @@
-  PID  PPID  %CPU    RSS COMM             ARGS
-    1     0   0.2  15168 /sbin/launchd    /sbin/launchd
- 4201  4100   1.5  88064 claude           /usr/local/bin/claude --resume c1a0de00-0000-4000-8000-000000000001
- 4210  4100   0.3  80000 claude           /usr/local/bin/claude --resume=c1a0de00-0000-4000-8000-000000000002
- 4202  4210  12.5  45056 bash             bash -lc pytest tests/
- 4203  4202  7.25  30000 node             node ./scripts/runner.js
- 4301  4100   2.0 120000 node             node /opt/homebrew/lib/node_modules/@openai/codex/bin/codex.js
- 4401     1   0.1  60000 codex            /usr/local/bin/codex mcp-server
- 4501     1   0.4 300000 Claude           /Applications/Claude.app/Contents/MacOS/Claude
- 4502  4501   0.0  90000 Claude Helper (R /Applications/Claude.app/Contents/Frameworks/Claude Helper (Renderer).app/Contents/MacOS/Claude Helper (Renderer) --type=renderer
- 4503  4500   0.0  70000 Electron Helper  /Applications/Electron.app/Contents/Frameworks/Electron Helper.app/Contents/MacOS/Electron Helper --type=gpu-process
- 4601  4600   0.0   1200 grep             grep -i claude
- 4602  4600   0.0   5000 code             code /Users/test/.claude/settings.json
- 4302  4100   0.8 110000 codex            /usr/local/bin/codex resume d0de0000-0000-7000-8000-0000000000a1
- 5101  5000   0.5  90000 kimi-code        kimi-code
- 5102  5000   1.0  90000 kimi-code        kimi-code
- 5103  5102   2.5  30000 bash             bash -lc npm test
- 5199  5000   0.1  90000 kimi-code        kimi-code
- 8601     1   0.0  50000 codex            /usr/local/bin/codex app-server-broker --port 9100
-86693     1   0.0 274224 codex            /Applications/ChatGPT.app/Contents/Resources/codex -c features.code_mode_host=true app-server --analytics-default-enabled
-97611 86693   0.5  40000 node             /opt/homebrew/bin/node --test tests/onnx-session-init.test.mjs
- 9001  9002   0.0   1000 loop-a           /tmp/loop-a
- 9002  9001   0.0   1000 loop-b           /tmp/loop-b
+  PID  PPID   TT   %CPU    RSS COMM             ARGS
+    1     0   ??   0.2  15168 /sbin/launchd     /sbin/launchd
+ 4201  4100 s003   1.5  88064 claude            /usr/local/bin/claude --resume c1a0de00-0000-4000-8000-000000000001
+ 4210  4100 s005   0.3  80000 claude            /usr/local/bin/claude --resume=c1a0de00-0000-4000-8000-000000000002
+ 4202  4210 s005  12.5  45056 bash              bash -lc pytest tests/
+ 4203  4202 s005  7.25  30000 node              node ./scripts/runner.js
+ 4301  4100 s007   2.0 120000 node              node /opt/homebrew/lib/node_modules/@openai/codex/bin/codex.js
+ 4401     1   ??   0.1  60000 codex             /usr/local/bin/codex mcp-server
+ 4501     1   ??   0.4 300000 Claude            /Applications/Claude.app/Contents/MacOS/Claude
+ 4502  4501   ??   0.0  90000 Claude Helper (R  /Applications/Claude.app/Contents/Frameworks/Claude Helper (Renderer).app/Contents/MacOS/Claude Helper (Renderer) --type=renderer
+ 4503  4500   ??   0.0  70000 Electron Helper   /Applications/Electron.app/Contents/Frameworks/Electron Helper.app/Contents/MacOS/Electron Helper --type=gpu-process
+ 4601  4600 s009   0.0   1200 grep              grep -i claude
+ 4602  4600 s009   0.0   5000 code              code /Users/test/.claude/settings.json
+ 4302  4100 s011   0.8 110000 codex             /usr/local/bin/codex resume d0de0000-0000-7000-8000-0000000000a1
+ 5101  5000 s013   0.5  90000 kimi-code         kimi-code
+ 5102  5000 s015   1.0  90000 kimi-code         kimi-code
+ 5103  5102 s015   2.5  30000 bash              bash -lc npm test
+ 5199  5000 s017   0.1  90000 kimi-code         kimi-code
+ 8601     1   ??   0.0  50000 codex             /usr/local/bin/codex app-server-broker --port 9100
+86693     1   ??   0.0 274224 codex             /Applications/ChatGPT.app/Contents/Resources/codex -c features.code_mode_host=true app-server --analytics-default-enabled
+97611 86693   ??   0.5  40000 node              /opt/homebrew/bin/node --test tests/onnx-session-init.test.mjs
+ 9001  9002   ??   0.0   1000 loop-a            /tmp/loop-a
+ 9002  9001   ??   0.0   1000 loop-b            /tmp/loop-b
