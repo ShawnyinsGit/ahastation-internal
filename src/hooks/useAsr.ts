@@ -33,7 +33,6 @@ interface UseAsrResult {
   mode: AsrMode;
   listening: boolean;
   supported: boolean;
-  speechLevel: number;
   lastError: string | null;
   status: MicrophoneCaptureStatus;
   retryable: boolean;
@@ -117,7 +116,6 @@ export function useAsr({
     mode,
     listening: capture.listening,
     supported,
-    speechLevel: capture.speechLevel,
     lastError,
     status,
     retryable,

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { memo, useEffect, useState } from 'react';
 import { AlertTriangle, Bell, RotateCcw, Terminal } from 'lucide-react';
 import type { WorkerState } from '../lib/meeting-store';
 import { WORKER_STATUS_LABEL } from '../lib/task-columns';
@@ -65,7 +65,7 @@ function statusLabel(worker: WorkerState, speaking: boolean): string {
 
 const PULSE_MS = 600;
 
-export function WorkerCard({
+export const WorkerCard = memo(function WorkerCard({
   worker,
   mode,
   selected,
@@ -260,4 +260,4 @@ export function WorkerCard({
       )}
     </div>
   );
-}
+});

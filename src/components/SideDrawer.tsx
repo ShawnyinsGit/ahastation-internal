@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
+import { memo, useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import { Send, Paperclip, X, FileText, FileType, Image as ImageIcon, FileWarning, FolderOpen, Users, MessageSquare, Settings, Zap } from 'lucide-react';
 import type {
   ActivityEntry,
@@ -9,7 +9,8 @@ import type {
   StagedAttachment,
   TranscriptEntry,
 } from '../types';
-import type { HostGroupState } from '../lib/meeting-store';
+import type { MeetingState } from '../lib/meeting-store';
+import { shallowEqualArray, useMeetingSelector } from '../hooks/useMeetingSelector';
 import {
   DISPATCH_MODE_HINTS,
   DISPATCH_MODE_LABELS,
@@ -22,8 +23,6 @@ import { toast } from '../lib/toast';
 
 interface SideDrawerProps {
   open: boolean;
-  transcript: TranscriptEntry[];
-  activity: ActivityEntry[];
   pending: PendingPermission | null;
   /** Resolving flag for the legacy single permission card, sourced from the
    *  worker that owns `pending.id`. Keeps the drawer card in lock-step with
@@ -51,8 +50,27 @@ interface SideDrawerProps {
   activeBackendIds?: Set<string>;
   onAddHost?: (backendId: string) => void;
   forceParticipantsTab?: boolean;
-  /** Host group map for resolving default host's backend name. */
-  hostGroups?: Map<string, HostGroupState>;
+}
+
+const EMPTY_TRANSCRIPT: TranscriptEntry[] = [];
+const MAX_AGGREGATE_ACTIVITY = 500;
+
+/** Talker's transcript drives the chat timeline; subscribed internally so
+ *  per-message updates re-render only the drawer, never the App tree. */
+function selectTalkerTranscript(s: MeetingState): TranscriptEntry[] {
+  return s.workers.get('talker')?.transcript ?? EMPTY_TRANSCRIPT;
+}
+
+/** Merged activity from all workers (timestamp-sorted, capped) — same
+ *  projection the legacy useClaude aggregate produced, but selected here so
+ *  the shallow-equal bail-out skips snapshots that only touched transcripts. */
+function selectMergedActivity(s: MeetingState): ActivityEntry[] {
+  const merged: ActivityEntry[] = [];
+  for (const ws of s.workers.values()) merged.push(...ws.activity);
+  merged.sort((a, b) => a.ts - b.ts);
+  return merged.length > MAX_AGGREGATE_ACTIVITY
+    ? merged.slice(merged.length - MAX_AGGREGATE_ACTIVITY)
+    : merged;
 }
 
 const TIME_TICK_MS = 30_000;
@@ -158,10 +176,8 @@ function iconFor(kind: AttachmentKind) {
   return <FileText size={12} aria-hidden="true" />;
 }
 
-export function SideDrawer({
+export const SideDrawer = memo(function SideDrawer({
   open,
-  transcript,
-  activity,
   pending,
   pendingResolving,
   pendingError,
@@ -181,8 +197,13 @@ export function SideDrawer({
   activeBackendIds = new Set(),
   onAddHost,
   forceParticipantsTab,
-  hostGroups,
 }: SideDrawerProps) {
+  // High-frequency meeting streams are subscribed in-component (not threaded
+  // through App): transcript/activity append many times per minute during a
+  // voice session, and those updates must not re-render the App tree.
+  const transcript = useMeetingSelector(selectTalkerTranscript);
+  const activity = useMeetingSelector(selectMergedActivity, shallowEqualArray);
+  const hostGroups = useMeetingSelector((s) => s.hostGroups);
   const [tab, setTab] = useState<Tab>('chat');
   const [text, setText] = useState('');
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -324,7 +345,7 @@ export function SideDrawer({
   const backendNameForHost = useCallback((hostId: string | undefined): string => {
     // For default/undefined hostId, look up the actual backendId from hostGroups
     if (!hostId || hostId === 'default') {
-      const defaultHg = hostGroups?.get('default');
+      const defaultHg = hostGroups.get('default');
       if (defaultHg) {
         const backend = backends.find((b) => b.id === defaultHg.backendId);
         return backend?.displayName ?? defaultHg.backendId;
@@ -334,7 +355,7 @@ export function SideDrawer({
     // For added hosts, try direct backend match first, then hostGroup lookup
     const backend = backends.find((b) => b.id === hostId);
     if (backend) return backend.displayName;
-    const hg = hostGroups?.get(hostId);
+    const hg = hostGroups.get(hostId);
     if (hg) {
       const fallback = backends.find((b) => b.id === hg.backendId);
       return fallback?.displayName ?? hg.backendId;
@@ -345,7 +366,7 @@ export function SideDrawer({
   // Resolve hostId → iconId from backends list
   const backendIconIdForHost = useCallback((hostId: string | undefined): string => {
     if (!hostId || hostId === 'default') {
-      const defaultHg = hostGroups?.get('default');
+      const defaultHg = hostGroups.get('default');
       if (defaultHg) {
         const backend = backends.find((b) => b.id === defaultHg.backendId);
         return backend?.iconId ?? defaultHg.backendId;
@@ -354,7 +375,7 @@ export function SideDrawer({
     }
     const backend = backends.find((b) => b.id === hostId);
     if (backend) return backend.iconId;
-    const hg = hostGroups?.get(hostId);
+    const hg = hostGroups.get(hostId);
     if (hg) {
       const fallback = backends.find((b) => b.id === hg.backendId);
       return fallback?.iconId ?? hg.backendId;
@@ -879,4 +900,4 @@ export function SideDrawer({
       )}
     </aside>
   );
-}
+});

@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { useState } from 'react';
+import { memo, useEffect, useRef, useState } from 'react';
 import {
   Mic,
   MicOff,
@@ -18,13 +18,13 @@ import {
   X,
 } from 'lucide-react';
 import type { MicrophoneCaptureStatus } from '../lib/microphone-ui-state';
+import { getMicLevel, subscribeMicLevel } from '../lib/mic-level';
 
 interface BottomToolbarProps {
   muted: boolean;
   onToggleMute: () => void;
   micSupported: boolean;
   listening: boolean;
-  speechLevel?: number;
   asrMode?: 'xfyun' | 'probing' | 'unavailable';
   micStatus: MicrophoneCaptureStatus;
   micRetryable: boolean;
@@ -64,6 +64,42 @@ interface ToolbarButtonProps {
 
 const ICON_SIZE = 20;
 
+/**
+ * Live mic amplitude meter. Subscribes to the module-level mic-level channel
+ * and writes the fill width straight to the DOM on a rAF throttle — the VAD
+ * fires per audio frame, so this must never go through React state.
+ */
+function MicMeter({ muted }: { muted: boolean }) {
+  const fillRef = useRef<HTMLDivElement>(null);
+  const mutedRef = useRef(muted);
+  mutedRef.current = muted;
+
+  useEffect(() => {
+    let raf = 0;
+    const write = () => {
+      raf = 0;
+      if (!fillRef.current) return;
+      const pct = mutedRef.current ? 0 : Math.max(0, Math.min(1, getMicLevel())) * 100;
+      fillRef.current.style.width = `${pct}%`;
+    };
+    const schedule = () => {
+      if (!raf) raf = requestAnimationFrame(write);
+    };
+    const unsubscribe = subscribeMicLevel(schedule);
+    schedule(); // repaint on mount and whenever `muted` flips
+    return () => {
+      unsubscribe();
+      if (raf) cancelAnimationFrame(raf);
+    };
+  }, [muted]);
+
+  return (
+    <div className="tb-mic-meter" aria-hidden="true">
+      <div ref={fillRef} className="tb-mic-meter-fill" style={{ width: '0%' }} />
+    </div>
+  );
+}
+
 function ToolbarButton({ icon, label, onClick, active, danger, disabled, warning, title }: ToolbarButtonProps) {
   const cls = [
     'tb-btn',
@@ -80,12 +116,11 @@ function ToolbarButton({ icon, label, onClick, active, danger, disabled, warning
   );
 }
 
-export function BottomToolbar({
+export const BottomToolbar = memo(function BottomToolbar({
   muted,
   onToggleMute,
   micSupported,
   listening,
-  speechLevel = 0,
   asrMode = 'probing',
   micStatus,
   micRetryable,
@@ -107,7 +142,6 @@ export function BottomToolbar({
   permissionCount = 0,
   onOpenPermission,
 }: BottomToolbarProps) {
-  const meterWidth = Math.max(0, Math.min(1, speechLevel)) * 100;
   const asrBadge = asrMode === 'xfyun' ? '讯飞' : asrMode === 'unavailable' ? '未配置' : '…';
   const micBusy = micStatus === 'requesting-permission' || micStatus === 'initializing';
   const [moreOpen, setMoreOpen] = useState(false);
@@ -146,12 +180,7 @@ export function BottomToolbar({
               disabled={!micSupported}
               title={micRetryable ? 'Microphone failed to start. Click to retry.' : undefined}
             />
-            <div className="tb-mic-meter" aria-hidden="true">
-              <div
-                className="tb-mic-meter-fill"
-                style={{ width: `${muted ? 0 : meterWidth}%` }}
-              />
-            </div>
+            <MicMeter muted={muted} />
           </div>
           <ToolbarButton
             icon={ttsOn ? <Volume2 size={ICON_SIZE} /> : <VolumeX size={ICON_SIZE} />}
@@ -244,12 +273,7 @@ export function BottomToolbar({
             disabled={!micSupported}
             title={micRetryable ? 'Microphone failed to start. Click to retry.' : undefined}
           />
-          <div className="tb-mic-meter" aria-hidden="true">
-            <div
-              className="tb-mic-meter-fill"
-              style={{ width: `${muted ? 0 : meterWidth}%` }}
-            />
-          </div>
+          <MicMeter muted={muted} />
           <span className="tb-asr-badge" title={`ASR backend: ${asrBadge}`}>{asrBadge}</span>
         </div>
         <ToolbarButton
@@ -302,4 +326,4 @@ export function BottomToolbar({
       </div>
     </div>
   );
-}
+});

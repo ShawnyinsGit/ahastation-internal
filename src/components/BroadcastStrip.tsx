@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { memo, useState } from 'react';
 import { VolumeX, X } from 'lucide-react';
 import type { CoordinatorBriefing } from '../types';
 
@@ -21,7 +21,7 @@ const KIND_ICON: Record<CoordinatorBriefing['kind'], string> = {
  * Host 播报条（04 §9.3）：会议模式顶部展示 Host Agent 最新进展汇报，
  * 可打断（TTS）、可关闭。数据来自现有 coordinatorBriefings。
  */
-export function BroadcastStrip({ briefings, onInterrupt }: BroadcastStripProps) {
+export const BroadcastStrip = memo(function BroadcastStrip({ briefings, onInterrupt }: BroadcastStripProps) {
   const [dismissedId, setDismissedId] = useState<string | null>(null);
   const latest = briefings.length > 0 ? briefings[briefings.length - 1] : null;
 
@@ -56,4 +56,4 @@ export function BroadcastStrip({ briefings, onInterrupt }: BroadcastStripProps) 
       </button>
     </div>
   );
-}
+});

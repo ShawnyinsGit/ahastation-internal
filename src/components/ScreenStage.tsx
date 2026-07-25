@@ -1,4 +1,5 @@
 import {
+  memo,
   ReactNode,
   RefObject,
   useState,
@@ -81,7 +82,7 @@ interface ScreenStageProps {
 
 const ACTIVITY_TAB_ID = 'activity-default';
 
-export function ScreenStage({
+export const ScreenStage = memo(function ScreenStage({
   share,
   videoRef,
   onPickSource: _onPickSource,
@@ -450,4 +451,4 @@ export function ScreenStage({
       )}
     </div>
   );
-}
+});
