@@ -4,6 +4,7 @@ import {
   lstatSync,
   realpathSync,
 } from 'node:fs';
+import { homedir } from 'node:os';
 import {
   dirname,
   extname,
@@ -155,10 +156,71 @@ function canonicalWorkspaceRoot(workspaceRoot: string): string {
 }
 
 function canonicalWorkspacePath(root: string, requested: string): string {
-  const absolute = isAbsolute(requested) ? resolve(requested) : resolve(root, requested);
+  const rewritten = rewriteMsysPath(requested);
+  const absolute = isAbsolute(rewritten) ? resolve(rewritten) : resolve(root, rewritten);
   const candidate = reanchorToWorkspaceRoot(root, absolute);
   assertNoLinkEscape(root, candidate);
   return candidate;
+}
+
+/** Git Bash / MSYS tools report paths as `/c/Users/...`. On win32
+ *  `isAbsolute('/c/...')` is true and resolve() anchors it on the current
+ *  drive as `<drive>:\c\...`, which then reads as a workspace escape. Remap
+ *  the drive prefix to `C:\...` before resolution. */
+function rewriteMsysPath(requested: string): string {
+  if (process.platform !== 'win32') return requested;
+  const match = /^\/([a-zA-Z])(\/.*)?$/.exec(requested.trim());
+  if (!match) return requested;
+  return `${match[1].toUpperCase()}:${(match[2] ?? '/').replaceAll('/', '\\')}`;
+}
+
+/** Credential stores that no task may read regardless of user approval.
+ *  These never reach an ask-user card and never enter an addendum. */
+function sensitiveReadRoots(): string[] {
+  const home = homedir();
+  const roots = [
+    join(home, '.ssh'),
+    join(home, '.aws'),
+    join(home, '.azure'),
+    join(home, '.gnupg'),
+    join(home, '.kube'),
+  ];
+  if (process.platform === 'win32') {
+    for (const base of [process.env.APPDATA, process.env.LOCALAPPDATA]) {
+      if (!base) continue;
+      roots.push(join(base, 'Microsoft', 'Credentials'), join(base, 'Microsoft', 'Protect'));
+    }
+  }
+  return roots;
+}
+
+/** Read-only package-manager caches a build legitimately traverses
+ *  (dependency sources, toolchains). Reads inside them are allowed without
+ *  asking; writes are still governed by the grant's writePaths. */
+function readOnlyDependencyRoots(): string[] {
+  const home = homedir();
+  return [
+    join(home, '.cargo', 'registry'),
+    join(home, '.rustup', 'toolchains'),
+    join(home, '.npm'),
+    join(home, 'go', 'pkg', 'mod'),
+    join(home, '.gradle', 'caches'),
+    join(home, '.m2', 'repository'),
+  ];
+}
+
+/** Canonicalize a read target that lives outside the workspace. Follows
+ *  symlinks of existing paths so a link cannot smuggle a sensitive target
+ *  past the blacklist; nonexistent paths keep their resolved form (the
+ *  actual read will fail on its own). Returns null for unresolvable input. */
+function canonicalOutsideReadPath(root: string, requested: string): string | null {
+  try {
+    const rewritten = rewriteMsysPath(requested);
+    const absolute = isAbsolute(rewritten) ? resolve(rewritten) : resolve(root, rewritten);
+    return existsSync(absolute) ? realpathSync.native(absolute) : absolute;
+  } catch {
+    return null;
+  }
 }
 
 function canonicalHost(value: string): string {
@@ -258,6 +320,11 @@ function workspaceHash(root: string): string {
     root: normalizedForComparison(root),
     device: stat.dev,
     inode: stat.ino,
+    // ext4 reuses inode numbers immediately, so a directory removed and
+    // recreated at the same path can inherit the exact dev+ino pair. The
+    // birth timestamp pins the identity to this creation of the directory
+    // (0 on filesystems that do not track it, which is no worse than before).
+    birthtime: stat.birthtimeMs,
   });
 }
 
@@ -417,6 +484,7 @@ const REMEDIABLE_AUTHORITY_DENIALS = new Set([
   'write-path-not-granted',
   'network-host-not-granted',
   'cwd-not-granted',
+  'read-path-not-granted',
 ]);
 
 function maybeAskUser(decision: AuthorityDecision): AuthorityDecision {
@@ -442,6 +510,8 @@ export interface TaskAuthorityAddendum {
   workingDirectories: string[];
   commands: string[][];
   networkHosts: string[];
+  /** Hand-approved out-of-workspace read targets (canonical absolute paths). */
+  readPaths: string[];
 }
 
 /** Bound on user-approved entries per dimension, so a runaway Worker cannot
@@ -464,6 +534,7 @@ function emptyAddendum(grant: TaskAuthorityGrant): TaskAuthorityAddendum {
     workingDirectories: [],
     commands: [],
     networkHosts: [],
+    readPaths: [],
   };
 }
 
@@ -488,6 +559,7 @@ export function addendumSaturatedDimensions(addendum: TaskAuthorityAddendum): st
   if (addendum.workingDirectories.length >= ADDENDUM_ENTRY_LIMIT) saturated.push('workingDirectories');
   if (addendum.commands.length >= ADDENDUM_ENTRY_LIMIT) saturated.push('commands');
   if (addendum.networkHosts.length >= ADDENDUM_ENTRY_LIMIT) saturated.push('networkHosts');
+  if (addendum.readPaths.length >= ADDENDUM_ENTRY_LIMIT) saturated.push('readPaths');
   return saturated;
 }
 
@@ -520,6 +592,9 @@ export function rebaseAuthorityAddendum(
     workingDirectories: rebasePaths(previous.workingDirectories),
     commands: previous.commands.map((command) => [...command]),
     networkHosts: [...previous.networkHosts],
+    // Approved read targets live outside every workspace root by definition,
+    // so they carry over verbatim instead of through workspace re-anchoring.
+    readPaths: (previous.readPaths ?? []).slice(0, ADDENDUM_ENTRY_LIMIT),
   };
 }
 
@@ -532,7 +607,7 @@ export function extendAuthorityAddendum(
   previous?: TaskAuthorityAddendum,
 ): TaskAuthorityAddendum {
   const base = addendumForGrant(grant, previous) ?? emptyAddendum(grant);
-  let { writePaths, workingDirectories, commands, networkHosts } = base;
+  let { writePaths, workingDirectories, commands, networkHosts, readPaths } = base;
   for (const path of request.writePaths) {
     let covered: string[];
     try {
@@ -562,7 +637,22 @@ export function extendAuthorityAddendum(
   for (const host of request.networkHosts) {
     networkHosts = addBounded(networkHosts, canonicalHost(host), (value) => value);
   }
-  return { ...base, writePaths, workingDirectories, commands, networkHosts };
+  for (const path of request.readPaths) {
+    // Only out-of-workspace reads need remembering; in-workspace reads never
+    // ask. Sensitive targets are unapprovable and must not enter the addendum.
+    if (canonicalRequestPath(grant.workspaceRoot, path)) continue;
+    const outside = canonicalOutsideReadPath(grant.workspaceRoot, path);
+    if (!outside || pathCovered(outside, sensitiveReadRoots())) continue;
+    // Same coverage rule as write paths: a file also covers its directory so
+    // one approval stops the card storm over sibling files.
+    const covered = extname(outside) && dirname(outside) !== outside
+      ? [outside, dirname(outside)]
+      : [outside];
+    for (const entry of covered) {
+      readPaths = addBounded(readPaths, entry, (value) => normalizedForComparison(value));
+    }
+  }
+  return { ...base, writePaths, workingDirectories, commands, networkHosts, readPaths };
 }
 
 export function evaluateTaskAuthority(
@@ -612,7 +702,21 @@ export function evaluateTaskAuthority(
   }
   for (const path of request.readPaths) {
     const canonical = canonicalRequestPath(grant.workspaceRoot, path);
-    if (!canonical) return { kind: 'deny', reason: 'read-path-escape' };
+    if (canonical) continue;
+    // Out-of-workspace read: not a hard failure by itself. Resolve it
+    // independently, then decide sensitive → deny, dependency cache → allow,
+    // hand-approved → allow, anything else → ask the user once.
+    const outside = canonicalOutsideReadPath(grant.workspaceRoot, path);
+    if (!outside) return { kind: 'deny', reason: 'read-path-escape' };
+    if (pathCovered(outside, sensitiveReadRoots())) {
+      return { kind: 'deny', reason: 'read-path-sensitive' };
+    }
+    if (pathCovered(outside, readOnlyDependencyRoots())) continue;
+    if (approved && pathCovered(outside, approved.readPaths ?? [])) {
+      usedAddendum = true;
+      continue;
+    }
+    return maybeAskUser({ kind: 'deny', reason: 'read-path-not-granted' });
   }
   for (const path of request.writePaths) {
     const canonical = canonicalRequestPath(grant.workspaceRoot, path);

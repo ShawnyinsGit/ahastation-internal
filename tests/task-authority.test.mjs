@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
@@ -478,10 +478,15 @@ test('existing symbolic-link ancestors are rejected', (t) => {
   );
 });
 
-test('replacing a workspace at the same path invalidates its identity binding', () => {
+test('replacing a workspace at the same path invalidates its identity binding', async () => {
   const root = workspace();
   const authority = grant(root);
   rmSync(root, { recursive: true, force: true });
+  // ext4 reuses inode numbers immediately, so the replacement is detected via
+  // the directory birth timestamp. Linux file timestamps tick at coarse-clock
+  // granularity (up to ~10ms); wait one tick so the recreated directory cannot
+  // share both the inode and the birth timestamp of the original.
+  await new Promise((resolve) => setTimeout(resolve, 20));
   mkdirSync(root, { recursive: true });
   assert.deepEqual(
     evaluateTaskAuthority(authority, canonical(root), APPROVED_AT + 1),
@@ -838,4 +843,267 @@ test('addendum dimensions hold 64 entries and report saturation', () => {
     sideEffects: ['network'],
   }));
   assert.deepEqual(addendumSaturatedDimensions(small), []);
+});
+
+// --- Out-of-workspace read triage: sensitive → deny, dependency cache →
+// allow, anything else → ask-user once (remediable, addendum-remembered). ---
+
+test('out-of-workspace reads triage into deny / allow / ask-user tiers', () => {
+  const root = workspace();
+  const authority = grant(root);
+
+  // Tier 1: credential stores hard-deny and are never remediable.
+  assert.deepEqual(
+    evaluateTaskAuthority(authority, canonical(root, {
+      readPaths: [join(homedir(), '.ssh', 'id_ed25519')],
+    }), APPROVED_AT + 1),
+    { kind: 'deny', reason: 'read-path-sensitive' },
+  );
+
+  // Tier 2: read-only package-manager caches allow without asking.
+  assert.deepEqual(
+    evaluateTaskAuthority(authority, canonical(root, {
+      readPaths: [join(homedir(), '.npm', '_cacache', 'aha-fixture', 'dep.js')],
+    }), APPROVED_AT + 1),
+    { kind: 'allow', reason: 'within-task-authority' },
+  );
+  assert.deepEqual(
+    evaluateTaskAuthority(authority, canonical(root, {
+      readPaths: [join(homedir(), '.cargo', 'registry', 'src', 'lib.rs')],
+    }), APPROVED_AT + 1),
+    { kind: 'allow', reason: 'within-task-authority' },
+  );
+
+  // Tier 3: any other outside path asks the user instead of hard-failing.
+  const outside = mkdtempSync(join(tmpdir(), 'ahastation-authority-read-'));
+  assert.deepEqual(
+    evaluateTaskAuthority(authority, canonical(root, {
+      readPaths: [join(outside, 'notes.txt')],
+    }), APPROVED_AT + 1),
+    { kind: 'ask-user', reason: 'authority-miss:read-path-not-granted' },
+  );
+});
+
+test('a hand-approved outside read stops asking and covers siblings', () => {
+  const root = workspace();
+  const authority = grant(root);
+  const outside = mkdtempSync(join(tmpdir(), 'ahastation-authority-read-'));
+  const request = canonical(root, {
+    readPaths: [join(outside, 'docs', 'readme.txt')],
+  });
+  assert.equal(
+    evaluateTaskAuthority(authority, request, APPROVED_AT + 1).reason,
+    'authority-miss:read-path-not-granted',
+  );
+
+  const addendum = extendAuthorityAddendum(authority, request);
+  assert.deepEqual(
+    evaluateTaskAuthority(authority, request, APPROVED_AT + 2, addendum),
+    { kind: 'allow', reason: 'within-user-approved-addendum' },
+  );
+  // Same coverage rule as write paths: the approved file covers siblings.
+  assert.deepEqual(
+    evaluateTaskAuthority(authority, canonical(root, {
+      readPaths: [join(outside, 'docs', 'other.txt')],
+    }), APPROVED_AT + 2, addendum),
+    { kind: 'allow', reason: 'within-user-approved-addendum' },
+  );
+  // Unrelated outside directories keep asking.
+  assert.equal(
+    evaluateTaskAuthority(authority, canonical(root, {
+      readPaths: [join(outside, 'elsewhere', 'file.txt')],
+    }), APPROVED_AT + 2, addendum).reason,
+    'authority-miss:read-path-not-granted',
+  );
+
+  // Sensitive targets never enter the addendum, even if approval is forced.
+  const poisoned = extendAuthorityAddendum(authority, canonical(root, {
+    readPaths: [join(homedir(), '.aws', 'credentials')],
+  }), addendum);
+  assert.deepEqual(poisoned.readPaths, addendum.readPaths);
+  assert.deepEqual(
+    evaluateTaskAuthority(authority, canonical(root, {
+      readPaths: [join(homedir(), '.aws', 'credentials')],
+    }), APPROVED_AT + 2, poisoned),
+    { kind: 'deny', reason: 'read-path-sensitive' },
+  );
+});
+
+test('rebaseAuthorityAddendum carries approved read targets into a rework grant', () => {
+  const root = workspace();
+  const authority = grant(root);
+  const outside = mkdtempSync(join(tmpdir(), 'ahastation-authority-read-'));
+  const request = canonical(root, {
+    readPaths: [join(outside, 'shared', 'config.json')],
+  });
+  const addendum = extendAuthorityAddendum(authority, request);
+
+  const rework = compileReworkTaskAuthority(authority, 2, root, authorityRequest());
+  const rebased = rebaseAuthorityAddendum(rework, addendum);
+  assert.deepEqual(rebased.readPaths, addendum.readPaths);
+  assert.deepEqual(
+    evaluateTaskAuthority(rework, { ...request, attempt: 2 }, APPROVED_AT + 2, rebased),
+    { kind: 'allow', reason: 'within-user-approved-addendum' },
+  );
+});
+
+test('MSYS drive paths from Git Bash tools normalize on win32', (t) => {
+  if (process.platform !== 'win32') {
+    t.skip('MSYS path rewriting is win32-only');
+    return;
+  }
+  const root = realpathSync(workspace());
+  const authority = grant(root);
+  const drive = root[0].toLowerCase();
+  const msysRoot = `/${drive}${root.slice(2).replaceAll('\\', '/')}`;
+  // A workspace-internal read reported in `/c/...` form must not be treated
+  // as a workspace escape.
+  assert.deepEqual(
+    evaluateTaskAuthority(authority, canonical(root, {
+      readPaths: [`${msysRoot}/src/auth/login.ts`],
+    }), APPROVED_AT + 1),
+    { kind: 'allow', reason: 'within-task-authority' },
+  );
+  // The rewrite must not open a bypass: sensitive targets in MSYS form still
+  // hard-deny.
+  const home = homedir();
+  const msysSsh = `/${home[0].toLowerCase()}${home.slice(2).replaceAll('\\', '/')}/.ssh/id_rsa`;
+  assert.deepEqual(
+    evaluateTaskAuthority(authority, canonical(root, {
+      readPaths: [msysSsh],
+    }), APPROVED_AT + 1),
+    { kind: 'deny', reason: 'read-path-sensitive' },
+  );
+});
+
+test('distinct denied requests do not accumulate one exhaustion streak', async () => {
+  const root = workspace();
+  const resolved = [];
+  const session = {
+    async start() {},
+    sendUserText() {},
+    sendUserContent() {},
+    resolvePermission(id, decision, reason) {
+      resolved.push({ id, decision, reason });
+    },
+    async interrupt() {},
+    end() {},
+  };
+  const backend = new CodexBackend();
+  const scheduler = new WorkerScheduler({
+    emit() {},
+    cwd: root,
+    autoApproveScope: 'off',
+    taskAuthorityCompilerRequired: true,
+    compileTaskAuthority(input) {
+      return compileTaskAuthority(
+        input.taskId,
+        input.attempt,
+        input.planVersion,
+        input.approvalDecisionId,
+        input.workspaceRoot,
+        input.authorityRequest,
+        input.approvedAt,
+      );
+    },
+    async persistTaskAuthority() {},
+    normalizePermissionRequest(_backendId, nativeRequest) {
+      return backend.normalizePermissionRequest(nativeRequest);
+    },
+    async persistPermissionDecision() {},
+    workspaceManager: {
+      inspectBaseline() {
+        return {
+          kind: 'git-clean',
+          revision: 'abc123',
+          changedPaths: [],
+          untrackedPaths: [],
+          truncated: false,
+        };
+      },
+      canPrepare() { return true; },
+      prepare() {
+        return {
+          kind: 'git-worktree',
+          cwd: root,
+          branch: 'task/deny-batch',
+          sourceRevision: 'abc123',
+          lockKeys: [],
+          baseline: {
+            kind: 'git-clean',
+            revision: 'abc123',
+            changedPaths: [],
+            untrackedPaths: [],
+            truncated: false,
+          },
+          managed: true,
+        };
+      },
+      release() {},
+    },
+    sessionFactory() { return session; },
+    buildWorkerMcp() { return {}; },
+    getTalker() { return null; },
+    isClosed() { return false; },
+    getSpeechFilterMode() { return 'strict'; },
+  });
+
+  assert.deepEqual(scheduler.installPlan([{
+    id: 'deny-batch',
+    title: 'Deny batch',
+    prompt: 'Only edit auth files.',
+    deps: [],
+    executorBackendId: 'codex',
+    writePaths: ['src/auth'],
+    workspaceMode: 'git-worktree',
+    authorityRequest: authorityRequest({
+      toolKinds: ['read', 'write'],
+      commands: [],
+      networkHosts: [],
+    }),
+  }], {
+    decisionId: 'approval-deny-batch',
+    approvedAt: Date.now(),
+  }), { ok: true });
+  await new Promise((resolvePromise) => setImmediate(resolvePromise));
+
+  // A parallel batch of *different* requests denied for the same reason must
+  // not add up to an instant kill (trajectory: 4 distinct Reads in one turn).
+  for (let index = 0; index < 4; index += 1) {
+    scheduler.onWorkerEvent('deny-batch', {
+      kind: 'permission-request',
+      id: `bash-batch-${index}`,
+      toolName: 'Bash',
+      input: {
+        executable: 'npm',
+        argv: ['run', `script-${index}`],
+      },
+      toolUseID: `bash-batch-${index}`,
+    });
+    await new Promise((resolvePromise) => setImmediate(resolvePromise));
+  }
+  assert.equal(resolved.filter((entry) => entry.decision === 'deny').length, 4);
+  assert.equal(
+    scheduler.snapshot().find((task) => task.id === 'deny-batch')?.status,
+    'running',
+    'distinct denials must not exhaust the worker',
+  );
+
+  // Only re-issuing the byte-identical request accumulates strikes.
+  for (let index = 0; index < 3; index += 1) {
+    scheduler.onWorkerEvent('deny-batch', {
+      kind: 'permission-request',
+      id: `bash-repeat-${index}`,
+      toolName: 'Bash',
+      input: {
+        executable: 'npm',
+        argv: ['run', 'always-the-same'],
+      },
+      toolUseID: `bash-repeat-${index}`,
+    });
+    await new Promise((resolvePromise) => setImmediate(resolvePromise));
+  }
+  const node = scheduler.snapshot().find((task) => task.id === 'deny-batch');
+  assert.equal(node?.status, 'failed');
+  assert.match(node?.summary ?? '', /repeated authority denial/);
 });
