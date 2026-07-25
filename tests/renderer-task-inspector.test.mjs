@@ -4,14 +4,26 @@ import test from 'node:test';
 
 const read = (path) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
 
-test('selecting a Task Rail node opens the docked inspector beside the meeting surface', () => {
+test('task board focus and worker tiles open the docked inspector beside the meeting surface', () => {
   const stage = read('src/components/ScreenStage.tsx');
-  const rail = read('src/components/TaskRail.tsx');
+  const board = read('src/components/TasksView.tsx');
+  const activity = read('src/components/ActivityTabContent.tsx');
+  const userTasks = read('src/components/UserTasksPanel.tsx');
+  const windows = read('src/lib/stage-window-store.ts');
   assert.match(stage, /selectedTaskId/);
-  assert.match(stage, /onSelect=\{handleSelectTask\}/);
+  assert.match(stage, /focusTask/);
+  assert.match(stage, /handleSelectTask/);
+  assert.match(stage, /inspectorOpenSeq/);
+  assert.match(stage, /openSeq=\{inspectorOpenSeq\}/);
+  assert.match(stage, /onOpenTask=\{handleSelectTask\}/);
   assert.match(stage, /<TaskInspector/);
   assert.match(stage, /<ActivityTabContent/);
-  assert.match(rail, /aria-pressed=\{selectedId === node\.id\}/);
+  assert.doesNotMatch(stage, /<TaskRail/);
+  assert.match(board, /onOpenTask/);
+  assert.match(activity, /onOpenTask=\{onOpenTask\}/);
+  assert.match(userTasks, /onOpenTask\?: \(taskId: string\) => void/);
+  assert.match(windows, /title: '工作区'/);
+  assert.doesNotMatch(windows, /title: '活动'/);
 });
 
 test('Task Inspector exposes every required evidence section', () => {
@@ -20,7 +32,7 @@ test('Task Inspector exposes every required evidence section', () => {
     'Overview',
     'Context',
     'Messages',
-    'Activity',
+    'Events',
     'Diff Review',
     'Verification',
     'Permissions',
@@ -47,7 +59,8 @@ test('bounded rework budget and explicit user extension stay visible', () => {
   const inspector = read('src/components/TaskInspector.tsx');
   assert.match(inspector, /Bounded rework budget/);
   assert.match(inspector, /budget-paused/);
-  assert.match(inspector, /增加一次返工额度/);
+  assert.match(inspector, /不设预算并继续/);
+  assert.match(inspector, /只加一次返工额度/);
   assert.match(inspector, /tasks\.extendBudget/);
 });
 
@@ -84,10 +97,11 @@ test('a stalled Coordinator review is surfaced as unfinished, never as a pass', 
 });
 
 test('task statuses include text and icon semantics rather than color alone', () => {
-  const rail = read('src/components/TaskRail.tsx');
-  assert.match(rail, /const LABEL: Record<WorkerStatus, string>/);
-  assert.match(rail, /function StatusIcon/);
-  assert.match(rail, /aria-label=\{`\$\{label\}/);
+  const columns = read('src/lib/task-columns.ts');
+  const board = read('src/components/TasksView.tsx');
+  assert.match(columns, /WORKER_STATUS_LABEL/);
+  assert.match(board, /function StatusIcon/);
+  assert.match(board, /task\.statusLabel|task\.blockedReason/);
 });
 
 test('compact widths use an in-window drawer and never open a separate inspector window', () => {

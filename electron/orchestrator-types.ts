@@ -39,6 +39,7 @@ export type WorkerStatusKind =
   | 'running'
   | 'verifying'
   | 'reviewing'
+  | 'coordinator-reviewing'
   | 'awaiting-acceptance'
   | 'integration-queued'
   | 'integrating'
@@ -143,7 +144,17 @@ export type OrchestratorOnlyEvent =
   | { kind: 'meeting-delivery-updated'; delivery: MeetingDelivery | null; decision: FinalMeetingDecision | null }
   | { kind: 'coordinator-briefing'; briefing: CoordinatorBriefing }
   | { kind: 'plan-updated'; plan: MeetingPlan }
-  | { kind: 'plan-proposed'; tasks: PlanMeetingTask[] }
+  | {
+    kind: 'plan-proposed';
+    tasks: PlanMeetingTask[];
+    brief?: {
+      goal: string;
+      approach?: string;
+      steps: Array<{ title: string; detail: string; taskId?: string }>;
+      risks: string[];
+      openQuestions: string[];
+    };
+  }
   | { kind: 'decision-pending'; decisionId: string; question: string; path: string; recommendedTitle: string; calendarOk: boolean; remindersOk: boolean }
   | { kind: 'decision-resolved'; decisionId: string; question: string; path: string; conclusion: string }
   | { kind: 'document-saved'; title: string; filename: string; path: string }
@@ -266,6 +277,23 @@ export interface WorkerHandle {
   /** First stall fires a nudge to the worker; only escalate to the user on
    *  the second consecutive stall (meaning the nudge didn't unblock it). */
   stallNudged: boolean;
+  /** Timestamp the handle entered its current parked (slot-holding,
+   *  non-running) delivery status, so sweepStalls can alert / fail-closed
+   *  long-stuck parkers. Undefined while running / pending / terminal. */
+  parkedSinceTs?: number;
+  /** One-shot alert latch for a parked stretch, mirroring stallNotified. */
+  parkedNotified?: boolean;
+  /** Consecutive identical authority hard-denies. After the streak limit the
+   *  attempt terminates as failed/blocked instead of burning the token budget. */
+  authorityDenyStreak: number;
+  lastAuthorityDenyReason?: string;
+  /** Targets the user approved by hand during this attempt. Consulted only for
+   *  remediable authority misses so the same directory/command/host stops
+   *  asking; dropped whenever the attempt or its grant changes. */
+  authorityAddendum?: import('./task-authority.js').TaskAuthorityAddendum;
+  /** Canonical requests currently waiting on a user decision, keyed by native
+   *  request id, so an approval can be folded into the addendum. */
+  pendingAuthorityAsks?: Map<string, import('./backends/canonical-execution.js').CanonicalExecutionRequest>;
 }
 
 export interface RecentFileEdit {

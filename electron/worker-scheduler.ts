@@ -31,6 +31,7 @@ import type {
 import { randomUUID } from 'node:crypto';
 import { resolve as pathResolve } from 'node:path';
 import {
+  coerceWorkspaceModeForBaseline,
   normalizePlanMeetingTasks,
   validatePlan,
   type PlanMeetingTask,
@@ -104,7 +105,8 @@ import type {
   WorkerSpecialtyKind,
   WorkerStatusKind,
 } from './orchestrator-types.js';
-import { decideTaskPermission } from './permission-broker.js';
+import { decideTaskPermission, DEFAULT_PERMISSION_TIMEOUT_MS } from './permission-broker.js';
+import { extendAuthorityAddendum } from './task-authority.js';
 import {
   buildFailureFingerprint,
   DEFAULT_TASK_BUDGET,
@@ -288,8 +290,36 @@ const QUEUED_UPDATE_MAX = 8;
 // waits blind. Swept on a coarse interval; only runs while a worker is alive.
 const STALL_THRESHOLD_MS = 45_000;
 const STALL_SWEEP_MS = 15_000;
+// Parked slot-holders (verifying / reviewing / coordinator-reviewing /
+// awaiting-acceptance / integration-queued / integrating / integration-conflict)
+// hold a concurrency slot but emit no SDK activity, so the running-worker sweep
+// is blind to them. Without coverage a swallowed throw or a forgotten
+// acceptance silently consumes a slot forever. See sweepParked.
+const PARKED_SLOT_STATUSES: ReadonlySet<WorkerStatusKind> = new Set([
+  'verifying',
+  'reviewing',
+  'coordinator-reviewing',
+  'awaiting-acceptance',
+  'integration-queued',
+  'integrating',
+  'integration-conflict',
+]);
+// Should-be-transient parks. If one persists this long the harness is hung on
+// an await that will never settle (a throw Fix 2's try/catch didn't catch, e.g.
+// a never-settling review driver) - fail the attempt closed and free the slot.
+const PARKED_TRANSIENT_STATUSES: ReadonlySet<WorkerStatusKind> = new Set([
+  'verifying',
+  'integrating',
+]);
+const PARKED_ALERT_MS = 60_000;
+const PARKED_FAIL_CLOSED_MS = 600_000;
 const TASK_HISTORY_MAX = 50;
 const TASK_MESSAGE_MAX_CHARS = 100_000;
+/** Identical authority denials before the scheduler fails the attempt closed. */
+const AUTHORITY_DENY_STREAK_LIMIT = 3;
+/** Approval cards a single attempt may have in flight before we stop tracking
+ *  them for addendum promotion. Cards still work; they just keep asking. */
+const PENDING_AUTHORITY_ASK_MAX = 32;
 
 function boundedTaskText(
   value: string,
@@ -398,6 +428,11 @@ export class WorkerScheduler {
   private readonly steeringMessageByWorker = new Map<string, string>();
   private readonly pendingMailboxAckByWorker = new Map<string, string>();
   private readonly mailboxAckInFlightByWorker = new Map<string, Promise<void>>();
+  /** Fail-closed timers for ask-user permission cards on backends without
+   *  their own broker (claude-code / codex / kimi / qoder). OpenCode is
+   *  excluded - its adapter owns PermissionBroker which already arms this
+   *  timeout. Keyed by native request id. */
+  private readonly permissionTimers = new Map<string, { handleId: string; timer: ReturnType<typeof setTimeout> }>();
   private readonly automaticReworkByAttempt = new Map<string, Promise<void>>();
 
   constructor(opts: WorkerSchedulerOpts) {
@@ -458,7 +493,10 @@ export class WorkerScheduler {
       }
       if (h.summary && (h.status === 'accepted' || h.status === 'done')) parts.push(`summary="${h.summary}"`);
       if (h.deps.length > 0) {
-        const pending = h.deps.filter((d) => this.workers.get(d)?.status !== 'accepted');
+                const pending = h.deps.filter((d) => {
+                  const status = this.workers.get(d)?.status;
+                  return status !== 'accepted' && status !== 'done';
+                });
         if (pending.length > 0) parts.push(`waiting_on=${pending.join(',')}`);
       }
       lines.push(parts.join(' | '));
@@ -900,7 +938,20 @@ export class WorkerScheduler {
    *  the pending entry. Talker resolutions are handled separately by the
    *  orchestrator. */
   resolvePermissionInAny(id: string, decision: 'allow' | 'deny', message?: string): void {
+    // The user answered (or the host resolved) - cancel the fail-closed timer.
+    this.clearPermissionTimeout(id);
     for (const handle of this.workers.values()) {
+      const asked = handle.pendingAuthorityAsks?.get(id);
+      if (asked) {
+        handle.pendingAuthorityAsks!.delete(id);
+        if (decision === 'allow' && handle.authorityGrant) {
+          handle.authorityAddendum = extendAuthorityAddendum(
+            handle.authorityGrant,
+            asked,
+            handle.authorityAddendum,
+          );
+        }
+      }
       handle.session?.resolvePermission(id, decision, message);
     }
   }
@@ -1016,11 +1067,23 @@ export class WorkerScheduler {
       tasks = normalizePlanMeetingTasks(
         inputs,
         this.opts.defaultBackendId ?? 'claude-code',
+        {
+          cwd: this.opts.cwd,
+          baselineKind: typeof this.opts.workspaceManager?.inspectBaseline === 'function'
+            ? this.opts.workspaceManager.inspectBaseline().kind
+            : undefined,
+        },
       ).tasks;
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) };
     }
-    const err = validatePlan(tasks);
+    tasks = this.adaptTasksForWorkspaceBaseline(tasks);
+    const idAllocation = this.allocateInstallTaskIds(tasks);
+    if (!idAllocation.ok) return idAllocation;
+    tasks = idAllocation.tasks;
+    const err = validatePlan(tasks, {
+      knownDependencyIds: this.satisfiedDependencyIds(),
+    });
     if (err) return { ok: false, error: err.message };
     for (const task of tasks) {
       const pathError = validateWorkspaceWritePaths(
@@ -1029,11 +1092,6 @@ export class WorkerScheduler {
       );
       if (pathError) {
         return { ok: false, error: `task ${task.id}: ${pathError}` };
-      }
-    }
-    for (const task of tasks) {
-      if (this.workers.has(task.id)) {
-        return { ok: false, error: `Worker id already in use: ${task.id}` };
       }
     }
     for (const task of tasks) {
@@ -1113,7 +1171,7 @@ export class WorkerScheduler {
       }
 
       const handle = this.workers.get(operation.taskId);
-      if (!handle) return { ok: false, error: `unknown task: ${operation.taskId}` };
+      if (!handle) return { ok: false, error: this.unknownTaskError(operation.taskId) };
       if (operation.kind === 'cancel-pending-task') {
         if (!projected.has(operation.taskId)) {
           return { ok: false, error: `task ${operation.taskId} is cancelled more than once` };
@@ -1129,7 +1187,7 @@ export class WorkerScheduler {
       }
       if (operation.kind === 'update-task') {
         const task = projected.get(operation.taskId);
-        if (!task) return { ok: false, error: `unknown task: ${operation.taskId}` };
+        if (!task) return { ok: false, error: this.unknownTaskError(operation.taskId) };
         if (handle.status !== 'pending' || handle.session) {
           return {
             ok: false,
@@ -1278,7 +1336,7 @@ export class WorkerScheduler {
 
   async queueFollowUp(taskId: string, text: string): Promise<TaskMessage> {
     const handle = this.workers.get(taskId);
-    if (!handle) throw new Error(`unknown task: ${taskId}`);
+    if (!handle) throw new Error(this.unknownTaskError(taskId));
     if (handle.status === 'budget-paused') {
       throw new Error('task rework is budget-paused and requires an explicit user budget decision');
     }
@@ -1300,7 +1358,7 @@ export class WorkerScheduler {
 
   async sendTaskMessage(taskId: string, text: string): Promise<TaskMessage> {
     const handle = this.workers.get(taskId);
-    if (!handle) throw new Error(`unknown task: ${taskId}`);
+    if (!handle) throw new Error(this.unknownTaskError(taskId));
     if (handle.status === 'budget-paused') {
       throw new Error('task rework is budget-paused and requires an explicit user budget decision');
     }
@@ -1320,7 +1378,9 @@ export class WorkerScheduler {
 
   async steerTask(taskId: string, text: string): Promise<SteerResult> {
     const handle = this.workers.get(taskId);
-    if (!handle) return { ok: false, reason: 'unknown' };
+    if (!handle) {
+      return { ok: false, reason: 'unknown', availableTaskIds: this.listKnownTaskIds() };
+    }
     if (handle.status === 'done' || handle.status === 'accepted') return { ok: false, reason: 'done' };
     if (handle.status === 'failed') return { ok: false, reason: 'failed' };
     if (!handle.session) return { ok: false, reason: 'no-session' };
@@ -1376,7 +1436,7 @@ export class WorkerScheduler {
     sourceAttempt?: number,
   ): Promise<TaskMessage> {
     const handle = this.workers.get(taskId);
-    if (!handle) throw new Error(`unknown task: ${taskId}`);
+    if (!handle) throw new Error(this.unknownTaskError(taskId));
     if (handle.status !== 'running' || !handle.session) {
       throw new Error(`worker cannot ask a question while ${handle.status}`);
     }
@@ -1422,7 +1482,7 @@ export class WorkerScheduler {
       throw new Error('forward source must have reached the Coordinator');
     }
     const target = this.workers.get(toTaskId);
-    if (!target) throw new Error(`unknown task: ${toTaskId}`);
+    if (!target) throw new Error(this.unknownTaskError(toTaskId));
     if (target.status === 'budget-paused') {
       throw new Error('target task is budget-paused and requires an explicit user budget decision');
     }
@@ -1535,54 +1595,113 @@ export class WorkerScheduler {
       return;
     }
     const now = Date.now();
-    let anyRunning = false;
+    let anyActive = false;
     for (const handle of this.workers.values()) {
-      if (handle.status !== 'running' || !handle.session) continue;
-      anyRunning = true;
-      if (handle.stallNotified) continue;
-      const idleMs = now - handle.live.lastUpdateTs;
-      if (idleMs < STALL_THRESHOLD_MS) continue;
+      if (handle.status === 'running' && handle.session) {
+        anyActive = true;
+        if (handle.stallNotified) continue;
+        const idleMs = now - handle.live.lastUpdateTs;
+        if (idleMs < STALL_THRESHOLD_MS) continue;
 
-      if (!handle.stallNudged) {
-        // First stall: nudge the worker to continue rather than bothering
-        // the user. The nudge resets stallNotified so the next sweep cycle
-        // re-checks; if it's still stuck we escalate.
-        handle.stallNudged = true;
-        const toolHint = handle.live.currentTool
-          ? `你当前卡在 ${handle.live.currentTool}，`
-          : '';
-        handle.session.sendUserText(
-          `${toolHint}已经超过 ${Math.round(idleMs / 1000)} 秒没有进展了。请继续执行你的任务，如果遇到无法解决的问题就直接换一个方案绕过去。不要停下来等确认。`,
-          'normal',
-        );
-        continue;
+        if (!handle.stallNudged) {
+          // First stall: nudge the worker to continue rather than bothering
+          // the user. The nudge resets stallNotified so the next sweep cycle
+          // re-checks; if it's still stuck we escalate.
+          handle.stallNudged = true;
+          const toolHint = handle.live.currentTool
+            ? `你当前卡在 ${handle.live.currentTool}，`
+            : '';
+          handle.session.sendUserText(
+            `${toolHint}已经超过 ${Math.round(idleMs / 1000)} 秒没有进展了。请继续执行你的任务，如果遇到无法解决的问题就直接换一个方案绕过去。不要停下来等确认。`,
+            'normal',
+          );
+          continue;
+        }
+
+        // Second stall (nudge didn't help): escalate to the user.
+        handle.stallNotified = true;
+        this.opts.emit({
+          source: 'talker',
+          event: {
+            kind: 'worker-stalled',
+            workerId: handle.id,
+            title: handle.title,
+            idleMs,
+            currentTool: handle.live.currentTool,
+          },
+        });
+        this.emitCoordinatorBriefing({
+          kind: 'stalled',
+          title: `${handle.title} 长时间无进展`,
+          summary: handle.live.currentTool
+            ? `Worker 停留在 ${handle.live.currentTool}，自动提醒后仍未继续。`
+            : 'Worker 在自动提醒后仍未产生新进展。',
+          blockers: [handle.live.currentTool ?? 'no-progress'],
+          recommendedAction: 'request-user-decision',
+          workerId: handle.id,
+          taskId: handle.currentTaskId,
+        });
+      } else if (PARKED_SLOT_STATUSES.has(handle.status)) {
+        // Parked slot-holders (verifying / awaiting-acceptance / integrating /
+        // ...) hold a concurrency slot but emit no SDK activity, so the running
+        // sweep above never touches them. Surface long-stuck parkers and
+        // fail-close the should-be-transient ones.
+        anyActive = true;
+        this.sweepParked(handle, now);
       }
+    }
+    if (!anyActive) this.stopStallWatch();
+  }
 
-      // Second stall (nudge didn't help): escalate to the user.
-      handle.stallNotified = true;
+  /** Alert (and for transient parks, fail-closed) a worker parked in a
+   *  slot-holding delivery status for too long. Externally-waiting states
+   *  (awaiting-acceptance / integration-conflict / coordinator-reviewing) only
+   *  get a briefing - they legitimately wait on a human. Transient states
+   *  (verifying / integrating) that never resolve are fail-closed. */
+  private sweepParked(handle: WorkerHandle, now: number): void {
+    const since = handle.parkedSinceTs ?? handle.live.lastUpdateTs;
+    const parkedMs = now - since;
+    if (parkedMs < PARKED_ALERT_MS) return;
+    if (PARKED_TRANSIENT_STATUSES.has(handle.status) && parkedMs >= PARKED_FAIL_CLOSED_MS) {
+      // A transient park should resolve in seconds. If it hasn't in
+      // PARKED_FAIL_CLOSED_MS the harness is hung on an await that will never
+      // settle - fail the attempt closed and free the slot.
+      const summary = `Worker 在 ${handle.status} 状态超过 ${Math.round(parkedMs / 1000)} 秒未恢复，已自动失败。`;
       this.opts.emit({
         source: 'talker',
-        event: {
-          kind: 'worker-stalled',
-          workerId: handle.id,
-          title: handle.title,
-          idleMs,
-          currentTool: handle.live.currentTool,
-        },
+        event: { kind: 'worker-ended', workerId: handle.id, status: 'failed', summary },
       });
       this.emitCoordinatorBriefing({
-        kind: 'stalled',
-        title: `${handle.title} 长时间无进展`,
-        summary: handle.live.currentTool
-          ? `Worker 停留在 ${handle.live.currentTool}，自动提醒后仍未继续。`
-          : 'Worker 在自动提醒后仍未产生新进展。',
-        blockers: [handle.live.currentTool ?? 'no-progress'],
-        recommendedAction: 'request-user-decision',
+        kind: 'failed',
+        title: `${handle.title} 交付卡死`,
+        summary,
+        blockers: [handle.status],
+        recommendedAction: 'rework',
         workerId: handle.id,
         taskId: handle.currentTaskId,
       });
+      this.harvestUnresolvedAddenda(handle);
+      this.disposeWorker(handle, 'failed', summary);
+      this.emitPlanUpdate();
+      this.cascadeFailure(handle.id);
+      this.spawnReadyWorkers();
+      return;
     }
-    if (!anyRunning) this.stopStallWatch();
+    if (handle.parkedNotified) return;
+    handle.parkedNotified = true;
+    const action: CoordinatorBriefing['recommendedAction'] =
+      handle.status === 'awaiting-acceptance' ? 'review'
+        : handle.status === 'integration-conflict' ? 'rework'
+        : 'request-user-decision';
+    this.emitCoordinatorBriefing({
+      kind: 'stalled',
+      title: `${handle.title} 停留在 ${handle.status}`,
+      summary: `Worker 已在 ${handle.status} 状态等待 ${Math.round(parkedMs / 1000)} 秒，占用一个并发槽位。`,
+      blockers: [handle.status],
+      recommendedAction: action,
+      workerId: handle.id,
+      taskId: handle.currentTaskId,
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -1692,11 +1811,15 @@ export class WorkerScheduler {
           retryable: true,
         });
       } else if (e.kind === 'ended') {
-        if (this.steeringMessageByWorker.has(handle.id)) {
-          // A steering interrupt ends only the current provider turn. The
-          // task, workspace and checkpoint remain active for the queued steer.
-          return;
-        }
+        // A BackendSession `ended` is a real session end, not a steer
+        // interrupt: steer interrupts (`session.interrupt('steer')`) emit a
+        // `worker-signal { kind: 'ended', reason: 'interrupted' }` that is
+        // handled in handleWorkerSignal with a reason check. Swallowing a real
+        // `ended` here just because a steer was in flight turned crashes into
+        // permanent `running` zombies (the stall watchdog only alerts).
+        // The session is gone, so any in-flight steer is void - clear it so it
+        // can't stick and block deliverQueuedSteer / deliverNextFollowUp.
+        this.steeringMessageByWorker.delete(handle.id);
         // SDK stream end is transport state, never delivery success. A report
         // already being verified is allowed to finish; an unreported running
         // Worker is failed closed by handleWorkerSignal.
@@ -1761,6 +1884,7 @@ export class WorkerScheduler {
         nativeRequestId: event.id,
         toolName: event.toolName,
       },
+      handle.authorityAddendum,
     );
     const persist = this.opts.persistPermissionDecision;
     if (!persist && this.opts.taskAuthorityCompilerRequired) {
@@ -1782,12 +1906,42 @@ export class WorkerScheduler {
       return;
     }
     if (canonical.decision.kind === 'allow') {
+      handle.authorityDenyStreak = 0;
+      handle.lastAuthorityDenyReason = undefined;
       handle.session?.resolvePermission(event.id, 'allow', canonical.decision.reason);
       return;
     }
     if (canonical.decision.kind === 'deny') {
-      handle.session?.resolvePermission(event.id, 'deny', canonical.decision.reason);
+      const reason = canonical.decision.reason;
+      if (handle.lastAuthorityDenyReason === reason) {
+        handle.authorityDenyStreak += 1;
+      } else {
+        handle.lastAuthorityDenyReason = reason;
+        handle.authorityDenyStreak = 1;
+      }
+      handle.session?.resolvePermission(event.id, 'deny', reason);
+      if (
+        handle.authorityDenyStreak >= AUTHORITY_DENY_STREAK_LIMIT
+        && handle.status === 'running'
+      ) {
+        this.failAuthorityExhaustion(handle, reason);
+      }
       return;
+    }
+    handle.authorityDenyStreak = 0;
+    handle.lastAuthorityDenyReason = undefined;
+    // Remember what this card is actually asking for: if the user allows it,
+    // the same target should not interrupt them again this attempt.
+    if (
+      normalized.ok
+      && handle.authorityGrant
+      && canonical.decision.reason.startsWith('authority-miss:')
+    ) {
+      const pending = handle.pendingAuthorityAsks ?? new Map();
+      if (pending.size < PENDING_AUTHORITY_ASK_MAX) {
+        pending.set(event.id, normalized.request);
+        handle.pendingAuthorityAsks = pending;
+      }
     }
     this.opts.emit({
       source: handle.id,
@@ -1796,6 +1950,84 @@ export class WorkerScheduler {
         input: canonical.safeInput,
       },
     });
+    // Fail-closed backstop: an unanswered ask-user card would otherwise hang
+    // the SDK's canUseTool forever (the stall watchdog alerts but cannot
+    // resolve it). Mirror PermissionBroker's timeout. OpenCode is excluded -
+    // its adapter owns the broker which already arms this timer.
+    if (handle.backendId !== 'opencode') {
+      this.armPermissionTimeout(handle, event.id);
+    }
+  }
+
+  /** Arm a fail-closed deny timer for an ask-user permission request. On fire
+   *  the SDK permission is denied and the meeting-UI card is withdrawn. */
+  private armPermissionTimeout(handle: WorkerHandle, requestId: string): void {
+    this.clearPermissionTimeout(requestId);
+    const entry = {
+      handleId: handle.id,
+      timer: setTimeout(() => {
+        this.permissionTimers.delete(requestId);
+        if (this.opts.isClosed()) return;
+        const target = this.workers.get(handle.id);
+        if (!target || !target.session) return;
+        if (
+          target.status === 'failed'
+          || target.status === 'accepted'
+          || target.status === 'interrupted'
+          || target.status === 'done'
+        ) {
+          return;
+        }
+        target.session.resolvePermission(requestId, 'deny', 'permission-timeout');
+        this.opts.emit({ source: handle.id, event: { kind: 'permission-cancelled', id: requestId } });
+        this.emitCoordinatorBriefing({
+          kind: 'stalled',
+          title: `${target.title} 权限请求超时`,
+          summary: `权限请求 ${Math.round(DEFAULT_PERMISSION_TIMEOUT_MS / 1000)}s 未响应，已自动拒绝。`,
+          blockers: ['permission-timeout'],
+          recommendedAction: 'request-user-decision',
+          workerId: target.id,
+          taskId: target.currentTaskId,
+        });
+      }, DEFAULT_PERMISSION_TIMEOUT_MS),
+    };
+    entry.timer.unref?.();
+    this.permissionTimers.set(requestId, entry);
+  }
+
+  private clearPermissionTimeout(requestId: string): void {
+    const entry = this.permissionTimers.get(requestId);
+    if (!entry) return;
+    clearTimeout(entry.timer);
+    this.permissionTimers.delete(requestId);
+  }
+
+  /** Drop every fail-closed timer owned by a handle - used on dispose and on
+   *  rework attempt boundaries (beginFollowUpAttempt ends the session without
+   *  going through disposeWorker, so a stale timer would otherwise fire on the
+   *  reused handle's next session). */
+  private clearPermissionTimersForHandle(handleId: string): void {
+    for (const [requestId, entry] of this.permissionTimers) {
+      if (entry.handleId === handleId) {
+        clearTimeout(entry.timer);
+        this.permissionTimers.delete(requestId);
+      }
+    }
+  }
+
+  private failAuthorityExhaustion(handle: WorkerHandle, reason: string): void {
+    const summary = `blocked by repeated authority denial: ${reason}`;
+    console.error(`[scheduler] authority deny streak for ${handle.id}:`, reason);
+    handle.summary = summary;
+    this.opts.emit({
+      source: 'talker',
+      event: { kind: 'worker-ended', workerId: handle.id, status: 'failed', summary },
+    });
+    this.harvestUnresolvedAddenda(handle);
+    this.disposeWorker(handle, 'failed', summary);
+    this.emitPlanUpdate();
+    this.cascadeFailure(handle.id);
+    this.spawnReadyWorkers();
   }
 
   private createWorkerEvent(handle: WorkerHandle, signal: WorkerAdapterSignal): WorkerEvent {
@@ -1910,6 +2142,9 @@ export class WorkerScheduler {
         this.disposeWorker(handle, 'failed', signal.message);
         this.emitPlanUpdate();
         this.cascadeFailure(handle.id);
+        // Free the slot for independent queued workers - cascadeFailure only
+        // fails dependents. Mirrors failAuthorityExhaustion / finalizeAcceptedHandle.
+        this.spawnReadyWorkers();
       }
       return;
     }
@@ -1992,11 +2227,29 @@ export class WorkerScheduler {
 
     handle.status = 'verifying';
     this.emitPlanUpdate();
-    const view = await this.opts.deliveryHarness.submitExternalReport(handle.deliveryId, signal.report);
+    let view: DeliveryView;
+    try {
+      view = await this.opts.deliveryHarness.submitExternalReport(handle.deliveryId, signal.report);
+    } catch (error) {
+      // submitExternalReport threw - most plausibly reviewDriver.request,
+      // which evaluateReport does not wrap (delivery-harness). Without this
+      // catch the worker sits in 'verifying' holding a slot forever - the
+      // stall sweep only watches 'running'. Fail the attempt closed.
+      await this.failDeliverySubmission(handle, error);
+      return;
+    }
     handle.attempt = view.attempt;
     this.applyDeliveryView(handle, view);
     if (view.status === 'reworking') {
       await this.scheduleAutomaticRework(handle, view);
+      return;
+    }
+    if (view.status === 'failed' || view.status === 'cancelled') {
+      // evaluateReport catches verifier / reviewer throws and transitions to
+      // 'failed' (delivery-harness), returning the view here instead of
+      // throwing. applyDeliveryView already stamped the status; dispose the
+      // worker so it doesn't hold a slot as a zombie.
+      await this.failDeliverySubmission(handle, new Error(`delivery ended in ${view.status} state`), view);
       return;
     }
     if (view.status === 'awaiting-delivery-acceptance') {
@@ -2018,12 +2271,45 @@ export class WorkerScheduler {
     }
   }
 
+  /** Fail a worker closed after its delivery submission threw or returned a
+   *  terminal-failed view. Mirrors the `signal.kind === 'failed'` branch so
+   *  dependents cascade and queued workers are spawned. */
+  private async failDeliverySubmission(
+    handle: WorkerHandle,
+    error: unknown,
+    view?: DeliveryView,
+  ): Promise<void> {
+    const detail = error instanceof Error ? error.message : String(error);
+    const summary = view
+      ? `delivery ${view.status}: ${view.error ?? detail}`
+      : `delivery submission failed: ${detail}`;
+    handle.summary = summary;
+    this.opts.emit({
+      source: 'talker',
+      event: { kind: 'worker-ended', workerId: handle.id, status: 'failed', summary },
+    });
+    this.emitCoordinatorBriefing({
+      kind: 'failed',
+      title: `${handle.title} 交付失败`,
+      summary,
+      blockers: [detail],
+      recommendedAction: 'rework',
+      workerId: handle.id,
+      taskId: handle.currentTaskId,
+    });
+    this.harvestUnresolvedAddenda(handle);
+    this.disposeWorker(handle, 'failed', summary);
+    this.emitPlanUpdate();
+    this.cascadeFailure(handle.id);
+    this.spawnReadyWorkers();
+  }
+
   private applyDeliveryView(handle: WorkerHandle, view: DeliveryView): void {
     const mapped: Partial<Record<DeliveryView['status'], WorkerStatusKind>> = {
       executing: 'running',
       verifying: 'verifying',
       reviewing: 'reviewing',
-      'coordinator-reviewing': 'reviewing',
+      'coordinator-reviewing': 'coordinator-reviewing',
       'awaiting-delivery-acceptance': 'awaiting-acceptance',
       'integration-queued': 'integration-queued',
       integrating: 'integrating',
@@ -2035,8 +2321,22 @@ export class WorkerScheduler {
       cancelled: 'failed',
     };
     const next = mapped[view.status];
+    const prevStatus = handle.status;
     if (next && !(handle.status === 'budget-paused' && view.status === 'reworking')) {
       handle.status = next;
+    }
+    // Track when the handle entered its current parked (slot-holding) status so
+    // sweepParked can alert / fail-closed long-stuck parkers. Reset on any
+    // transition (including parked -> parked: that is progress, e.g.
+    // integration-queued -> integrating) and clear once it leaves the park.
+    if (next && PARKED_SLOT_STATUSES.has(next)) {
+      if (prevStatus !== next || handle.parkedSinceTs === undefined) {
+        handle.parkedSinceTs = Date.now();
+        handle.parkedNotified = false;
+      }
+    } else if (handle.parkedSinceTs !== undefined) {
+      handle.parkedSinceTs = undefined;
+      handle.parkedNotified = false;
     }
     this.opts.emit({
       source: 'talker',
@@ -2186,7 +2486,7 @@ export class WorkerScheduler {
     }
     if (!decisionId.trim()) throw new Error('budget extension decision id is required');
     const handle = this.workers.get(taskId);
-    if (!handle) throw new Error(`unknown task: ${taskId}`);
+    if (!handle) throw new Error(this.unknownTaskError(taskId));
     if (handle.status !== 'budget-paused') {
       throw new Error(`task ${taskId} is not paused by its budget`);
     }
@@ -2447,6 +2747,9 @@ export class WorkerScheduler {
       handle.session = null;
       session.end();
     }
+    // The previous attempt's permission cards are void once its session ends;
+    // drop their fail-closed timers so they can't fire on the reused handle.
+    this.clearPermissionTimersForHandle(handle.id);
     handle.attempt += 1;
     handle.status = 'pending';
     handle.summary = '';
@@ -2474,17 +2777,31 @@ export class WorkerScheduler {
   private async acknowledgeMailboxDelivery(handle: WorkerHandle): Promise<void> {
     const inFlight = this.mailboxAckInFlightByWorker.get(handle.id);
     if (inFlight) {
+      // A concurrent ack is already draining this worker's mailbox - wait for
+      // it and return. The drain loop below catches any message that arrived
+      // during it, so the concurrent caller doesn't need to re-ack.
       await inFlight;
       return;
     }
-    const messageId = this.pendingMailboxAckByWorker.get(handle.id);
-    if (!messageId || !this.opts.taskMailbox) return;
-    const acknowledge = (async () => {
+    if (!this.opts.taskMailbox) return;
+    const drain = (async () => {
       try {
-        await this.opts.taskMailbox!.acknowledge(handle.id, messageId);
-        this.pendingMailboxAckByWorker.delete(handle.id);
-        if (this.steeringMessageByWorker.get(handle.id) === messageId) {
-          this.steeringMessageByWorker.delete(handle.id);
+        // Drain every pending ack one at a time. A steer delivered mid-ack
+        // overwrites pendingMailboxAckByWorker with a newer id; only delete an
+        // entry that still matches the id we just acknowledged, then loop to
+        // catch the newer one. The previous unconditional delete wiped the
+        // newer entry, leaving steeringMessageByWorker stuck on it forever
+        // (which in turn made the `ended` handler swallow real crashes).
+        let messageId = this.pendingMailboxAckByWorker.get(handle.id);
+        while (messageId) {
+          await this.opts.taskMailbox!.acknowledge(handle.id, messageId);
+          if (this.pendingMailboxAckByWorker.get(handle.id) === messageId) {
+            this.pendingMailboxAckByWorker.delete(handle.id);
+          }
+          if (this.steeringMessageByWorker.get(handle.id) === messageId) {
+            this.steeringMessageByWorker.delete(handle.id);
+          }
+          messageId = this.pendingMailboxAckByWorker.get(handle.id);
         }
       } catch (error) {
         console.warn('[scheduler] task mailbox acknowledgement failed', {
@@ -2493,11 +2810,11 @@ export class WorkerScheduler {
         });
       }
     })();
-    this.mailboxAckInFlightByWorker.set(handle.id, acknowledge);
+    this.mailboxAckInFlightByWorker.set(handle.id, drain);
     try {
-      await acknowledge;
+      await drain;
     } finally {
-      if (this.mailboxAckInFlightByWorker.get(handle.id) === acknowledge) {
+      if (this.mailboxAckInFlightByWorker.get(handle.id) === drain) {
         this.mailboxAckInFlightByWorker.delete(handle.id);
       }
     }
@@ -2683,8 +3000,84 @@ export class WorkerScheduler {
       deliveryId: null,
       stallNotified: false,
       stallNudged: false,
+      authorityDenyStreak: 0,
+      lastAuthorityDenyReason: undefined,
     };
     this.workers.set(spec.id, handle);
+  }
+
+  private adaptTasksForWorkspaceBaseline(tasks: PlanMeetingTask[]): PlanMeetingTask[] {
+    const inspect = this.opts.workspaceManager?.inspectBaseline;
+    if (typeof inspect !== 'function') return tasks;
+    const baseline = inspect.call(this.opts.workspaceManager);
+    if (!baseline || baseline.kind === 'git-clean') return tasks;
+    return tasks.map((task) => {
+      const workspaceMode = coerceWorkspaceModeForBaseline(task.workspaceMode, baseline.kind);
+      if (workspaceMode === task.workspaceMode) return task;
+      return { ...task, workspaceMode };
+    });
+  }
+
+  private isTerminalWorkerStatus(status: WorkerHandle['status']): boolean {
+    return status === 'accepted'
+      || status === 'done'
+      || status === 'failed'
+      || status === 'interrupted';
+  }
+
+  private satisfiedDependencyIds(): Set<string> {
+    const ids = new Set<string>();
+    for (const handle of this.workers.values()) {
+      if (handle.status === 'accepted' || handle.status === 'done') {
+        ids.add(handle.id);
+      }
+    }
+    return ids;
+  }
+
+  private listKnownTaskIds(): string[] {
+    return Array.from(this.workers.keys()).sort((left, right) => left.localeCompare(right));
+  }
+
+  private unknownTaskError(taskId: string): string {
+    const available = this.listKnownTaskIds();
+    return available.length > 0
+      ? `unknown task: ${taskId}; available: ${available.join(', ')}`
+      : `unknown task: ${taskId}; available: (none)`;
+  }
+
+  /** Reuse of terminal task ids gets a numeric suffix; live collisions still fail. */
+  private allocateInstallTaskIds(
+    tasks: PlanMeetingTask[],
+  ): { ok: true; tasks: PlanMeetingTask[] } | { ok: false; error: string } {
+    const used = new Set(this.workers.keys());
+    const rename = new Map<string, string>();
+    const allocated: PlanMeetingTask[] = [];
+
+    for (const task of tasks) {
+      let id = task.id;
+      if (used.has(id)) {
+        const existing = this.workers.get(id);
+        if (existing && !this.isTerminalWorkerStatus(existing.status)) {
+          return { ok: false, error: `Worker id already in use: ${id}` };
+        }
+        let suffix = 2;
+        while (used.has(`${task.id}-${suffix}`)) suffix += 1;
+        id = `${task.id}-${suffix}`;
+        rename.set(task.id, id);
+      }
+      used.add(id);
+      allocated.push(id === task.id ? task : { ...task, id });
+    }
+
+    if (rename.size === 0) return { ok: true, tasks: allocated };
+    return {
+      ok: true,
+      tasks: allocated.map((task) => ({
+        ...task,
+        deps: (task.deps ?? []).map((dep) => rename.get(dep) ?? dep),
+      })),
+    };
   }
 
   /** Find an idle worker with the same specialty that can take a new task.
@@ -2740,6 +3133,8 @@ export class WorkerScheduler {
     handle.backendRuntime = undefined;
     handle.effectiveProfile = undefined;
     handle.authorityGrant = undefined;
+    handle.authorityAddendum = undefined;
+    handle.pendingAuthorityAsks = undefined;
     handle.approvalDecisionId = undefined;
     handle.approvalRecordedAt = undefined;
     handle.approvedPlanVersion = undefined;
@@ -2815,6 +3210,10 @@ export class WorkerScheduler {
       authorityGrant,
     });
     handle.authorityGrant = structuredClone(authorityGrant);
+    // A fresh grant means a fresh attempt: hand approvals from the previous one
+    // do not carry over.
+    handle.authorityAddendum = undefined;
+    handle.pendingAuthorityAsks = undefined;
   }
 
   private workspaceInputFor(handle: WorkerHandle): PrepareTaskWorkspaceInput {
@@ -2851,7 +3250,10 @@ export class WorkerScheduler {
   private spawnReadyWorkers(): void {
     for (const handle of this.workers.values()) {
       if (handle.status !== 'pending') continue;
-      const allDepsDone = handle.deps.every((d) => this.workers.get(d)?.status === 'accepted');
+      const allDepsDone = handle.deps.every((d) => {
+        const status = this.workers.get(d)?.status;
+        return status === 'accepted' || status === 'done';
+      });
       if (!allDepsDone) continue;
       if (this.countRunning() >= MAX_CONCURRENT_WORKERS) break;
       const input = this.workspaceInputFor(handle);
@@ -2869,18 +3271,26 @@ export class WorkerScheduler {
             if (handle.workspaceDiagnostic?.code !== block.code) {
               handle.workspaceDiagnostic = block;
               handle.summary = block.message;
+              const dirty = block.code === 'dirty-workspace-write-blocked';
               this.emitCoordinatorBriefing({
                 kind: 'workspace-blocked',
-                title: `任务「${handle.title}」被脏工作区阻止`,
+                title: dirty
+                  ? `任务「${handle.title}」被脏工作区阻止`
+                  : `任务「${handle.title}」需要 Git 仓库`,
                 summary: block.message,
                 recommendedAction: 'revise-plan',
                 workerId: handle.id,
                 taskId: handle.id,
-                blockers: [
-                  '隔离 worktree 不会包含当前未提交改动。',
-                  'AhaStation 不会自动 commit、stash 或复制这些改动。',
-                  '共享锁定模式属于非受管兼容路径，不能自动集成或原子发布。',
-                ],
+                blockers: dirty
+                  ? [
+                      '隔离 worktree 不会包含当前未提交改动。',
+                      'AhaStation 不会自动 commit、stash 或复制这些改动。',
+                      '共享锁定模式属于非受管兼容路径，不能自动集成或原子发布。',
+                    ]
+                  : [
+                      '当前工作区不是 Git 仓库，无法创建隔离 worktree。',
+                      '请将任务改为 shared-locked 兼容模式，或在仓库外初始化 Git。',
+                    ],
               });
               this.emitPlanUpdate();
             }
@@ -2902,7 +3312,10 @@ export class WorkerScheduler {
     const waiting = Array.from(this.workers.values()).filter((handle) => (
       handle.status === 'pending'
       && !this.launching.has(handle.id)
-      && handle.deps.every((dep) => this.workers.get(dep)?.status === 'accepted')
+      && handle.deps.every((dep) => {
+        const status = this.workers.get(dep)?.status;
+        return status === 'accepted' || status === 'done';
+      })
     )).length;
     if (running >= MAX_CONCURRENT_WORKERS && waiting > 0) {
       if (!this.capacityNotified) {
@@ -3229,6 +3642,7 @@ export class WorkerScheduler {
     this.steeringMessageByWorker.delete(handle.id);
     this.pendingMailboxAckByWorker.delete(handle.id);
     this.mailboxAckInFlightByWorker.delete(handle.id);
+    this.clearPermissionTimersForHandle(handle.id);
     handle.live.busy = false;
     handle.live.currentTool = null;
     handle.live.currentToolInput = null;
