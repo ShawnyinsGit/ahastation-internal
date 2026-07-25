@@ -30,7 +30,7 @@ import { SideDrawer } from './components/SideDrawer';
 import { SettingsMenu } from './components/SettingsMenu';
 import { VoiceGuideModal } from './components/VoiceGuideModal';
 import { ParticipantPanel } from './components/ParticipantPanel';
-import { PermissionCard } from './components/PermissionCard';
+import { ApprovalCard } from './components/ApprovalCard';
 import { EditorOverlay } from './components/EditorOverlay';
 import { PlanMeetingModal } from './components/PlanMeetingModal';
 import {
@@ -153,7 +153,7 @@ export function App() {
     return map;
   }, [backends]);
 
-  // SideDrawer renders a single legacy PermissionCard for the first pending
+  // SideDrawer renders the unified ApprovalCard for the first pending
   // permission across all workers (state.pendingPermission). Thread the
   // matching worker's resolving/error flags so that card stays in lock-step
   // with WorkerCard and TaskInspector for the same permission id.
@@ -166,6 +166,22 @@ export function App() {
       error: owner?.permissionError ?? null,
     };
   }, [state.pendingPermission, workers.workerList]);
+
+  // 批准卡片四要素上下文（04 BR-A2：项目/任务/客户端/动作缺一不渲染）
+  const approvalMeta = useMemo(() => {
+    const pending = state.pendingPermission;
+    const ownerW = pending
+      ? workers.workerList.find((w) => w.pendingPermission?.id === pending.id)
+      : undefined;
+    const project = state.cwd
+      ? (state.cwd.split('/').filter(Boolean).pop() ?? state.cwd)
+      : '当前项目';
+    return {
+      owner: ownerW?.title ?? 'Coordinator',
+      backendId: ownerW?.backendId,
+      project,
+    };
+  }, [state.pendingPermission, workers.workerList, state.cwd]);
 
   const speakingRef = useRef(false);
   const sendWithModeRef = useRef<(text: string) => void>(sendText);
@@ -672,6 +688,7 @@ export function App() {
           pending={state.pendingPermission}
           pendingResolving={drawerPermissionState.resolving}
           pendingError={drawerPermissionState.error}
+          approvalMeta={approvalMeta}
           onResolve={resolvePermission}
           onSend={sendWithMode}
           onSendAttachments={sendAttachmentsWithMode}
@@ -738,8 +755,11 @@ export function App() {
       {handheld && permModalOpen && state.pendingPermission && (
         <div className="perm-modal-backdrop" onClick={() => setPermModalOpen(false)}>
           <div className="perm-modal" onClick={(e) => e.stopPropagation()}>
-            <PermissionCard
+            <ApprovalCard
               pending={state.pendingPermission}
+              owner={approvalMeta.owner}
+              backendId={approvalMeta.backendId}
+              project={approvalMeta.project}
               onDecide={async (id, decision) => {
                 const res = await resolvePermission(id, decision);
                 if (res && res.ok) setPermModalOpen(false);

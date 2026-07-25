@@ -76,11 +76,13 @@ test('Follow-up, Steering and Interrupt are distinct task controls', () => {
 
 test('high-risk approval is visible and normal mode has no per-task accept action', () => {
   const inspector = read('src/components/TaskInspector.tsx');
-  const permission = read('src/components/PermissionCard.tsx');
+  const approval = read('src/components/ApprovalCard.tsx');
+  const detail = read('src/components/ApprovalDetailModal.tsx');
   const review = read('src/components/TaskReviewPanel.tsx');
   assert.match(inspector, /高风险确认/);
-  assert.match(permission, /High-risk approval/);
-  assert.match(permission, /高风险操作不会被 Coordinator 自动批准/);
+  assert.match(approval, /需进入详情/);
+  assert.match(detail, /高风险操作 · 需完整确认/);
+  assert.match(detail, /我已阅读/);
   assert.match(inspector, /确认已人工检查/);
   assert.match(inspector, /tasks\.confirmReviewEvidence/);
   assert.match(inspector, /该内容不会发送给 Coordinator 模型/);
