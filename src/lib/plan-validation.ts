@@ -65,16 +65,6 @@ export function normalizePlanDraft(
   };
 }
 
-export function normalizePlanDrafts(
-  tasks: PlanMeetingTaskInput[],
-  backends: BackendInfo[],
-): PlanMeetingTaskInput[] {
-  const defaultBackendId = backends.find((backend) => backend.isDefault)?.id
-    ?? backends[0]?.id
-    ?? '';
-  return tasks.map((task) => normalizePlanDraft(task, defaultBackendId));
-}
-
 export function isWorkerBackendReady(backend: BackendInfo | undefined): boolean {
   return Boolean(
     backend
@@ -82,6 +72,24 @@ export function isWorkerBackendReady(backend: BackendInfo | undefined): boolean 
     && backend.available
     && (backend.loggedIn || backend.hasApiKey || backend.authMode === 'none'),
   );
+}
+
+export function resolvePlanDefaultWorkerBackendId(backends: BackendInfo[]): string {
+  // Workers are forced to the interactive TUI backend when ready; the headless
+  // path is reserved for the host/coordinator.
+  const terminal = backends.find((backend) => backend.id === 'claude-code-terminal');
+  if (terminal && isWorkerBackendReady(terminal)) return 'claude-code-terminal';
+  const host = backends.find((backend) => backend.isDefault);
+  const hostId = host?.id ?? backends[0]?.id ?? '';
+  return backends.find(isWorkerBackendReady)?.id ?? hostId;
+}
+
+export function normalizePlanDrafts(
+  tasks: PlanMeetingTaskInput[],
+  backends: BackendInfo[],
+): PlanMeetingTaskInput[] {
+  const defaultBackendId = resolvePlanDefaultWorkerBackendId(backends);
+  return tasks.map((task) => normalizePlanDraft(task, defaultBackendId));
 }
 
 export function validatePlanDraft(

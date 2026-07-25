@@ -9,10 +9,10 @@
 // The Orchestrator/WorkerScheduler consume BackendSession; this adapter is
 // the bridge that lets them use Claude Code without knowing about SDK types.
 
-import { existsSync } from 'node:fs';
-import { createRequire } from 'node:module';
 import { execFileSync } from 'node:child_process';
 import { ClaudeSession, type SessionEvent, type InputPriority as CSInputPriority } from '../claude-session.js';
+import { resolveClaudeBinaryForSource } from '../claude-cli/resolve.js';
+import type { ClaudeCliQueryFactory } from '../claude-cli/driver.js';
 import { mergedSubprocessEnv } from '../settings-loader.js';
 import type {
   BackendSession,
@@ -33,7 +33,6 @@ import {
   truncateToolOutput,
   type WorkerAdapterSignal,
 } from '../worker-protocol.js';
-import { dirname, join } from 'node:path';
 import {
   compileClaudeTaskProfile,
   type BackendRuntime,
@@ -47,51 +46,6 @@ import type {
   BackendEffectiveProfile,
   TaskExecutionProfile,
 } from '../task-collaboration.js';
-
-const require_ = createRequire(import.meta.url);
-
-// ── Binary resolution ─────────────────────────────────────────────────────────
-// Reuses the same resolution logic as ClaudeSession but exposed as a standalone
-// function for the registry's availability check.
-
-function unpackify(p: string): string {
-  return p.replace(/[\\/]app\.asar[\\/]/, (_, sep) => `${sep}app.asar.unpacked${sep}`);
-}
-
-export function resolveClaudeBinary(): string | undefined {
-  const platform = process.platform;
-  const arch = process.arch === 'x64' ? `${platform}-x64` : `${platform}-arm64`;
-  const subpkg = `@anthropic-ai/claude-agent-sdk-${arch}/claude`;
-  const packageName = `@anthropic-ai/claude-agent-sdk-${arch}`;
-  const executableName = platform === 'win32' ? 'claude.exe' : 'claude';
-
-  try {
-    const packageJson = require_.resolve(`${packageName}/package.json`);
-    const p = unpackify(join(dirname(packageJson), executableName));
-    if (existsSync(p)) return p;
-  } catch { /* fall through */ }
-
-  try {
-    const sdkPkg = require_.resolve('@anthropic-ai/claude-agent-sdk/package.json');
-    const sdkRequire = createRequire(sdkPkg);
-    const p = unpackify(sdkRequire.resolve(subpkg));
-    if (existsSync(p)) return p;
-  } catch { /* fall through */ }
-
-  try {
-    const p = unpackify(require_.resolve(subpkg));
-    if (existsSync(p)) return p;
-  } catch { /* fall through */ }
-
-  const guesses = [
-    process.resourcesPath && `${process.resourcesPath}/app.asar.unpacked/node_modules/@anthropic-ai/claude-agent-sdk/node_modules/${subpkg}`,
-    process.resourcesPath && `${process.resourcesPath}/app.asar.unpacked/node_modules/${subpkg}`,
-  ].filter((x): x is string => !!x);
-  for (const g of guesses) {
-    if (existsSync(g)) return g;
-  }
-  return undefined;
-}
 
 // ── Session adapter ────────────────────────────────────────────────────────────
 // Wraps a ClaudeSession instance and exposes the BackendSession interface.
@@ -195,7 +149,7 @@ class ClaudeCodeSession implements BackendSession {
     config: BackendSessionConfig,
     emit: (e: BackendSessionEvent) => void,
     confirmDestructive?: ConfirmDestructive,
-    queryFactory?: typeof import('@anthropic-ai/claude-agent-sdk').query,
+    queryFactory?: ClaudeCliQueryFactory,
   ) {
     this.emit = emit;
     this.isWorker = config.executionRole === 'worker';
@@ -377,8 +331,8 @@ const CLAUDE_CODE_CAPABILITIES: BackendCapabilities = {
     'claude-opus-4-20250514',
     'glm-5.2',
   ],
-  npmPackage: '@anthropic-ai/claude-agent-sdk',
-  installHint: 'Bundled with AhaStation',
+  npmPackage: '@anthropic-ai/claude-code',
+  installHint: 'npm install -g @anthropic-ai/claude-code（使用本机 claude CLI 及其登录态）',
 };
 
 export class ClaudeCodeBackend implements CliBackend {
@@ -388,14 +342,14 @@ export class ClaudeCodeBackend implements CliBackend {
   private readonly deps: {
     resolveBinary?: () => string | null;
     execFile?: (binary: string, args: string[], options?: Record<string, unknown>) => string;
-    queryFactory?: typeof import('@anthropic-ai/claude-agent-sdk').query;
+    queryFactory?: ClaudeCliQueryFactory;
   };
 
   constructor(opts: {
     confirmDestructive?: ConfirmDestructive;
     resolveBinary?: () => string | null;
     execFile?: (binary: string, args: string[], options?: Record<string, unknown>) => string;
-    queryFactory?: typeof import('@anthropic-ai/claude-agent-sdk').query;
+    queryFactory?: ClaudeCliQueryFactory;
   } = {}) {
     this.confirmDestructive = opts?.confirmDestructive;
     this.deps = opts;
@@ -427,7 +381,7 @@ export class ClaudeCodeBackend implements CliBackend {
   }
 
   resolveBinary(): string | null {
-    return this.deps.resolveBinary?.() ?? resolveClaudeBinary() ?? null;
+    return this.deps.resolveBinary?.() ?? resolveClaudeBinaryForSource();
   }
 
   buildEnv(auth: BackendAuthConfig, extra?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {

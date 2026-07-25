@@ -6,7 +6,7 @@
 // the PNG into the worker's input queue as an image content block. The tool
 // result just confirms dimensions.
 
-import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk';
+import { createSdkMcpServer, tool } from './claude-cli/inproc-mcp.js';
 import { z } from 'zod';
 import {
   takeScreenshot,

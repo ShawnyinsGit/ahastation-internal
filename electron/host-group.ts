@@ -49,7 +49,7 @@ import type {
   OrchestratorEvent,
   TalkerTurn,
 } from './orchestrator-types.js';
-import type { SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
+import type { SDKMessage, SDKUserMessage } from './claude-cli/types.js';
 import type { TaskWorkspaceManager } from './task-workspace.js';
 import type { DeliveryHarness } from './delivery-harness.js';
 import type {
@@ -70,6 +70,8 @@ export interface HostGroupOpts {
   id: string;
   /** Backend identifier (e.g. 'claude-code', 'codex', 'kimi', 'qoder'). */
   backendId: string;
+  /** Default executor for worker tasks (may differ from host backendId). */
+  defaultWorkerBackendId?: string;
   /** Emit channel — should be the orchestrator's safeEmit wrapper. */
   emit: (e: OrchestratorEvent) => void;
   /** Shared workspace cwd. */
@@ -217,7 +219,7 @@ export class HostGroup {
       resolveSessionFactory: opts.resolveWorkerSessionFactory,
       workspaceManager: opts.workspaceManager,
       meetingId: opts.meetingId,
-      defaultBackendId: opts.backendId,
+      defaultBackendId: opts.defaultWorkerBackendId ?? opts.backendId,
       deliveryHarness: opts.deliveryHarness,
       deliveryArtifactRoot: opts.deliveryArtifactRoot,
       flushEvents: opts.flushEvents,

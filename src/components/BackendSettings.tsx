@@ -162,6 +162,22 @@ export function BackendSettings() {
     }
   }, [reload]);
 
+  const handleSetClaudeCliSource = useCallback(async (source: 'bundled' | 'system') => {
+    setSaving((s) => ({ ...s, 'claude-code': true }));
+    try {
+      const r = await window.vibeMeet.backendAuth.setClaudeCliSource(source);
+      if (!r.ok) {
+        setError(r.error ?? 'Failed to set Claude CLI source');
+      } else {
+        await reload();
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving((s) => ({ ...s, 'claude-code': false }));
+    }
+  }, [reload]);
+
   const handleKeyDown = useCallback((e: React.KeyboardEvent, backendId: string) => {
     if (e.key === 'Enter') {
       void handleSetApiKey(backendId);
@@ -503,6 +519,7 @@ export function BackendSettings() {
           onSaveBaseUrl={(url) => handleSetBaseUrl(activeBackend.id, url)}
           onSaveModel={(model) => handleSetModel(activeBackend.id, model)}
           onSetDefault={() => handleSetDefault(activeBackend.id)}
+          onSetClaudeCliSource={handleSetClaudeCliSource}
           onInstall={() => handleInstall(activeBackend.id)}
           onLoginOAuth={() => handleLoginOAuth(activeBackend.id)}
           onCheckAuth={() => handleCheckAuth(activeBackend.id)}
@@ -527,6 +544,7 @@ interface BackendCardProps {
   onSaveBaseUrl: (url: string) => void;
   onSaveModel: (model: string) => void;
   onSetDefault: () => void;
+  onSetClaudeCliSource: (source: 'bundled' | 'system') => void;
   onInstall: () => void;
   onLoginOAuth: () => void;
   onCheckAuth: () => void;
@@ -547,6 +565,7 @@ function BackendCard({
   onSaveBaseUrl,
   onSaveModel,
   onSetDefault,
+  onSetClaudeCliSource,
   onInstall,
   onLoginOAuth,
   onCheckAuth,
@@ -686,6 +705,32 @@ function BackendCard({
             <p style={{ margin: '4px 0 0', fontSize: 12, opacity: 0.75 }}>
               支持 OpenAI 官方 Key，或通过 Base URL 接入第三方 OpenAI 兼容网关；OAuth 登录与 API Key 二选一即可。
             </p>
+          )}
+
+          {b.id === 'claude-code' && (
+            <div className="backend-field">
+              <label className="backend-field-label">CLI 来源</label>
+              <select
+                className="backend-field-select"
+                value={b.claudeCodeCliSource ?? 'system'}
+                onChange={(e) => onSetClaudeCliSource(e.target.value as 'bundled' | 'system')}
+                disabled={saving}
+              >
+                <option value="system" disabled={b.systemClaudeAvailable === false}>
+                  系统 PATH {b.systemClaudeVersion ? `(v${b.systemClaudeVersion})` : b.systemClaudeAvailable ? '(已安装)' : '(未找到)'}
+                </option>
+                <option value="bundled" disabled={b.bundledClaudeAvailable === false}>
+                  内置版本 {b.bundledClaudeVersion ? `(v${b.bundledClaudeVersion})` : b.bundledClaudeAvailable ? '(已安装)' : '(不可用)'}
+                </option>
+              </select>
+              <p style={{ margin: '4px 0 0', fontSize: 12, opacity: 0.75 }}>
+                {b.workerRuntimeState === 'version-incompatible' || b.workerRuntimeState === 'diagnostic-failed'
+                  ? b.workerRuntimeReason
+                  : b.version
+                    ? `当前 Worker 使用 v${b.version}`
+                    : 'Worker 运行时版本未知'}
+              </p>
+            </div>
           )}
 
           <div className="backend-field">

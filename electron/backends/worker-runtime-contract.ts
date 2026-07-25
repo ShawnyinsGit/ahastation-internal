@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { getClaudeCodeCliSource } from '../claude-cli/resolve.js';
 
 export type WorkerRuntimeState =
   | 'available'
@@ -177,14 +178,52 @@ export function extractRuntimeVersion(output: string): string | null {
   return output.match(/(?:^|[^\d])v?(\d+\.\d+\.\d+)(?:[^\d]|$)/)?.[1] ?? null;
 }
 
+export function resolveWorkerExpectedVersion(
+  backendId: string,
+  probedVersion: string | null,
+  options?: { claudeCodeCliSource?: 'bundled' | 'system' },
+): string | null {
+  if (backendId === 'claude-code' && options?.claudeCodeCliSource === 'system') {
+    return probedVersion;
+  }
+  return EXPECTED_VERSION[backendId] ?? null;
+}
+
+/** Worker runtime gate that respects persisted Claude CLI source settings. */
+export function assessConfiguredWorkerRuntime(input: {
+  backendId: string;
+  installed: boolean;
+  implementationEnabled: boolean;
+  authenticated: boolean;
+  version: string | null;
+  claudeCodeCliSource?: 'bundled' | 'system';
+}): WorkerRuntimeAssessment {
+  const claudeCodeCliSource = input.claudeCodeCliSource
+    ?? (input.backendId === 'claude-code' ? getClaudeCodeCliSource() : undefined);
+  const expectedVersionOverride = input.backendId === 'claude-code'
+    ? resolveWorkerExpectedVersion(input.backendId, input.version, { claudeCodeCliSource })
+    : undefined;
+  return assessWorkerRuntime({
+    backendId: input.backendId,
+    installed: input.installed,
+    implementationEnabled: input.implementationEnabled,
+    authenticated: input.authenticated,
+    version: input.version,
+    ...(expectedVersionOverride !== undefined ? { expectedVersionOverride } : {}),
+  });
+}
+
 export function assessWorkerRuntime(input: {
   backendId: string;
   installed: boolean;
   implementationEnabled: boolean;
   authenticated: boolean;
   version: string | null;
+  expectedVersionOverride?: string | null;
 }): WorkerRuntimeAssessment {
-  const expectedVersion = EXPECTED_VERSION[input.backendId] ?? null;
+  const expectedVersion = input.expectedVersionOverride !== undefined
+    ? input.expectedVersionOverride
+    : (EXPECTED_VERSION[input.backendId] ?? null);
   if (!input.implementationEnabled) {
     return {
       state: 'contract-disabled',
@@ -207,7 +246,9 @@ export function assessWorkerRuntime(input: {
       version: input.version,
       expectedVersion,
       reason: input.version
-        ? `检测到 ${input.version}，当前仅验证 ${expectedVersion}。`
+        ? input.backendId === 'claude-code'
+          ? `检测到 ${input.version}，当前仅验证 ${expectedVersion}。请在 Lobby → Host CLI → Claude Code CLI 来源 中选择「系统 PATH」以使用本机版本，或选择「内置版本」使用 ${expectedVersion}。`
+          : `检测到 ${input.version}，当前仅验证 ${expectedVersion}。`
         : '无法读取运行时版本。',
     };
   }
@@ -233,14 +274,21 @@ export function probeWorkerRuntimeVersion(backendId: string, binaryPath: string 
     // JS stubs (used by injected-session tests) are not directly exec-able on
     // Windows; run them through the current Node binary instead.
     const isJsStub = /\.(c|m)?js$/i.test(binaryPath);
+    // npm .cmd/.bat shims (e.g. a PATH-installed claude CLI on Windows) can
+    // only be launched through a shell; quote the path so spaces survive.
+    const isWinShim = process.platform === 'win32' && (
+      /\.(cmd|bat)$/i.test(binaryPath)
+      || (!/\.(?:exe|cmd|bat|js|mjs|cjs)$/i.test(binaryPath) && !/node_modules[\\/]/i.test(binaryPath))
+    );
     const output = execFileSync(
-      isJsStub ? process.execPath : binaryPath,
+      isJsStub ? process.execPath : isWinShim ? `"${binaryPath}"` : binaryPath,
       isJsStub ? [binaryPath, '--version'] : ['--version'],
       {
         encoding: 'utf8',
         stdio: ['ignore', 'pipe', 'pipe'],
         timeout: 3_000,
         windowsHide: true,
+        ...(isWinShim ? { shell: true } : {}),
       },
     );
     return extractRuntimeVersion(output);

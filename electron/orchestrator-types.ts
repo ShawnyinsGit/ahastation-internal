@@ -233,6 +233,13 @@ export interface WorkerHandle {
   authorityRequest?: PlanMeetingTask['authorityRequest'];
   budget: NonNullable<PlanMeetingTask['budget']>;
   budgetAttempts: TaskBudgetAttempt[];
+  /** Dispatch priority from the plan (-10..10, default 0). Higher wins slot
+   * contention in spawnReadyWorkers ordering. */
+  priority: number;
+  /** One-shot backend override for the next fresh attempt (rework/retry).
+   * Consumed at the attempt boundary; the provider session snapshot is
+   * dropped because sessions cannot resume across backends. */
+  nextAttemptBackendId?: string;
   budgetPauseReason?: string;
   contextPackage?: import('./task-collaboration.js').ContextPackage;
   contextPackageHash?: string;
@@ -292,9 +299,18 @@ export interface WorkerHandle {
   /** First stall fires a nudge to the worker; only escalate to the user on
    *  the second consecutive stall (meaning the nudge didn't unblock it). */
   stallNudged: boolean;
-  /** Timestamp the handle entered its current parked (slot-holding,
-   *  non-running) delivery status, so sweepStalls can alert / fail-closed
-   *  long-stuck parkers. Undefined while running / pending / terminal. */
+  /** When the tier-2 `worker-stalled` escalation fired (stallNotified set).
+   *  Tier-3 auto-restart waits a further STALL_THRESHOLD_MS from this mark.
+   *  Cleared with stallNotified on the next activity. */
+  stallNotifiedTs?: number;
+  /** One-shot per-attempt latch: this attempt already consumed its automatic
+   *  stall restart. A second stall on the same attempt stays at tier-2
+   *  (user decision) instead of looping restarts. Reset on attempt change. */
+  stallAutoRestarted?: boolean;
+  /** Timestamp the handle entered its current parked (suspended-in-delivery,
+   *  non-running, not counted against the concurrency cap) status, so
+   *  sweepStalls can alert / fail-closed long-stuck parkers. Undefined while
+   *  running / pending / terminal. */
   parkedSinceTs?: number;
   /** One-shot alert latch for a parked stretch, mirroring stallNotified. */
   parkedNotified?: boolean;
@@ -323,6 +339,12 @@ export interface WorkerHandle {
   /** Ask fingerprints currently waiting on a user decision, keyed by native
    *  request id, so an allow can be promoted into approvedAskFingerprints. */
   pendingAskFingerprints?: Map<string, string>;
+  /** Number of ask-user permission cards this worker is currently suspended
+   *  on. While > 0 the worker's canUseTool promise hangs and no work happens,
+   *  so countRunning yields the slot to other tasks (the process stays alive).
+   *  Incremented when a card is emitted, decremented on resolve/timeout,
+   *  zeroed whenever the handle's permission timers are cleared. */
+  pendingAskCount?: number;
   /** One-shot latch: the addendum saturation briefing has been emitted for
    *  this attempt. Reset on attempt/grant boundaries. */
   addendumCapNotified?: boolean;

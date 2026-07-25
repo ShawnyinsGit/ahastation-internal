@@ -491,6 +491,16 @@ class MeetingStore {
   private taskInspectorProjections = new Map<string, TaskInspectorProjection>();
   private taskInspectorSubscriptions = new Map<string, () => void>();
   private taskInspectorGenerations = new Map<string, number>();
+  /** Refcount per task key: multiple consumers (Worker Workbench sidebar +
+   *  docked Task Inspector) can share one projection. The projection is only
+   *  torn down when the last consumer calls closeTaskInspector. */
+  private taskInspectorRefcounts = new Map<string, number>();
+  /** In-flight hydration promise per key, so concurrent open() calls share one
+   *  hydrate run instead of racing on generation supersede. */
+  private taskInspectorInFlight = new Map<
+    string,
+    Promise<{ ok: true; snapshot: RendererTaskSnapshot } | { ok: false; error: string }>
+  >();
   private taskInspectorListeners = new Set<Listener>();
 
   // Proactive-announcement queue (see ANNOUNCE_* constants). Mirrors the
@@ -552,13 +562,52 @@ class MeetingStore {
   }
 
   /** Snapshot -> bounded replay -> atomic subscription hydration used by the
-   * docked Task Inspector. A detected task-event chain gap restarts from a
-   * fresh snapshot instead of speculatively reducing incomplete state. */
+   * docked Task Inspector and the Worker Workbench sidebar. Refcounted: the
+   * same task can be open in both at once - a second open() attaches to the
+   * live projection instead of re-hydrating, and the projection is only torn
+   * down when the last consumer calls closeTaskInspector. A detected
+   * task-event chain gap restarts from a fresh snapshot instead of
+   * speculatively reducing incomplete state. */
   async openTaskInspector(sessionId: string, taskId: string): Promise<{
     ok: true;
     snapshot: RendererTaskSnapshot;
   } | { ok: false; error: string }> {
     const key = this.taskInspectorKey(sessionId, taskId);
+    // Already live? Attach a new consumer without re-hydrating.
+    if (this.taskInspectorProjections.has(key) && this.taskInspectorSubscriptions.has(key)) {
+      this.taskInspectorRefcounts.set(key, (this.taskInspectorRefcounts.get(key) ?? 0) + 1);
+      return { ok: true, snapshot: this.taskInspectorProjections.get(key)!.snapshot };
+    }
+    // Already hydrating? Await the in-flight run and attach on success.
+    const inFlight = this.taskInspectorInFlight.get(key);
+    if (inFlight) {
+      const result = await inFlight;
+      if (result.ok) {
+        this.taskInspectorRefcounts.set(key, (this.taskInspectorRefcounts.get(key) ?? 0) + 1);
+      }
+      return result;
+    }
+    const hydration = this.hydrateTaskInspector(sessionId, taskId, key);
+    this.taskInspectorInFlight.set(key, hydration);
+    try {
+      const result = await hydration;
+      if (result.ok) {
+        this.taskInspectorRefcounts.set(key, 1);
+      }
+      return result;
+    } finally {
+      this.taskInspectorInFlight.delete(key);
+    }
+  }
+
+  /** Internal hydration: snapshot -> bounded replay -> live subscription.
+   *  Does NOT touch refcounts; open() (new consumer) and refreshTaskInspector
+   *  (gap recovery) manage those. */
+  private async hydrateTaskInspector(
+    sessionId: string,
+    taskId: string,
+    key: string,
+  ): Promise<{ ok: true; snapshot: RendererTaskSnapshot } | { ok: false; error: string }> {
     const generation = (this.taskInspectorGenerations.get(key) ?? 0) + 1;
     this.taskInspectorGenerations.set(key, generation);
     this.taskInspectorSubscriptions.get(key)?.();
@@ -605,7 +654,8 @@ class MeetingStore {
         if (next.needsRefresh) {
           this.taskInspectorSubscriptions.get(key)?.();
           this.taskInspectorSubscriptions.delete(key);
-          void this.openTaskInspector(sessionId, taskId);
+          // Internal recovery: re-hydrate without changing the refcount.
+          void this.refreshTaskInspector(sessionId, taskId, key, generation);
         }
       },
     );
@@ -620,6 +670,13 @@ class MeetingStore {
 
   closeTaskInspector(sessionId: string, taskId: string): void {
     const key = this.taskInspectorKey(sessionId, taskId);
+    const remaining = (this.taskInspectorRefcounts.get(key) ?? 0) - 1;
+    if (remaining > 0) {
+      // Other consumers still hold this projection; keep it live.
+      this.taskInspectorRefcounts.set(key, remaining);
+      return;
+    }
+    this.taskInspectorRefcounts.delete(key);
     this.taskInspectorGenerations.set(key, (this.taskInspectorGenerations.get(key) ?? 0) + 1);
     this.taskInspectorSubscriptions.get(key)?.();
     this.taskInspectorSubscriptions.delete(key);
@@ -869,6 +926,8 @@ class MeetingStore {
     this.taskInspectorSubscriptions.clear();
     this.taskInspectorProjections.clear();
     this.taskInspectorGenerations.clear();
+    this.taskInspectorRefcounts.clear();
+    this.taskInspectorInFlight.clear();
     // C2: the announce retry timer holds a window.setTimeout handle; without
     // this a dispose() mid-retry leaks the timer (and would fire into a
     // torn-down store).
@@ -899,7 +958,16 @@ class MeetingStore {
     if (this.taskInspectorGenerations.get(key) !== generation) {
       return Promise.resolve({ ok: false, error: 'Task Inspector hydration was superseded' });
     }
-    return this.openTaskInspector(sessionId, taskId);
+    // Force a fresh hydration without changing the refcount. If a hydration is
+    // already in flight, await it instead of stacking another.
+    const existing = this.taskInspectorInFlight.get(key);
+    if (existing) return existing;
+    const hydration = this.hydrateTaskInspector(sessionId, taskId, key);
+    this.taskInspectorInFlight.set(key, hydration);
+    void hydration.finally(() => {
+      this.taskInspectorInFlight.delete(key);
+    });
+    return hydration;
   }
 
   private notify(slotId: string) {

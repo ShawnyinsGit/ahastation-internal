@@ -129,7 +129,7 @@ function wrapBackend(base, backendId, binaryPath, sessions) {
         async interrupt(reason) { this.interrupts.push(reason); },
         snapshot() {
           return {
-            protocol: backendId === 'codex' ? 'codex-app-server' : 'claude-agent-sdk',
+            protocol: backendId === 'codex' ? 'codex-app-server' : 'claude-cli',
             sessionId,
             backendVersion: backendId === 'codex' ? '0.144.1' : '2.1.150',
           };

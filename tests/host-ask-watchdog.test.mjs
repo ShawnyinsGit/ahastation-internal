@@ -47,7 +47,7 @@ function makeSessionFactory(sessions) {
       resolvePermission() {},
       async interrupt() {},
       snapshot() {
-        return { protocol: 'claude-agent-sdk', sessionId: `s-${sessions.length + 1}`, backendVersion: '2.1.150' };
+        return { protocol: 'claude-cli', sessionId: `s-${sessions.length + 1}`, backendVersion: '2.1.150' };
       },
     };
     sessions.push(session);

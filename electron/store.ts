@@ -149,6 +149,10 @@ export interface Settings {
   backendAuth?: BackendAuthEntry[];
   /** Default backend ID for new sessions. Falls back to 'claude-code' if unset. */
   defaultBackend?: string;
+  /** Which Claude Code CLI binary claude-code should spawn. Default: system PATH. */
+  claudeCodeCliSource?: 'bundled' | 'system';
+  /** Default executor backend for worker tasks when plan/delegate omits one. */
+  defaultWorkerBackendId?: string;
   /** User-defined custom CLI backends. Each entry is registered as a
    *  CustomBackend at app startup so it appears in the backend list and
    *  can be invited to meetings like any built-in backend. */

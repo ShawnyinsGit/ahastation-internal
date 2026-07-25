@@ -133,6 +133,8 @@ const api = {
     setMode: (backendId, mode) => ipcRenderer.invoke('backend-auth:set-mode', { backendId, mode }),
     setAvatar: (backendId, dataUrl) => ipcRenderer.invoke('backend-auth:set-avatar', { backendId, dataUrl }),
     setDefault: (backendId) => ipcRenderer.invoke('backend-auth:set-default', backendId),
+    setClaudeCliSource: (source) => ipcRenderer.invoke('backend-auth:set-claude-cli-source', source),
+    setDefaultWorkerBackend: (backendId) => ipcRenderer.invoke('backend-auth:set-default-worker-backend', backendId),
     checkStatus: (backendId) => ipcRenderer.invoke('backend-auth:check-status', backendId),
     loginOAuth: (backendId) => ipcRenderer.invoke('backend-auth:login-oauth', backendId),
     install: (backendId) => ipcRenderer.invoke('backend-auth:install', backendId),
@@ -280,6 +282,46 @@ const api = {
     input: (data) => ipcRenderer.invoke('ide-pty:input', { data }),
     resize: (rows, cols) => ipcRenderer.invoke('ide-pty:resize', { rows, cols }),
     close: () => ipcRenderer.invoke('ide-pty:close'),
+  },
+  // Terminal-mode worker PTY bridge (claude-code-terminal backend). The pty
+  // lifecycle belongs to the worker adapter; this only mirrors output and
+  // forwards user keystrokes for the stage terminal.
+  workerPty: {
+    attach: (workerId) => ipcRenderer.invoke('worker-pty:attach', { workerId }),
+    input: (workerId, data) => ipcRenderer.invoke('worker-pty:input', { workerId, data }),
+    resize: (workerId, rows, cols) =>
+      ipcRenderer.invoke('worker-pty:resize', { workerId, rows, cols }),
+    detach: (workerId) => ipcRenderer.invoke('worker-pty:detach', { workerId }),
+    confirmTask: (sessionId, workerId, outcome, summary) =>
+      ipcRenderer.invoke('scheduler:confirm-terminal-task', { sessionId, workerId, outcome, summary }),
+    onData: (cb) => {
+      const listener = (_, e) => cb(e);
+      ipcRenderer.on('worker-pty:data', listener);
+      return () => ipcRenderer.removeListener('worker-pty:data', listener);
+    },
+    onExit: (cb) => {
+      const listener = (_, e) => cb(e);
+      ipcRenderer.on('worker-pty:exit', listener);
+      return () => ipcRenderer.removeListener('worker-pty:exit', listener);
+    },
+  },
+  // Main-window bottom-drawer shell. Renderer owns create/kill lifecycle.
+  shellPty: {
+    create: (opts) => ipcRenderer.invoke('shell-pty:create', opts ?? {}),
+    input: (ptyId, data) => ipcRenderer.invoke('shell-pty:input', { ptyId, data }),
+    resize: (ptyId, rows, cols) =>
+      ipcRenderer.invoke('shell-pty:resize', { ptyId, rows, cols }),
+    kill: (ptyId) => ipcRenderer.invoke('shell-pty:kill', { ptyId }),
+    onData: (cb) => {
+      const listener = (_, e) => cb(e);
+      ipcRenderer.on('shell-pty:data', listener);
+      return () => ipcRenderer.removeListener('shell-pty:data', listener);
+    },
+    onExit: (cb) => {
+      const listener = (_, e) => cb(e);
+      ipcRenderer.on('shell-pty:exit', listener);
+      return () => ipcRenderer.removeListener('shell-pty:exit', listener);
+    },
   },
   ideOverlay: {
     bind: (hostId, sessionId) => ipcRenderer.invoke('ide-editor:overlay-bind', { active: true, hostId, sessionId }),

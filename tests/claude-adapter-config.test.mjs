@@ -59,7 +59,7 @@ test('Claude adapter carries the universal session configuration into the offici
   assert.equal(queryInput.options.resume, 'claude-session-old');
   assert.equal(queryInput.options.effort, 'high');
   assert.deepEqual(queryInput.options.thinking, { type: 'adaptive' });
-  assert.deepEqual(session.snapshot(), { protocol: 'claude-agent-sdk', sessionId: 'claude-session-1' });
+  assert.deepEqual(session.snapshot(), { protocol: 'claude-cli', sessionId: 'claude-session-1' });
   session.end();
 });
 

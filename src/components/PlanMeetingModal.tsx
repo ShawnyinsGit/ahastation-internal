@@ -5,6 +5,7 @@ import {
   isWorkerBackendReady,
   normalizePlanDraft,
   normalizePlanDrafts,
+  resolvePlanDefaultWorkerBackendId,
   validatePlanDraft,
 } from '../lib/plan-validation';
 
@@ -288,7 +289,6 @@ export function PlanMeetingModal({
         <div className="plan-task-list">
           <h3 className="plan-task-list-title">Worker 任务（{draft.length}）</h3>
           {draft.map((task, taskIndex) => {
-            const selectedBackend = backends.find((backend) => backend.id === task.executorBackendId);
             const profile = task.executionProfile!;
             const contextSelection = task.contextSelection!;
             const authority = task.authorityRequest!;
@@ -309,23 +309,6 @@ export function PlanMeetingModal({
                   <label>
                     <span>任务 ID</span>
                     <input value={task.id} onChange={(event) => patchTask(taskIndex, { id: event.target.value })} />
-                  </label>
-                  <label>
-                    <span>执行 Backend</span>
-                    <select
-                      value={selectedBackend?.id ?? ''}
-                      onChange={(event) => patchTask(taskIndex, {
-                        executorBackendId: event.target.value,
-                        executionProfile: { ...profile, backendId: event.target.value },
-                      })}
-                    >
-                      <option value="" disabled>请选择 Backend</option>
-                      {backends.filter((backend) => backend.id !== 'qoder').map((backend) => (
-                        <option key={backend.id} value={backend.id} disabled={!isWorkerBackendReady(backend)}>
-                          {backend.displayName}{backend.workerReleaseTier === 'experimental' ? '（实验）' : ''} · {isWorkerBackendReady(backend) ? '可用' : !backend.available ? '需安装' : !backend.supportsWorkers ? '契约未通过' : '需登录'}
-                        </option>
-                      ))}
-                    </select>
                   </label>
                 </div>
                 <label>
@@ -767,7 +750,8 @@ export function PlanMeetingModal({
             className="plan-add-task"
             onClick={() => {
               const sequence = draft.length + 1;
-              const defaultBackend = backends.find((backend) => backend.isDefault && isWorkerBackendReady(backend))
+              const defaultBackendId = resolvePlanDefaultWorkerBackendId(backends);
+              const defaultBackend = backends.find((backend) => backend.id === defaultBackendId)
                 ?? backends.find(isWorkerBackendReady);
               setDraft((current) => [...current, normalizePlanDraft({
                 id: `task-${sequence}`,
@@ -780,7 +764,7 @@ export function PlanMeetingModal({
                   description: '人工检查交付内容并确认满足任务目标',
                   verification: { kind: 'manual' },
                 }],
-              }, defaultBackend?.id ?? '')]);
+              }, defaultBackendId)]);
             }}
           >
             添加任务

@@ -105,9 +105,10 @@ import {
 import { authorizeMeetingCommand, type MeetingCommandResult } from './meeting-command.js';
 import { TaskWorkspaceManager } from './task-workspace.js';
 import { DiagnosticLogger } from './diagnostic-logger.js';
+import { resolveDefaultWorkerBackendId } from './worker-backend-default.js';
 import { PORTABLE_MEETING_COMMAND_PROMPT } from './orchestrator-prompts.js';
 import {
-  assessWorkerRuntime,
+  assessConfiguredWorkerRuntime,
   probeWorkerRuntimeVersion,
 } from './backends/worker-runtime-contract.js';
 import {
@@ -122,7 +123,7 @@ import type {
   WorkerSpecialtyKind,
   WorkerStatusKind,
 } from './orchestrator-types.js';
-import type { SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
+import type { SDKMessage, SDKUserMessage } from './claude-cli/types.js';
 import type {
   AuthorizedMeetingContextSource,
   ContextSelection,
@@ -474,14 +475,11 @@ export class Orchestrator implements OrchestratorBridge {
             model: authEntry.model,
           }
         : { authMode: 'none' as const };
-      // Claude's bundled-defaults feature redirects HOME to a shadow tree.
-      // Every other CLI must retain the real HOME so OAuth/config locations
-      // such as ~/.codex remain visible.
+      // Every backend runs with the real HOME so OAuth/config locations
+      // (~/.claude, ~/.codex) stay visible to each CLI.
       const backendBaseEnv = { ...(opts.envOverride ?? {}) };
-      if (backendId !== 'claude-code') {
-        backendBaseEnv.HOME = homedir();
-        backendBaseEnv.USERPROFILE = homedir();
-      }
+      backendBaseEnv.HOME = homedir();
+      backendBaseEnv.USERPROFILE = homedir();
       const env = backend.buildEnv(auth, backendBaseEnv);
       const parsedTaskProfile = backendEffectiveProfileSchema.safeParse(so.taskProfile);
       const taskProfile = parsedTaskProfile.success ? parsedTaskProfile.data : undefined;
@@ -541,11 +539,17 @@ export class Orchestrator implements OrchestratorBridge {
   private static readonly defaultClaudeFactory: SessionFactory =
     (o) => new ClaudeSession(o) as unknown as BackendSession;
 
+  private defaultWorkerBackendId(): string {
+    return resolveDefaultWorkerBackendId(this.defaultHost().backendId);
+  }
+
   private createHostGroup(id: string, backendId: string): HostGroup {
     const factory = this.buildSessionFactory(backendId, id);
+    const workerDefaultBackendId = resolveDefaultWorkerBackendId(backendId);
     const hg = new HostGroup({
       id,
       backendId,
+      defaultWorkerBackendId: workerDefaultBackendId,
       emit: (e) => this.onHostGroupEvent(id, e),
       cwd: this.cwd,
       projectId: this.projectId,
@@ -555,7 +559,7 @@ export class Orchestrator implements OrchestratorBridge {
       confirmDestructive: this.confirmDestructive,
       sessionFactory: factory,
       resolveWorkerSessionFactory: (backendId) => this.buildSessionFactory(
-        backendId ?? this.defaultHost().backendId,
+        backendId ?? this.defaultWorkerBackendId(),
         id,
         'worker',
       ),
@@ -676,7 +680,7 @@ export class Orchestrator implements OrchestratorBridge {
       backendId,
       runtimePath: backend.resolveBinary(),
       cwd: this.cwd,
-      homeSource: backendId === 'claude-code' ? 'claude-shadow' : 'real-home',
+      homeSource: 'real-home',
     });
     const id = hostId ?? `${backendId}-host-${this.hostGroups.size}`;
     if (this.hostGroups.has(id)) {
@@ -892,7 +896,7 @@ export class Orchestrator implements OrchestratorBridge {
       hostId,
       role: hostId === this.coordinatorHostId ? 'coordinator' : 'expert',
     }, {
-      defaultBackendId: this.defaultHost().backendId,
+      defaultBackendId: this.defaultWorkerBackendId(),
       ...this.normalizePlanOptions(),
     });
     if (!authorized.ok) return authorized;
@@ -1309,7 +1313,7 @@ export class Orchestrator implements OrchestratorBridge {
     try {
       task = normalizePlanMeetingTasks(
         [recoveredTask],
-        this.defaultHost().backendId,
+        this.defaultWorkerBackendId(),
         this.normalizePlanOptions(),
       ).tasks[0];
     } catch (error) {
@@ -1588,7 +1592,7 @@ export class Orchestrator implements OrchestratorBridge {
     try {
       normalized = normalizePlanMeetingTasks(
         tasks,
-        this.defaultHost().backendId,
+        this.defaultWorkerBackendId(),
         this.normalizePlanOptions(),
       ).tasks;
     } catch (error) {
@@ -1675,7 +1679,7 @@ export class Orchestrator implements OrchestratorBridge {
     try {
       const result = normalizePlanMeetingTasks(
         tasks,
-        this.defaultHost().backendId,
+        this.defaultWorkerBackendId(),
         this.normalizePlanOptions(),
       );
       normalized = result.tasks;
@@ -1725,7 +1729,7 @@ export class Orchestrator implements OrchestratorBridge {
       try {
         tasks = normalizePlanMeetingTasks(
           revisedTasks,
-          this.defaultHost().backendId,
+          this.defaultWorkerBackendId(),
           this.normalizePlanOptions(),
         ).tasks;
       } catch (error) {
@@ -1763,7 +1767,7 @@ export class Orchestrator implements OrchestratorBridge {
   }
 
   private async validateExecutionBackends(tasks: PlanMeetingTask[]): Promise<string | null> {
-    const defaultBackendId = this.defaultHost().backendId;
+    const defaultBackendId = this.defaultWorkerBackendId();
     const checked = new Set<string>();
     for (const task of tasks) {
       const backendId = task.executorBackendId ?? defaultBackendId;
@@ -1794,7 +1798,7 @@ export class Orchestrator implements OrchestratorBridge {
           }
         : { authMode: 'none' as const };
       const probe = await getBackendRegistry().probe(backendId, auth);
-      const assessment = assessWorkerRuntime({
+      const assessment = assessConfiguredWorkerRuntime({
         backendId,
         installed: probe.installed,
         implementationEnabled: backend.capabilities.executeTasks,
@@ -1836,7 +1840,7 @@ export class Orchestrator implements OrchestratorBridge {
     const description = request.description.trim();
     if (!description) return { ok: false, error: 'description is required' };
 
-    const backendId = this.defaultHost().backendId;
+    const backendId = this.defaultWorkerBackendId();
     const backend = getBackendRegistry().get(backendId);
     if (!backend) return { ok: false, error: `backend '${backendId}' is not registered` };
     if (!backend.capabilities.executeTasks) {
@@ -1899,13 +1903,21 @@ export class Orchestrator implements OrchestratorBridge {
     return this.meetingScheduler.steerWorker(workerId, addendum);
   }
 
-  async sendTaskMessage(taskId: string, message: string): Promise<{ id: string; status: string }> {
-    const queued = await this.meetingScheduler.sendTaskMessage(taskId, message);
+  async sendTaskMessage(
+    taskId: string,
+    message: string,
+    executorBackendId?: string,
+  ): Promise<{ id: string; status: string }> {
+    const queued = await this.meetingScheduler.sendTaskMessage(taskId, message, executorBackendId);
     return { id: queued.id, status: queued.status };
   }
 
-  async queueTaskFollowUp(taskId: string, message: string): Promise<{ id: string; status: string }> {
-    const queued = await this.meetingScheduler.queueFollowUp(taskId, message);
+  async queueTaskFollowUp(
+    taskId: string,
+    message: string,
+    executorBackendId?: string,
+  ): Promise<{ id: string; status: string }> {
+    const queued = await this.meetingScheduler.queueFollowUp(taskId, message, executorBackendId);
     return { id: queued.id, status: queued.status };
   }
 
@@ -2115,7 +2127,7 @@ export class Orchestrator implements OrchestratorBridge {
       throw new Error(`backend '${requestedProfile.backendId}' runtime is unavailable`);
     }
     const version = probeWorkerRuntimeVersion(requestedProfile.backendId, runtimePath);
-    const assessment = assessWorkerRuntime({
+    const assessment = assessConfiguredWorkerRuntime({
       backendId: requestedProfile.backendId,
       installed: true,
       implementationEnabled: true,
@@ -2663,7 +2675,19 @@ export class Orchestrator implements OrchestratorBridge {
   async requestDeliveryRework(
     reviewId: string,
     findings: CoordinatorReviewFinding[],
+    executorBackendId?: string,
   ) {
+    // Record the one-shot backend override before the rework request lands:
+    // the scheduler consumes it at the fresh-attempt boundary the rework
+    // triggers. A silent drop would be worse than failing the tool call.
+    if (executorBackendId?.trim()) {
+      const target = this.coordinatorReviewDriver.inspect(reviewId);
+      if (!target.taskId) {
+        throw new Error(`review ${reviewId} has no bound task; cannot override its executor backend`);
+      }
+      const recorded = this.meetingScheduler.setNextAttemptBackend(target.taskId, executorBackendId);
+      if (!recorded.ok) throw new Error(recorded.error);
+    }
     const session = await this.coordinatorReviewDriver.requestRework(reviewId, findings);
     return safeCoordinatorReviewProjection(session);
   }
@@ -2678,6 +2702,12 @@ export class Orchestrator implements OrchestratorBridge {
 
   submitWorkerReport(workerId: string, report: import('./worker-protocol.js').WorkReport, sourceAttempt?: number): void {
     this.meetingScheduler.submitWorkerReport(workerId, report, sourceAttempt);
+  }
+
+  /** Renderer confirm bar for terminal-mode workers: mark the running
+   *  attempt failed with a user-provided reason. */
+  failWorkerFromUser(workerId: string, message: string): { ok: true } | { ok: false; error: string } {
+    return this.meetingScheduler.failWorkerFromUser(workerId, message);
   }
 
   // Test-only proxy: forward session events to the scheduler for simulation.
