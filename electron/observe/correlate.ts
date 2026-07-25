@@ -57,7 +57,7 @@ function looksLikePath(text: string): boolean {
 function pickTitle(signal: ObservedFileSignal, projectName: string): TitlePick {
   const candidates: Array<{ text?: string; source: ObservedTitleSource }> =
     signal.clientKind === 'codex'
-      ? [{ text: signal.title, source: 'session-index' }]
+      ? [{ text: signal.title, source: signal.titleSource ?? 'session-index' }]
       : signal.tailSignals.kind === 'claude'
         ? [
             { text: signal.tailSignals.firstPromptTitle, source: 'first-prompt' },

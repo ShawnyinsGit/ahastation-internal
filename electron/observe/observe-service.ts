@@ -36,7 +36,7 @@ import {
 } from './statefiles/claude-projects.js';
 import {
   listCodexRollouts,
-  loadCodexSessionIndex,
+  loadCodexTitles,
   parseCodexRollout,
 } from './statefiles/codex-sessions.js';
 import type {
@@ -44,6 +44,7 @@ import type {
   ObservedFileSignal,
   ObservedSession,
   ObservedSnapshot,
+  ObservedTitleSource,
   SelfExclusion,
 } from './types.js';
 import { defaultExec, lstatSafe, type ExecImpl } from './util.js';
@@ -87,7 +88,8 @@ export class ObserveService {
   private readonly codexMarkers = new Map<string, FileMarker>();
   private readonly realpathCache = new Map<string, string>();
   private indexTitles = new Map<string, string>();
-  private indexMarker: { mtimeMs: number; size: number } | null = null;
+  private titleSources = new Map<string, 'global-state' | 'session-index'>();
+  private indexMarker: string | null = null;
   private pidFileMap = new Map<number, ClaudePidFileEntry>();
 
   private running = false;
@@ -229,23 +231,25 @@ export class ObserveService {
   // -------------------------------------------------------------------------
 
   private async refreshSlowInputs(): Promise<void> {
-    // Codex session_index: reload only when mtime+size changed.
+    // Codex titles (session_index + global-state): reload when either changed.
     try {
       const indexPath = join(this.homeDir, '.codex', 'session_index.jsonl');
-      const stat = await lstatSafe(indexPath);
-      if (!stat || !stat.isFile() || stat.isSymbolicLink()) {
-        this.indexTitles = new Map();
-        this.indexMarker = null;
-      } else if (
-        !this.indexMarker
-        || this.indexMarker.mtimeMs !== stat.mtimeMs
-        || this.indexMarker.size !== stat.size
-      ) {
-        this.indexTitles = await loadCodexSessionIndex(this.homeDir);
-        this.indexMarker = { mtimeMs: stat.mtimeMs, size: stat.size };
+      const globalPath = join(this.homeDir, '.codex', '.codex-global-state.json');
+      const [indexStat, globalStat] = await Promise.all([lstatSafe(indexPath), lstatSafe(globalPath)]);
+      const markerOf = (stat: Awaited<ReturnType<typeof lstatSafe>>) =>
+        stat && stat.isFile() && !stat.isSymbolicLink()
+          ? `${stat.mtimeMs}:${stat.size}`
+          : 'absent';
+      const marker = `${markerOf(indexStat)}|${markerOf(globalStat)}`;
+      if (this.indexMarker !== marker) {
+        const { titles, sources } = await loadCodexTitles(this.homeDir);
+        this.indexTitles = titles;
+        this.titleSources = sources;
+        this.indexMarker = marker;
       }
     } catch {
       this.indexTitles = new Map();
+      this.titleSources = new Map();
     }
     // Claude PID files: tiny directory (absent on some versions — degrades).
     try {
@@ -287,15 +291,15 @@ export class ObserveService {
   private async parseRef(kind: ClientKind, ref: StateFileRef): Promise<ObservedFileSignal | null> {
     return kind === 'claude-code'
       ? parseClaudeTranscript(ref)
-      : parseCodexRollout(ref, this.indexTitles);
+      : parseCodexRollout(ref, this.indexTitles, this.titleSources);
   }
 
-  /** Re-attach the latest session_index title to a cached Codex signal. */
+  /** Re-attach the latest Codex title to a cached signal. */
   private withFreshTitle(signal: ObservedFileSignal): ObservedFileSignal {
     if (signal.clientKind !== 'codex') return signal;
     const title = this.indexTitles.get(signal.nativeSessionId);
     if (!title || title === signal.title) return signal;
-    return { ...signal, title };
+    return { ...signal, title, titleSource: this.titleSources.get(signal.nativeSessionId) };
   }
 
   private async buildRealpathResolver(

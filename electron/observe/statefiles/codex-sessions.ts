@@ -102,6 +102,52 @@ export async function loadCodexSessionIndex(homeDir: string): Promise<Map<string
   return new Map(Array.from(latest.entries()).map(([id, entry]) => [id, entry.title]));
 }
 
+/** Load id → thread title from ~/.codex/.codex-global-state.json
+ * (`electron-persisted-atom-state` → `thread-descriptions-v1`). These are the
+ * Codex app's own curated thread titles — higher quality than
+ * session_index thread_name (source: agent-searcher's scanner.py). Missing
+ * file / unexpected shape degrades to an empty map. */
+export async function loadCodexGlobalStateTitles(homeDir: string): Promise<Map<string, string>> {
+  const statePath = join(homeDir, '.codex', '.codex-global-state.json');
+  const stat = await lstatSafe(statePath);
+  if (!stat || !stat.isFile() || stat.isSymbolicLink()) return new Map();
+  try {
+    const raw = await fs.readFile(statePath, 'utf8');
+    const parsed = asRecord(parseJsonLine(raw));
+    const atomState = asRecord(parsed?.['electron-persisted-atom-state']);
+    const descriptions = asRecord(atomState?.['thread-descriptions-v1']);
+    const titles = new Map<string, string>();
+    if (descriptions) {
+      for (const [id, value] of Object.entries(descriptions)) {
+        const title = asString(value);
+        if (id && title) titles.set(id, title);
+      }
+    }
+    return titles;
+  } catch {
+    return new Map();
+  }
+}
+
+/** Merged Codex title map: global-state descriptions win over
+ * session_index thread_name; `sources` keeps per-id provenance. */
+export async function loadCodexTitles(
+  homeDir: string,
+): Promise<{ titles: Map<string, string>; sources: Map<string, 'global-state' | 'session-index'> }> {
+  const [indexTitles, globalTitles] = await Promise.all([
+    loadCodexSessionIndex(homeDir),
+    loadCodexGlobalStateTitles(homeDir),
+  ]);
+  const titles = new Map<string, string>(indexTitles);
+  const sources = new Map<string, 'global-state' | 'session-index'>();
+  for (const id of indexTitles.keys()) sources.set(id, 'session-index');
+  for (const [id, title] of globalTitles) {
+    titles.set(id, title);
+    sources.set(id, 'global-state');
+  }
+  return { titles, sources };
+}
+
 // ---------------------------------------------------------------------------
 // First line: session_meta
 // ---------------------------------------------------------------------------
@@ -196,10 +242,12 @@ export function analyzeCodexTail(lines: string[]): CodexTailSignals {
 }
 
 /** Parse one rollout into a file signal; null when no identity is found.
- * `indexTitles` is the session_index map (id → thread_name). */
+ * `indexTitles` is the merged Codex title map (id → title, see
+ * loadCodexTitles); `titleSources` records per-id provenance. */
 export async function parseCodexRollout(
   ref: StateFileRef,
   indexTitles: Map<string, string>,
+  titleSources?: Map<string, 'global-state' | 'session-index'>,
 ): Promise<ObservedFileSignal | null> {
   try {
     const meta = await readCodexMeta(ref.filePath);
@@ -215,6 +263,7 @@ export async function parseCodexRollout(
       mtimeMs: ref.mtimeMs,
       sizeBytes: ref.sizeBytes,
       title: indexTitles.get(meta.sessionId),
+      titleSource: titleSources?.get(meta.sessionId),
       model: meta.model,
       tailSignals,
     };

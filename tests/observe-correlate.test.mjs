@@ -14,7 +14,7 @@ import {
 } from '../dist-electron/observe/statefiles/claude-projects.js';
 import {
   listCodexRollouts,
-  loadCodexSessionIndex,
+  loadCodexTitles,
   parseCodexRollout,
 } from '../dist-electron/observe/statefiles/codex-sessions.js';
 import { redactSecrets, sanitizeTitle, sha1 } from '../dist-electron/observe/util.js';
@@ -34,7 +34,7 @@ const identity = (p) => p;
 const NO_SELF = { pids: new Set(), sessionIds: new Set() };
 
 async function loadSignals() {
-  const index = await loadCodexSessionIndex(HOME);
+  const { titles, sources } = await loadCodexTitles(HOME);
   const claude = [];
   for (const ref of await listClaudeTranscripts(HOME)) {
     const signal = await parseClaudeTranscript(ref);
@@ -42,7 +42,7 @@ async function loadSignals() {
   }
   const codex = [];
   for (const ref of await listCodexRollouts(HOME)) {
-    const signal = await parseCodexRollout(ref, index);
+    const signal = await parseCodexRollout(ref, titles, sources);
     if (signal) codex.push(signal);
   }
   return { signals: [...claude, ...codex], claude, codex };
@@ -112,8 +112,8 @@ test('correlate: full pipeline over the fixture tree', async () => {
   // Codex exec session: task_complete → done regardless of mtime.
   const execDone = bySid.get(CODEX_EXEC_DONE);
   assert.equal(execDone.state, 'done');
-  assert.equal(execDone.title, 'One-shot changelog');
-  assert.equal(execDone.titleSource, 'session-index');
+  assert.equal(execDone.title, '全局标题应胜过索引');
+  assert.equal(execDone.titleSource, 'global-state');
 
   // Codex pending session claimed by `codex resume <id>` on pid 4302.
   const pending = bySid.get(CODEX_PENDING);
@@ -122,11 +122,10 @@ test('correlate: full pipeline over the fixture tree', async () => {
   assert.equal(pending.activity, 'executing');
   assert.equal(pending.title, 'Investigate flaky tests (npm test)');
 
-  // No index entry → project+time fallback, never a raw path.
+  // Global-state description supplies the title when no index entry exists.
   const waiting = bySid.get(CODEX_WAITING);
-  assert.equal(waiting.titleSource, 'project-fallback');
-  assert.ok(waiting.title.startsWith('project-alpha · '));
-  assert.ok(!waiting.title.startsWith('/'));
+  assert.equal(waiting.title, '调研蓝牙切换模块');
+  assert.equal(waiting.titleSource, 'global-state');
 
   // Identity: same cwd → same projectId; distinct session ids.
   assert.equal(bySid.get(SID_IDLE).projectId, bySid.get(CODEX_WAITING).projectId);
