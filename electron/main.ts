@@ -403,7 +403,7 @@ let lastObservedSnapshot: ObservedSnapshot = { sessions: [], scannedAt: 0 };
 let selfPidTree: Set<number> = new Set([process.pid]);
 let selfPidTreeAt = 0;
 let selfPidTreeRefreshing = false;
-const SELF_PID_TREE_TTL_MS = 2_000;
+const SELF_PID_TREE_TTL_MS = 10_000;
 const SELF_PID_TREE_MAX_DEPTH = 8;
 
 function selfExclusionPids(): Set<number> {
@@ -432,10 +432,32 @@ function selfExclusionSessionIds(): Set<string> {
   return new Set();
 }
 
+// The fast tick produces a snapshot every ~2s; rebroadcasting identical
+// snapshots would repaint every observed card in every window for nothing.
+// Suppress unchanged snapshots (state/activity/title/lastActiveAt/pid/noise
+// compared; evidence strings and scannedAt excluded), with a 30s forced
+// republish so relative-age labels stay fresh.
+let lastObservedHash = '';
+let lastObservedForceAt = 0;
+const OBSERVED_FORCE_REPUBLISH_MS = 30_000;
+
+function observedSnapshotHash(snapshot: ObservedSnapshot): string {
+  return JSON.stringify(
+    snapshot.sessions.map((s) => [
+      s.id, s.state, s.activity, s.title, s.lastActiveAt, s.pid ?? 0, s.isNoise ? 1 : 0,
+    ]),
+  );
+}
+
 const observeService = new ObserveService({
   homeDir: homedir(),
   publish: (snapshot) => {
     lastObservedSnapshot = snapshot;
+    const hash = observedSnapshotHash(snapshot);
+    const force = Date.now() - lastObservedForceAt > OBSERVED_FORCE_REPUBLISH_MS;
+    if (hash === lastObservedHash && !force) return;
+    lastObservedHash = hash;
+    lastObservedForceAt = Date.now();
     // AhaBar tap: the same snapshot stream feeds the bar's 观察中 section.
     getCompanionFeed()?.onObservedSnapshot(snapshot);
     for (const win of BrowserWindow.getAllWindows()) {
