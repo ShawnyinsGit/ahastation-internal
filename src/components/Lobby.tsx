@@ -248,7 +248,7 @@ export function Lobby({ lastError, onEnterBoard, onReplayOnboarding }: LobbyProp
     await reloadBackends();
   }, [reloadBackends]);
 
-  const setDefaultWorkerBackend = useCallback(async (backendId: 'claude-code' | 'claude-code-terminal') => {
+  const setDefaultWorkerBackend = useCallback(async (backendId: string) => {
     const res = await window.vibeMeet.backendAuth.setDefaultWorkerBackend(backendId);
     if (!res.ok) {
       toast.error(res.error ?? '切换 Worker 执行模式失败');
@@ -381,14 +381,25 @@ export function Lobby({ lastError, onEnterBoard, onReplayOnboarding }: LobbyProp
                     className="join-auth-input join-auth-input-full lobby-backend-select"
                     value={currentBackend.defaultWorkerBackendId ?? 'claude-code-terminal'}
                     onChange={(e) => {
-                      void setDefaultWorkerBackend(e.target.value as 'claude-code' | 'claude-code-terminal');
+                      void setDefaultWorkerBackend(e.target.value);
                     }}
                   >
-                    <option value="claude-code-terminal">终端 TUI（RealTerminal）</option>
-                    <option value="claude-code">无头 Worker</option>
+                    {[
+                      { id: 'claude-code-terminal', label: '终端 TUI（Claude Code）' },
+                      { id: 'kimi-code-terminal', label: '终端 TUI（Kimi Code）' },
+                      { id: 'codex-terminal', label: '终端 TUI（Codex）' },
+                      { id: 'qoder-terminal', label: '终端 TUI（Qoder）' },
+                      { id: 'claude-code', label: '无头 Worker' },
+                    ]
+                      .filter((opt) =>
+                        backends.some((b) => b.id === opt.id)
+                        || opt.id === (currentBackend.defaultWorkerBackendId ?? 'claude-code-terminal'))
+                      .map((opt) => (
+                        <option key={opt.id} value={opt.id}>{opt.label}</option>
+                      ))}
                   </select>
                   <div className="join-auth-hint">
-                    {'终端模式在 Stage → Terminal 标签中显示可交互的 Claude TUI；无头模式在后台执行，仅回放命令日志。'}
+                    {'终端模式在 Stage → Terminal 标签中显示可交互的 TUI（Claude / Kimi）；无头模式在后台执行，仅回放命令日志。'}
                   </div>
                 </div>
               )}

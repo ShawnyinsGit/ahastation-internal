@@ -88,6 +88,7 @@ import {
 import type { DeliveryHarness, DeliveryView } from './delivery-harness.js';
 import { reopenFrozenDeliveryCandidateForRework } from './delivery-candidate.js';
 import { TERMINAL_WORKER_COMPLETION_INSTRUCTION } from './backends/claude-terminal-adapter.js';
+import { isTerminalWorkerBackend } from './backends/terminal-cli-adapter.js';
 import {
   parseWorkerAdapterSignal,
   reworkRequestSchema,
@@ -285,8 +286,8 @@ const COMPUTER_USE_WORKER_PROMPT = `
 - 不要在 screenshot 中暴露或朗读用户的敏感信息`;
 
 /** Terminal-mode workers run a human-supervised interactive TUI; several
- *  automatic escalations (tier-3 stall restart) are disabled for them. */
-const TERMINAL_WORKER_BACKEND_ID = 'claude-code-terminal';
+ *  automatic escalations (tier-3 stall restart) are disabled for them.
+ *  Membership test lives in terminal-cli-adapter.isTerminalWorkerBackend. */
 
 const WORK_REPORT_RECOVERY_MESSAGE = [
   '[AhaStation protocol correction]',
@@ -1973,14 +1974,14 @@ export class WorkerScheduler {
         // writing), so the whole stall chain (nudge -> stalled -> auto-restart)
         // does not apply. The nudge in particular must not fire: it pastes a
         // prompt into the TUI that Claude treats as new user input.
-        if (handle.backendId === TERMINAL_WORKER_BACKEND_ID) continue;
+        if (isTerminalWorkerBackend(handle.backendId)) continue;
         if (handle.stallNotified) {
           // Tier-3: the tier-2 escalation already fired for this idle stretch.
           // If the worker stays silent one more STALL_THRESHOLD_MS past that
           // mark, restart the attempt automatically (once per attempt).
           // Terminal-mode workers are exempt: their pace is supervised by the
           // human at the stage terminal, so a quiet TUI is never auto-failed.
-          if (handle.backendId !== TERMINAL_WORKER_BACKEND_ID) {
+          if (!isTerminalWorkerBackend(handle.backendId)) {
             this.maybeAutoRestartStalledWorker(handle, now);
           }
           continue;
@@ -3543,7 +3544,7 @@ export class WorkerScheduler {
     // emit ended(completed)/failed(missing-work-report) themselves; a recovery
     // prompt here would be pasted into the TUI and a rework would kill the
     // pty. Skip both - the confirm bar remains the human fallback.
-    if (handle.backendId === TERMINAL_WORKER_BACKEND_ID) return false;
+    if (isTerminalWorkerBackend(handle.backendId)) return false;
     if (this.hasWorkReportRecovery(handle)) return false;
 
     const message = await mailbox.enqueue({
@@ -3588,7 +3589,7 @@ export class WorkerScheduler {
   private async beginReportRecoveryRework(handle: WorkerHandle): Promise<boolean> {
     if (handle.reportRecoveryReworked) return false;
     if (handle.status !== 'running') return false;
-    if (handle.backendId === TERMINAL_WORKER_BACKEND_ID) return false;
+    if (isTerminalWorkerBackend(handle.backendId)) return false;
     const mailbox = this.opts.taskMailbox;
     if (!mailbox) return false;
     handle.reportRecoveryReworked = true;
@@ -4437,7 +4438,7 @@ export class WorkerScheduler {
       const mailboxLine = initialMailboxMessage
         ? `\n\n(follow-up attempt ${handle.attempt}) ${this.messageText(initialMailboxMessage)}`
         : '';
-      const terminalSuffix = handle.backendId === TERMINAL_WORKER_BACKEND_ID
+      const terminalSuffix = isTerminalWorkerBackend(handle.backendId)
         ? TERMINAL_WORKER_COMPLETION_INSTRUCTION
         : '';
       try {

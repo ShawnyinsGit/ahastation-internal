@@ -22,6 +22,7 @@ import type {
 } from '../types';
 import type { StageWindow, StageWindowType } from '../lib/stage-window-store';
 import { computeWorkerCapacity } from '../lib/worker-capacity';
+import { isTerminalWorkerBackendId } from '../lib/terminal-backends';
 import { FileViewer } from './FileViewer';
 import { BrowserStage } from './BrowserStage';
 import { StageTabBar } from './StageTabBar';
@@ -215,7 +216,7 @@ export const ScreenStage = memo(function ScreenStage({
     for (const w of workers) {
       if (w.role !== 'worker') continue;
       if (w.status !== 'running') continue;
-      if (w.backendId !== 'claude-code-terminal') continue;
+      if (!isTerminalWorkerBackendId(w.backendId)) continue;
       if (autoOpenedTerminals.current.has(w.id)) continue;
       autoOpenedTerminals.current.add(w.id);
       void onCreateWindow('terminal', { workerId: w.id, title: w.title });
@@ -295,7 +296,7 @@ export const ScreenStage = memo(function ScreenStage({
     const target = workers.find(
       (w) => w.id === activeWindow.workerId || w.hostId === activeWindow.workerId,
     );
-    return target?.backendId === 'claude-code-terminal' ? target : undefined;
+    return isTerminalWorkerBackendId(target?.backendId) ? target : undefined;
   }, [activeWindow, workers]);
 
   // When the terminal worker's own delivery arrives, show it in the workbench
