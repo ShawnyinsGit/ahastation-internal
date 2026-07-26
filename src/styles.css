@@ -12484,7 +12484,10 @@ html.ahabar-view #root {
   padding: 6px;
   height: 100%;
   box-sizing: border-box;
-  -webkit-app-region: drag;
+  /* Hover drives the Dynamic-Island expansion, and macOS drag regions
+     swallow mouseenter/click — so the root is no-drag and the drag handle
+     lives only on the non-interactive pill grip below. */
+  -webkit-app-region: no-drag;
   font-family: var(--font-sans, system-ui, sans-serif);
   color: #f2f2f7;
 }
@@ -12511,10 +12514,17 @@ html.ahabar-view #root {
   border-radius: 50%;
   background: #30d158;
   flex-shrink: 0;
+  /* Non-interactive grip: drag the bar by the status zone only. */
+  -webkit-app-region: drag;
 }
 .ahabar-root.has-pending .ahabar-dot { background: #E8730C; }
 
-.ahabar-running { font-size: 12px; font-weight: 600; white-space: nowrap; }
+.ahabar-running {
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  -webkit-app-region: drag;
+}
 .ahabar-pending-badge {
   font-size: 11px;
   font-weight: 600;
