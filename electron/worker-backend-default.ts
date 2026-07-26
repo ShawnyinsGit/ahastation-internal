@@ -5,12 +5,19 @@ import { getSettings } from './store.js';
  *  backend (coordinator) stays separate — e.g. claude-code talker with
  *  claude-code-terminal workers. */
 export function resolveDefaultWorkerBackendId(hostBackendId: string): string {
-  // Workers are forced to the interactive TUI backend when available. The
-  // headless claude-code path stays reserved for the host/coordinator (which
-  // needs coordinate:true); workers always run as supervised TUIs. If the
-  // terminal backend is unavailable, fall back to the host backend so
-  // validateExecutionBackends can surface a clear error instead of silently
-  // running headless.
+  // Honor the user's configured worker backend when it is registered and can
+  // execute tasks (e.g. 'kimi-code-terminal' for Kimi TUI workers).
+  const configured = getSettings().defaultWorkerBackendId;
+  if (configured) {
+    const backend = getBackendRegistry().get(configured);
+    if (backend?.capabilities.executeTasks) return configured;
+  }
+  // Workers are otherwise forced to the interactive TUI backend when
+  // available. The headless claude-code path stays reserved for the
+  // host/coordinator (which needs coordinate:true); workers run as
+  // supervised TUIs. If the terminal backend is unavailable, fall back to
+  // the host backend so validateExecutionBackends can surface a clear error
+  // instead of silently running headless.
   const terminal = getBackendRegistry().get('claude-code-terminal');
   if (terminal?.capabilities.executeTasks) return 'claude-code-terminal';
   return hostBackendId;

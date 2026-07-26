@@ -7,6 +7,9 @@
 import type { CliBackend, BackendAuthConfig } from './cli-backend.js';
 import { ClaudeCodeBackend } from './claude-code-adapter.js';
 import { ClaudeTerminalBackend } from './claude-terminal-adapter.js';
+import { KimiTerminalBackend } from './kimi-terminal-adapter.js';
+import { CodexTerminalBackend } from './codex-terminal-adapter.js';
+import { QoderTerminalBackend } from './qoder-terminal-adapter.js';
 import { CodexBackend } from './codex-adapter.js';
 import { KimiBackend } from './kimi-adapter.js';
 import { QoderBackend } from './qoder-adapter.js';
@@ -162,9 +165,12 @@ export function getBackendRegistry(confirmDestructive?: ConfirmDestructive): Bac
     // Register all known backends. Order determines default selection.
     instance.register(new ClaudeCodeBackend({ confirmDestructive }));
     instance.register(new ClaudeTerminalBackend());
+    instance.register(new KimiTerminalBackend());
     instance.register(new CodexBackend());
+    instance.register(new CodexTerminalBackend());
     instance.register(new KimiBackend());
     instance.register(new QoderBackend());
+    instance.register(new QoderTerminalBackend());
     instance.register(new OpenCodeBackend());
     instance.register(new PocketVibeBackend());
   }

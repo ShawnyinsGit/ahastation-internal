@@ -1,6 +1,7 @@
 import type { BackendInfo, PlanMeetingTaskInput } from '../types';
 import { draftDependencyGate } from './dependency-gate.ts';
 import { DEFAULT_TASK_BUDGET } from './task-budget.ts';
+import { TERMINAL_WORKER_BACKEND_IDS } from './terminal-backends.ts';
 
 export function normalizePlanDraft(
   task: PlanMeetingTaskInput,
@@ -75,10 +76,21 @@ export function isWorkerBackendReady(backend: BackendInfo | undefined): boolean 
 }
 
 export function resolvePlanDefaultWorkerBackendId(backends: BackendInfo[]): string {
-  // Workers are forced to the interactive TUI backend when ready; the headless
-  // path is reserved for the host/coordinator.
-  const terminal = backends.find((backend) => backend.id === 'claude-code-terminal');
-  if (terminal && isWorkerBackendReady(terminal)) return 'claude-code-terminal';
+  // The persisted worker-backend choice (surfaced on the claude-code entry as
+  // effectiveDefaultWorkerBackendId) wins when that backend is ready.
+  const configuredId = backends.find(
+    (backend) => backend.effectiveDefaultWorkerBackendId,
+  )?.effectiveDefaultWorkerBackendId;
+  if (configuredId) {
+    const configured = backends.find((backend) => backend.id === configuredId);
+    if (configured && isWorkerBackendReady(configured)) return configuredId;
+  }
+  // Workers otherwise default to a ready interactive TUI backend; the
+  // headless path is reserved for the host/coordinator.
+  for (const id of TERMINAL_WORKER_BACKEND_IDS) {
+    const terminal = backends.find((backend) => backend.id === id);
+    if (terminal && isWorkerBackendReady(terminal)) return id;
+  }
   const host = backends.find((backend) => backend.isDefault);
   const hostId = host?.id ?? backends[0]?.id ?? '';
   return backends.find(isWorkerBackendReady)?.id ?? hostId;

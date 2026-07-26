@@ -1005,7 +1005,7 @@ export interface BackendInfo {
   /** Active Claude Code CLI source when id is claude-code. */
   claudeCodeCliSource?: 'bundled' | 'system' | null;
   /** Persisted default worker executor when Host is claude-code. */
-  defaultWorkerBackendId?: 'claude-code' | 'claude-code-terminal' | null;
+  defaultWorkerBackendId?: string | null;
   /** Resolved worker executor default (claude-code entry only). */
   effectiveDefaultWorkerBackendId?: string | null;
   /** Bundled Claude Code version (claude-code only). */
@@ -1043,7 +1043,7 @@ export interface BackendAuthApi {
   setAvatar: (backendId: string, dataUrl: string | null) => Promise<{ ok: boolean; error?: string }>;
   setDefault: (backendId: string) => Promise<{ ok: boolean; error?: string }>;
   setClaudeCliSource: (source: 'bundled' | 'system') => Promise<{ ok: boolean; error?: string }>;
-  setDefaultWorkerBackend: (backendId: 'claude-code' | 'claude-code-terminal') => Promise<{ ok: boolean; error?: string }>;
+  setDefaultWorkerBackend: (backendId: string) => Promise<{ ok: boolean; error?: string }>;
   checkStatus: (backendId: string) => Promise<{ ok: boolean; loggedIn: boolean; error?: string }>;
   loginOAuth: (backendId: string) => Promise<{ ok: boolean; error?: string }>;
   install: (backendId: string) => Promise<{ ok: boolean; error?: string }>;

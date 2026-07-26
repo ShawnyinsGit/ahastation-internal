@@ -343,13 +343,18 @@ export function registerBackendAuthIpc(): void {
     }
   });
 
-  /** Default executor backend for worker tasks (claude-code vs claude-code-terminal). */
+  /** Default executor backend for worker tasks (any registered backend that
+   *  can execute tasks, e.g. claude-code / claude-code-terminal /
+   *  kimi-code-terminal). */
   ipcMain.handle('backend-auth:set-default-worker-backend', async (_e, backendId: unknown) => {
-    if (backendId !== 'claude-code' && backendId !== 'claude-code-terminal') {
-      return { ok: false, error: 'backendId must be "claude-code" or "claude-code-terminal"' };
+    if (typeof backendId !== 'string' || !/^[a-z0-9._-]{1,100}$/i.test(backendId)) {
+      return { ok: false, error: 'backendId must be a registered backend id string' };
     }
     const backend = getBackendRegistry().get(backendId);
-    if (!backend?.capabilities.executeTasks) {
+    if (!backend) {
+      return { ok: false, error: `backend '${backendId}' is not registered` };
+    }
+    if (!backend.capabilities.executeTasks) {
       return { ok: false, error: `backend '${backendId}' cannot execute worker tasks` };
     }
     try {

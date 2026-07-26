@@ -30,6 +30,7 @@ import { TaskMailboxPanel } from './TaskMailboxPanel';
 import { TaskProfilePanel } from './TaskProfilePanel';
 import { TaskReviewPanel } from './TaskReviewPanel';
 import { TerminalTurnConfirmBar } from './TerminalTurnConfirmBar';
+import { isTerminalWorkerBackendId } from '../lib/terminal-backends';
 
 const TASK_INSPECTOR_TABS = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
@@ -43,8 +44,6 @@ const TASK_INSPECTOR_TABS = [
 ] as const;
 
 type InspectorTab = (typeof TASK_INSPECTOR_TABS)[number]['id'];
-
-const TERMINAL_WORKER_BACKEND_ID = 'claude-code-terminal';
 
 const STATUS_LABEL: Record<string, string> = {
   draft: '草稿',
@@ -371,7 +370,7 @@ export function TaskInspector({
         {projection?.needsRefresh && <span className="task-refresh-pill">正在刷新事件缺口</span>}
       </div>
 
-      {worker?.backendId === TERMINAL_WORKER_BACKEND_ID && (
+      {worker && isTerminalWorkerBackendId(worker.backendId) && (
         <TerminalTurnConfirmBar sessionId={sessionId} worker={worker} />
       )}
 
